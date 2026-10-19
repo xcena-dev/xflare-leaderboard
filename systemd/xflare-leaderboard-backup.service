@@ -1,0 +1,14 @@
+[Unit]
+Description=xflare leaderboard backup (SQLite online backup + raw files to NAS)
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sw-devops
+WorkingDirectory=/home/sw-devops/xflare-leaderboard
+ExecStart=/usr/bin/python3 /home/sw-devops/xflare-leaderboard/leaderboard/backup.py backup \
+    --data /home/sw-devops/data/xflare_leaderboard \
+    --dest /mnt/sw_nas_ext/public/xcena_xflare_leaderboard_backup \
+    --mount /mnt/sw_nas_ext \
+    --keep 14

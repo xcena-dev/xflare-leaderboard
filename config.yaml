@@ -1,0 +1,17 @@
+# xflare TPC-H leaderboard service settings. XFLARE_LEADERBOARD_DATA overrides storage.data_dir;
+# XFLARE_LEADERBOARD_CONFIG points the service at another copy of this file.
+server:
+  port: 8894
+  bind: 0.0.0.0
+
+leaderboard:
+  title: XFLARE TPC-H Leaderboard
+  description: Submitted spark-tpch.sh runs ranked by xflare total (sum of per-query medians) with the same-run Velox speedup
+  color: "#14B8A6"
+  storage:
+    # Local disk, created once by the operator (see README); never inside this checkout.
+    data_dir: /home/sw-devops/data/xflare_leaderboard
+  tabs: ["100", "1000"]
+  # The board's first filter; the hero is the first Total-eligible run under it, or, when none matches, the
+  # tab's fastest in any configuration (A3).
+  default_filter: { executors: 4, executor_cores: 6 }

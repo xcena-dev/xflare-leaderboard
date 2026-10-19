@@ -1,0 +1,262 @@
+{#- Every value below that came from a submission is printed through Jinja
+    autoescape; nothing here is marked safe. Uploaded scalars go through v (cut
+    to SCALAR_CHARS), long-form texts through lb_text (`chars`), lists are cut to
+    `limit` items; the raw JSON download has the rest. -#}
+{%- from "leaderboard_macros.html" import v, more -%}
+{%- set limit, chars = lb_budget.preview_items, lb_budget.preview_chars -%}
+{%- set run = m.run -%}
+{%- set env = meta.environment or {} -%}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Run {{ row.run_id[:8] }} — {{ benchmark.title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='leaderboard.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body data-page="run">
+<header class="lb-header">
+  <h1><a href="{{ url_for('leaderboard.board_page') }}">{{ benchmark.title }}</a> / run {{ row.run_id[:8] }}</h1>
+  <div class="lb-meta">
+    <a class="lb-btn" href="{{ url_for('leaderboard.api_raw', run_id=row.run_id) }}">⤓ raw manifest (JSON)</a>
+    {% if not summary.withdrawn %}
+    <button id="lb-withdraw" class="lb-btn" type="button">withdraw…</button>
+    {% endif %}
+  </div>
+</header>
+
+<main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
+  {% if summary.withdrawn %}
+  <p class="lb-banner">
+    Withdrawn {{ v(summary.withdrawal.at) }} by {{ v(summary.withdrawal.actor) }} — {{ v(summary.withdrawal.reason) }}.
+    이 run 은 순위와 hero 에서 빠집니다.
+  </p>
+  {% endif %}
+
+  <section class="lb-panel">
+    <h3>SF-{{ v(d.sf) }} · {{ v(d.config_label) }}</h3>
+    {% if d.total_eligible %}
+    <div class="lb-stats">
+      <div class="lb-stat"><span class="lb-stat-label">Xflare total</span><span class="lb-stat-val">{{ d.totals.xflare_ms | lb_ms }}</span></div>
+      <div class="lb-stat"><span class="lb-stat-label">Velox total (same run)</span><span class="lb-stat-val">{{ d.totals.velox_ms | lb_ms }}</span></div>
+      <div class="lb-stat"><span class="lb-stat-label">Speedup (velox / xflare)</span><span class="lb-stat-val">{{ d.totals.speedup | lb_x }}</span></div>
+    </div>
+    {% else %}
+    {% set reasons = d.ineligible_reasons.total or [] %}
+    <p class="lb-note">Total 순위 대상이 아닙니다{% if reasons %}:{% endif %}</p>
+    <ul class="lb-reasons">
+      {% for r in reasons[:limit] %}<li>{{ v(r) }}</li>{% endfor %}
+      {{ more(reasons, limit, 'li') }}
+    </ul>
+    {% endif %}
+    <p class="lb-badges">{% for b in d.badges %}<span class="lb-badge">{{ v(b) }}</span>{% endfor %}</p>
+    <dl class="lb-kv">
+      <dt>run_id</dt><dd><code>{{ row.run_id }}</code></dd>
+      <dt>content_id</dt><dd><code>{{ row.content_id }}</code></dd>
+      <dt>Submitter</dt><dd>{{ v((meta.submitter or {}).email) }}{% if (meta.submitter or {}).sdp_id %} ({{ v(meta.submitter.sdp_id) }}){% endif %}</dd>
+      <dt>Note</dt><dd class="lb-pre-line">{{ meta.note | lb_text if meta.note else '—' }}</dd>
+      <dt>Isolation</dt><dd>{{ v(meta.isolation_claim) }}</dd>
+      <dt>Producer</dt><dd>{{ v(meta.producer) }}</dd>
+      <dt>Run</dt><dd>{{ v(run.started_at) }} → {{ v(run.finished_at) }} · exit {{ v(run.exit_status) }}</dd>
+      <dt>Repeats</dt><dd>{{ d.repeats_completed }} completed / {{ v(run.repeat_requested) }} requested · record_answers {{ run.record_answers }}</dd>
+      <dt>Engines</dt><dd>{{ run.engines | join(', ') }} · codec {{ v(run.codec) }}</dd>
+      <dt>Answers</dt><dd>{{ v((run.answers or {}).path) }} · sha256 {{ v((run.answers or {}).sha256) }}</dd>
+      <dt>Dataset</dt><dd>{{ v((run.dataset or {}).uri) }} · marker {{ v((run.dataset or {}).marker) }}</dd>
+    </dl>
+  </section>
+
+  <section class="lb-panel">
+    <h3>Per-query medians</h3>
+    <div class="chart-tools">
+      <label><input type="checkbox" id="run-log"> log scale</label>
+      <span class="chart-note">eligible 이 아닌 쿼리는 막대가 없습니다</span>
+    </div>
+    <div class="lb-chart"><canvas id="run-chart"></canvas></div>
+    {#- Causes shared by every query are listed once here, not on each row. -#}
+    {% set common = d.ineligible_reasons.common or [] %}
+    {% if common %}
+    <p class="lb-note">모든 쿼리가 순위 대상이 아닙니다:</p>
+    <ul class="lb-reasons" id="common-reasons">
+      {% for r in common[:limit] %}<li>{{ v(r) }}</li>{% endfor %}
+      {{ more(common, limit, 'li') }}
+    </ul>
+    {% endif %}
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table">
+        <thead><tr>
+          <th>Query</th><th class="num">Xflare</th><th class="num">Velox</th><th class="num">Speedup</th>
+          <th class="num">n</th><th>Xflare samples</th><th>Velox samples</th><th>Not eligible because</th>
+        </tr></thead>
+        <tbody>
+        {% for p in per_query %}
+          {% set xs, vs = p.xflare_samples or [], p.velox_samples or [] %}
+          {% set why = d.ineligible_reasons['q' ~ p.q] or [] %}
+          <tr class="{{ '' if p.eligible else 'lb-ineligible' }}">
+            <td>Q{{ p.q }}</td>
+            <td class="num">{{ p.xflare_ms | lb_ms }}</td>
+            <td class="num">{{ p.velox_ms | lb_ms }}</td>
+            <td class="num">{{ p.speedup | lb_x }}</td>
+            <td class="num">{{ v(p.n) }}</td>
+            <td>{{ xs[:limit] | map('lb_ms') | join(', ') }}{{ more(xs, limit, 'span') }}</td>
+            <td>{{ vs[:limit] | map('lb_ms') | join(', ') }}{{ more(vs, limit, 'span') }}</td>
+            <td class="lb-wrap-cell">{{ why[:limit] | map('lb_cut') | join('; ') }}{{ more(why, limit, 'span') }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="lb-panel">
+    <h3>Repeats</h3>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table">
+        <thead><tr>
+          <th>#</th><th>Status</th><th>Cleanup</th><th>App</th><th>Artifact</th><th>Bundle</th>
+          <th>Started</th><th>Finished</th><th>Invocation</th>
+        </tr></thead>
+        <tbody>
+        {% for r in repeats[:limit] %}
+          <tr>
+            <td>{{ v(r.index) }}</td><td>{{ v(r.status) }}</td><td>{{ v(r.cleanup) }}</td><td>{{ v(r.app_id) }}</td>
+            <td>{{ v(r.artifact_id) }}</td><td>{{ v(r.bundle) }}</td><td>{{ v(r.started_at) }}</td>
+            <td>{{ v(r.finished_at) }}</td><td class="lb-wrap-cell"><code>{{ v(r.invocation) }}</code></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {{ more(repeats, limit) }}
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table lb-matrix">
+        <thead><tr>
+          <th>Query</th>
+          {% for r in matrix_repeats %}<th class="num">r{{ v(r.index) }} xflare</th><th class="num">r{{ v(r.index) }} velox</th>{% endfor %}
+        </tr></thead>
+        <tbody>
+        {% for row_ in matrix %}
+          <tr>
+            <td>Q{{ row_.q }}</td>
+            {% for c in row_.cells %}
+              {% if c is none %}<td class="num lb-dim">—</td>
+              {% elif c.status == 'ok' and c.verify == 'ok' %}<td class="num">{{ c.ms | lb_ms }}</td>
+              {% else %}<td class="num lb-warn-cell" title="status {{ v(c.status) }} · verify {{ v(c.verify) }}">{{ c.ms | lb_ms }} · {{ v(c.status) }}/{{ v(c.verify) }}</td>
+              {% endif %}
+            {% endfor %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {{ more(repeats, matrix_repeats | length) }}
+  </section>
+
+  <section class="lb-panel">
+    <h3>How to reproduce</h3>
+    {% if repro.command is not none %}
+    <div class="lb-repro">
+      <pre id="repro-cmd">{{ repro.command }}</pre>
+      <button type="button" id="repro-copy" class="lb-btn">copy</button>
+    </div>
+    {% else %}
+    <p class="lb-note">
+      {%- if repro.omitted == 'entries' %}argv 항목이 너무 많습니다 ({{ repro.argc }} entries, 한도 {{ repro.max_args }})
+      {%- elif repro.omitted == 'length' %}명령이 너무 깁니다 ({{ repro.length }} characters, 한도 {{ repro.max_chars }})
+      {%- elif repro.omitted == 'unparsed' %}argv 를 spark-tpch.sh 의 옵션으로 읽지 못했습니다 (모르는 옵션, 값이 빠진 옵션, query id 가 아닌 인자 또는 --)
+      {%- else %}명령을 만들지 않았습니다 ({{ v(repro.omitted) }})
+      {%- endif %} — 명령은 raw JSON 의 run.argv 에서 만드세요.</p>
+    {% endif %}
+    <ul class="lb-notes">{% for n in repro.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+    <details>
+      <summary>argv ({{ run.argv | length }})</summary>
+      <ol class="lb-argv">{% for a in run.argv[:limit] %}<li><code>{{ v(a) }}</code></li>{% endfor %}</ol>
+      {{ more(run.argv, limit) }}
+    </details>
+  </section>
+
+  <section class="lb-panel">
+    <h3>Xflare overrides</h3>
+    {% set overrides = run.xflare_overrides or [] %}
+    {% if overrides %}
+    <table class="cmp-table lb-table">
+      <thead><tr><th>Key</th><th>Value</th><th>Source</th><th>Destination</th></tr></thead>
+      <tbody>
+      {% for o in overrides[:limit] %}
+        <tr><td><code>{{ v(o.key) }}</code></td><td><code>{{ v(o.value) }}</code></td><td>{{ v(o.source) }}</td><td>{{ v(o.destination) }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {{ more(overrides, limit) }}
+    {% else %}<p class="lb-note">none</p>{% endif %}
+  </section>
+
+  <section class="lb-panel">
+    {% set toml = run.xflare_toml %}
+    <h3>Resource toml — {{ v(toml.name) }}</h3>
+    <dl class="lb-kv">
+      <dt>input sha256</dt><dd><code>{{ v(toml.input_sha256) }}</code></dd>
+      <dt>sent sha256</dt><dd><code>{{ v(toml.sent_sha256) }}</code></dd>
+      <dt>rendered sha256</dt><dd><code>{{ v(toml.rendered_sha256) }}</code></dd>
+    </dl>
+    {% if toml_diff is none %}
+    <p class="lb-note">rendered toml 이 기록되지 않았습니다.</p>
+    {% elif toml_diff == 'too large' %}
+    <p class="lb-note">too large to diff — see raw JSON (run.xflare_toml).</p>
+    {% elif not toml_diff %}
+    <p class="lb-note">input 과 rendered 가 같습니다.</p>
+    {% else %}
+    <pre class="lb-diff">{% for kind, line in toml_diff %}<span class="d-{{ kind }}">{{ line }}</span>
+{% endfor %}</pre>
+    {% endif %}
+    {% for label, text in [('input (template as read)', toml.input_text), ('rendered (what the run read)', toml.rendered_text)] if text is not none %}
+    <details><summary>{{ label }}</summary><pre class="lb-code">{{ text | lb_text }}</pre>
+      {% if text | length > chars %}<p class="lb-more">{{ text | length - chars }} more characters — see raw JSON</p>{% endif %}
+    </details>
+    {% endfor %}
+  </section>
+
+  <section class="lb-panel">
+    <h3>Build</h3>
+    {% set build = m.build %}{% set bundle = build.bundle or {} %}{% set gluten = build.gluten or {} %}
+    <dl class="lb-kv">
+      <dt>Client</dt><dd><code>{{ v(m.client.revision) }}</code> · branch {{ v(m.client.branch) }} · dirty {{ v(m.client.dirty) }}{% if m.client.dirty_digest %} ({{ v(m.client.dirty_digest) }}){% endif %}</dd>
+      <dt>Artifact</dt><dd>{{ v(build.artifact_id) }} · provenance {{ v(build.provenance_source) }}</dd>
+      <dt>Build revision</dt><dd><code>{{ v(build.revision) }}</code> · dirty {{ v(build.dirty) }}{% if build.dirty_digest %} ({{ v(build.dirty_digest) }}){% endif %}</dd>
+      <dt>Bundle</dt><dd>{{ v(bundle.resolved) }} (requested {{ v(bundle.requested) }}, kind {{ v(bundle.kind) }})</dd>
+      <dt>Gluten</dt><dd>{{ v(gluten.commit) }} · dirty {{ v(gluten.dirty) }}{% if gluten.build_command %} · <code>{{ gluten.build_command | lb_text }}</code>{% endif %}</dd>
+      {#- Only the contract's resource fields; extension keys stay in the detail API / raw JSON. -#}
+      <dt>Resources</dt><dd>{% for k in ('executors', 'executor_cores', 'offheap', 'shuffle_partitions', 'devices') %}{{ k }}={{ v(run.resources[k]) }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+    </dl>
+  </section>
+
+  <section class="lb-panel">
+    <h3>Environment</h3>
+    {% set overlapping = env.overlapping or [] %}
+    {% set devices = env.devices or [] %}
+    <dl class="lb-kv">
+      <dt>Source</dt><dd>{{ v(env.source) }} · observed {{ v(env.observed_at) }}</dd>
+      <dt>Host</dt><dd>{{ v(env.host) }}</dd>
+      <dt>SDK / PXL</dt><dd>{{ v(env.sdk) }} / {{ v(env.pxl) }}</dd>
+      <dt>Reservation</dt><dd>{% if env.reservation %}{{ v(env.reservation.id) }} · {{ v(env.reservation.owner) }} · {{ v(env.reservation.start) }} → {{ v(env.reservation.end) }}{% else %}—{% endif %}</dd>
+      <dt>Booking overlap</dt><dd>{{ v(env.booking_overlap) }}{% for o in overlapping[:limit] %}{{ ': ' if loop.first else ', ' }}{{ v(o.owner) }} {{ v(o.start) }} → {{ v(o.end) }}{% endfor %}{{ more(overlapping, limit, 'span') }}</dd>
+      <dt>CPU contention</dt><dd>{{ v(env.cpu_contention) }}</dd>
+    </dl>
+    {% if devices %}
+    <table class="cmp-table lb-table">
+      <thead><tr><th>Device</th><th>Serial</th><th>Type</th><th>FW</th></tr></thead>
+      <tbody>
+      {% for dev in devices[:limit] %}
+        <tr><td>{{ v(dev.id) }}</td><td>{{ v(dev.serial) }}</td><td>{{ v(dev.type) }}</td><td>{{ v(dev.fw) }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {{ more(devices, limit) }}
+    {% endif %}
+  </section>
+</main>
+
+<script type="application/json" id="lb-run-data">{{ chart | tojson }}</script>
+<script src="{{ url_for('static', filename='leaderboard.js') }}"></script>
+</body>
+</html>

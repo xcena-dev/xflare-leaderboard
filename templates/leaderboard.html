@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>{{ benchmark.title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='leaderboard.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body data-page="board">
+<header class="lb-header">
+  <h1>{{ benchmark.title }}</h1>
+  <div class="lb-meta">
+    <span id="lb-updated">—</span>
+    <button id="lb-refresh" type="button">⟳ refresh</button>
+  </div>
+</header>
+
+<main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
+  <p class="lb-desc">{{ benchmark.description or '' }}</p>
+
+  <nav class="lb-tabs" id="lb-sf-tabs" aria-label="Scale factor"></nav>
+  <p class="lb-status" id="lb-status" hidden></p>
+
+  <section class="lb-panel lb-hero" aria-labelledby="hero-title">
+    <div class="lb-hero-head">
+      <h3 id="hero-title">Hero</h3>
+      <a id="hero-link" href="#" hidden>run detail →</a>
+    </div>
+    <p class="lb-hero-notice" id="hero-notice" hidden></p>
+    <p class="lb-empty" id="hero-empty" hidden>이 SF 탭에 Total-eligible run 이 아직 없습니다.</p>
+    <div id="hero-body" hidden>
+      <p class="lb-hero-config" id="hero-config" hidden></p>
+      <div class="lb-stats">
+        <div class="lb-stat"><span class="lb-stat-label">Xflare total</span><span class="lb-stat-val" id="hero-xflare"></span></div>
+        <div class="lb-stat"><span class="lb-stat-label">Velox total (same run)</span><span class="lb-stat-val" id="hero-velox"></span></div>
+        <div class="lb-stat"><span class="lb-stat-label">Speedup (velox / xflare)</span><span class="lb-stat-val" id="hero-speedup"></span></div>
+      </div>
+      <dl class="lb-kv" id="hero-meta"></dl>
+      <div class="chart-tools">
+        <label><input type="checkbox" id="hero-log"> log scale</label>
+        <span class="chart-note">per-query median (ms), 같은 run 의 xflare vs velox</span>
+      </div>
+      <div class="lb-chart"><canvas id="hero-chart"></canvas></div>
+    </div>
+  </section>
+
+  <section class="controls lb-filters" id="lb-filters" aria-label="Filters">
+    <span class="lb-filter-slot" data-key="executors" data-label="executors"></span>
+    <span class="lb-filter-slot" data-key="executor_cores" data-label="cores"></span>
+    <span class="lb-filter-slot" data-key="offheap" data-label="offheap"></span>
+    <span class="lb-filter-slot" data-key="shuffle_partitions" data-label="shuffle"></span>
+    <span class="lb-filter-slot" data-key="devices" data-label="devices"></span>
+    <span class="lb-filter-slot" data-key="toml" data-label="toml"></span>
+    <span class="lb-filter-slot" data-key="bundle" data-label="bundle"></span>
+    <span class="lb-filter-slot" data-key="device" data-label="device"></span>
+    <span class="lb-filter-slot" data-key="submitter" data-label="submitter"></span>
+    <span class="lb-filter-slot" data-key="badge" data-label="badge"></span>
+    <label class="date-range">기간:
+      <input type="date" id="lb-from" title="finished_at 이 날짜부터 (포함)">
+      <span class="range-sep">~</span>
+      <input type="date" id="lb-to" title="finished_at 이 날짜까지 (포함)">
+    </label>
+    <label>Top:
+      <select id="lb-top">
+        <option value="5">5</option>
+        <option value="10" selected>10</option>
+        <option value="25">25</option>
+      </select>
+    </label>
+    <button type="button" id="lb-reset" class="lb-btn">기본 필터로</button>
+  </section>
+  <p class="lb-note" id="lb-facets-note" hidden>필터 목록은 값이 많아 일부만 보입니다 (항목당 {{ lb_budget.facet_values }}개, 긴 값은 잘림) — 전체는 /api/leaderboard/runs 로 보세요.</p>
+
+  <section class="lb-panel">
+    <nav class="lb-tabs lb-metric-tabs" id="lb-metric-tabs" aria-label="Metric"></nav>
+    <p class="lb-note" id="lb-board-note"></p>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-board" id="lb-board">
+        <thead>
+          <tr>
+            <th class="num">#</th><th>Run (finished, UTC)</th><th class="num">Xflare</th><th class="num">Velox</th>
+            <th class="num">Speedup</th><th class="num">Repeats</th><th>Config</th><th>Device</th>
+            <th>Submitter</th><th>Badges</th><th>Repro</th><th>Compare</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="lb-compare-bar">
+      <button type="button" id="lb-compare" class="lb-btn" disabled>선택한 run 비교 (2–4)</button>
+    </div>
+  </section>
+</main>
+
+<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars} | tojson }}</script>
+<script src="{{ url_for('static', filename='leaderboard.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,616 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xflare-bench-manifest-1.schema.json",
+  "title": "xflare-bench-manifest/1",
+  "description": "README §1 manifest, written by spark-tpch.sh --submission. Documentation for producers: the service's stdlib validator (leaderboard/schema.py) is authoritative. Rules this schema cannot express: repeats[].index must be unique and <= run.repeat_requested; query ids unique within one repeat; times must be real calendar dates; integers must not be written as 1.0; the whole document nests at most 64 objects/arrays deep; unknown properties inside the manifest are accepted with a warning (kept, not interpreted, and part of content_id). Times are RFC 3339 UTC with a trailing Z.",
+  "$defs": {
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"
+    },
+    "hex40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "engine_result": {
+      "type": "object",
+      "required": [
+        "status",
+        "elapsed_ms",
+        "rows",
+        "verify",
+        "error"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "error",
+            "timeout",
+            "skipped"
+          ]
+        },
+        "elapsed_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "integer milliseconds (1.0 is rejected by the service); 0 is accepted but never eligible (README §4 needs > 0)"
+        },
+        "rows": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "verify": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "against",
+            "status",
+            "detail"
+          ],
+          "properties": {
+            "against": {
+              "enum": [
+                "answers",
+                "previous",
+                null
+              ]
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "mismatch",
+                "unavailable",
+                "changed",
+                "new",
+                null
+              ]
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema",
+    "run_id",
+    "created_at",
+    "client",
+    "build",
+    "run",
+    "repeats"
+  ],
+  "properties": {
+    "schema": {
+      "const": "xflare-bench-manifest/1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "lowercase uuid4, one per spark-tpch.sh batch"
+    },
+    "created_at": {
+      "$ref": "#/$defs/time"
+    },
+    "client": {
+      "type": "object",
+      "required": [
+        "revision",
+        "branch",
+        "dirty",
+        "dirty_digest"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/hex40"
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "dirty_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "provenance_source",
+        "revision",
+        "dirty",
+        "dirty_digest",
+        "bundle",
+        "gluten"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provenance_source": {
+          "enum": [
+            "artifact-manifest",
+            "local-checkout",
+            "unknown"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dirty": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "dirty_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bundle": {
+          "type": "object",
+          "required": [
+            "requested",
+            "resolved",
+            "kind"
+          ],
+          "properties": {
+            "requested": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "admin",
+                "dev",
+                "unknown"
+              ]
+            }
+          }
+        },
+        "gluten": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "commit",
+            "dirty",
+            "build_command"
+          ],
+          "properties": {
+            "commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dirty": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "build_command": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "description": "null unless bundle.kind=dev (otherwise a warning)"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "argv",
+        "scale_factor",
+        "codec",
+        "engines",
+        "queries",
+        "repeat_requested",
+        "record_answers",
+        "answers",
+        "resources",
+        "xflare_toml",
+        "xflare_overrides",
+        "dataset",
+        "started_at",
+        "finished_at",
+        "exit_status"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scale_factor": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?$"
+        },
+        "codec": {
+          "enum": [
+            "snappy",
+            "zstd",
+            "uncompressed"
+          ]
+        },
+        "engines": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "velox",
+              "xflare"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "queries": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 22
+          },
+          "uniqueItems": true
+        },
+        "repeat_requested": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "record_answers": {
+          "type": "boolean"
+        },
+        "answers": {
+          "type": "object",
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/hex64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "required": [
+            "executors",
+            "executor_cores",
+            "offheap",
+            "shuffle_partitions",
+            "devices"
+          ],
+          "properties": {
+            "executors": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "executor_cores": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "offheap": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "shuffle_partitions": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "devices": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            }
+          }
+        },
+        "xflare_toml": {
+          "type": "object",
+          "required": [
+            "name",
+            "input_text",
+            "input_sha256",
+            "sent_sha256",
+            "rendered_text",
+            "rendered_sha256"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "input_text": {
+              "type": "string"
+            },
+            "input_sha256": {
+              "$ref": "#/$defs/hex64"
+            },
+            "sent_sha256": {
+              "$ref": "#/$defs/hex64"
+            },
+            "rendered_text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "rendered_sha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/hex64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "xflare_overrides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "key",
+              "value",
+              "source",
+              "destination"
+            ],
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              },
+              "source": {
+                "enum": [
+                  "cli",
+                  "default"
+                ]
+              },
+              "destination": {
+                "enum": [
+                  "session",
+                  "template"
+                ]
+              }
+            }
+          }
+        },
+        "dataset": {
+          "type": "object",
+          "required": [
+            "uri",
+            "marker"
+          ],
+          "properties": {
+            "uri": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "marker": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "started_at": {
+          "$ref": "#/$defs/time"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/time"
+        },
+        "exit_status": {
+          "enum": [
+            "ok",
+            "failed"
+          ]
+        }
+      }
+    },
+    "repeats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "index",
+          "invocation",
+          "app_id",
+          "artifact_id",
+          "bundle",
+          "started_at",
+          "finished_at",
+          "status",
+          "cleanup",
+          "queries"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "invocation": {
+            "type": "string"
+          },
+          "app_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "artifact_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bundle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "$ref": "#/$defs/time"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "failed",
+              "aborted"
+            ]
+          },
+          "cleanup": {
+            "enum": [
+              "ok",
+              "failed",
+              "unknown"
+            ]
+          },
+          "queries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "engines",
+                "evidence"
+              ],
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 22
+                },
+                "engines": {
+                  "type": "object",
+                  "propertyNames": {
+                    "enum": [
+                      "velox",
+                      "xflare"
+                    ]
+                  },
+                  "additionalProperties": {
+                    "$ref": "#/$defs/engine_result"
+                  }
+                },
+                "evidence": {
+                  "type": "object",
+                  "required": [
+                    "status",
+                    "detail"
+                  ],
+                  "properties": {
+                    "status": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "detail": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

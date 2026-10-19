@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xflare-bench-submission-1.schema.json",
+  "title": "xflare-bench-submission/1",
+  "description": "README §2 envelope, POSTed to /api/leaderboard/submissions (8 MiB cap, duplicate keys and NaN/Infinity rejected, at most 64 objects/arrays deep). Documentation for producers; the service's stdlib validator (leaderboard/schema.py) is authoritative. note, isolation_claim, submitter, producer and environment are mutable metadata outside content_id.",
+  "$defs": {
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema",
+    "manifest",
+    "submitter",
+    "note",
+    "isolation_claim",
+    "producer",
+    "environment"
+  ],
+  "properties": {
+    "schema": {
+      "const": "xflare-bench-submission/1"
+    },
+    "manifest": {
+      "$ref": "xflare-bench-manifest-1.schema.json"
+    },
+    "submitter": {
+      "type": "object",
+      "required": [
+        "email",
+        "sdp_id"
+      ],
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "sdp_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "note": {
+      "type": "string"
+    },
+    "isolation_claim": {
+      "enum": [
+        "exclusive",
+        "shared",
+        "unknown"
+      ]
+    },
+    "producer": {
+      "type": "string"
+    },
+    "environment": {
+      "type": "object",
+      "required": [
+        "source",
+        "observed_at",
+        "host",
+        "devices",
+        "sdk",
+        "pxl",
+        "reservation",
+        "booking_overlap",
+        "overlapping",
+        "cpu_contention"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "reservation-server",
+            "manual",
+            "none"
+          ]
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "devices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "serial",
+              "type",
+              "fw"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "serial": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fw": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "sdk": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pxl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reservation": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "id",
+                "owner",
+                "start",
+                "end"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "owner": {
+                  "type": "string"
+                },
+                "start": {
+                  "$ref": "#/$defs/time"
+                },
+                "end": {
+                  "$ref": "#/$defs/time"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "booking_overlap": {
+          "enum": [
+            "none",
+            "present",
+            "unknown"
+          ]
+        },
+        "overlapping": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "owner",
+              "start",
+              "end"
+            ],
+            "properties": {
+              "owner": {
+                "type": "string"
+              },
+              "start": {
+                "$ref": "#/$defs/time"
+              },
+              "end": {
+                "$ref": "#/$defs/time"
+              }
+            }
+          }
+        },
+        "cpu_contention": {
+          "const": "unmeasured"
+        }
+      }
+    }
+  }
+}

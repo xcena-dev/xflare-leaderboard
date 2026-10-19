@@ -1,0 +1,14 @@
+[Unit]
+Description=xflare TPC-H leaderboard
+After=network.target
+
+[Service]
+Type=simple
+User=sw-devops
+WorkingDirectory=/home/sw-devops/xflare-leaderboard
+ExecStart=/usr/bin/python3 /home/sw-devops/xflare-leaderboard/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

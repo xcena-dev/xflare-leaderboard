@@ -1,0 +1,11 @@
+{#- Shared by the leaderboard pages. Numbers go through the lb_ms / lb_x /
+    lb_pct filters (web.py). Every uploaded scalar a page prints goes through v
+    (cut to SCALAR_CHARS); long-form texts go through the lb_text filter. -#}
+{%- macro v(x) -%}{{ '—' if x is none or x == '' else x | lb_cut }}{%- endmacro -%}
+{%- macro pct(x) -%}
+  {%- if x is not none -%}<span class="{{ 'diff-good' if x < 0 else 'diff-bad' if x > 0 else 'diff-neutral' }}">{{ x | lb_pct }}</span>{%- endif -%}
+{%- endmacro -%}
+{#- The rest of an uploaded list a page did not print. -#}
+{%- macro more(items, limit, tag='p') -%}
+  {%- if items | length > limit -%}<{{ tag }} class="lb-more">{{ items | length - limit }} more — see raw JSON</{{ tag }}>{%- endif -%}
+{%- endmacro -%}

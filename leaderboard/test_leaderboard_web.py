@@ -1,0 +1,1535 @@
+#!/usr/bin/env python3
+"""Leaderboard HTTP tests through the Flask test client, each on its own app (app.create_app) and temp data dir.
+Run: python3 leaderboard/test_leaderboard_web.py
+
+Covers the HTTP side: the service starting from config.yaml, "/" → board, the data dir env override, 8 MiB cap
+(413, also for chunked bodies), receipts and 409 over HTTP, dry run writes nothing, withdraw, the raw route,
+hostile strings staying inert on every page, storage down → 503 on the storage routes only, SF tabs + default
+filter + hero from one run, two concurrent POSTs, the reproduce script, and the display budgets (cut scalars,
+capped lists and facets, diff budget) that keep any accepted upload's pages small.
+The page-script checks run leaderboard.js under node with a minimal DOM stub, and the reproduce-script checks run
+it in bash; without node or bash they fail, naming the missing runtime.
+"""
+from __future__ import annotations
+
+import errno
+import hashlib
+import html
+import io
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+import uuid
+from unittest import mock
+
+import yaml
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(HERE, "fixtures"))
+
+from werkzeug.test import EnvironBuilder, run_wsgi_app                # noqa: E402
+
+import app as lb_app                                                  # noqa: E402
+from leaderboard import repro, store as lb_store                      # noqa: E402
+from leaderboard.display import facet_token                           # noqa: E402
+from leaderboard.schema import MAX_BODY_BYTES                         # noqa: E402
+from make_fixtures import build_envelope, build_manifest              # noqa: E402
+
+LB = "/b/xflare_leaderboard"
+SUBMIT = "/api/leaderboard/submissions"
+HOSTILE = ['<img src=x onerror=alert(1)>', '</script><script>alert(1)</script>', '"onmouseover=alert(1) x="']
+# An argv spark-tpch.sh accepts.
+REAL_ARGV = ["--reservation", "4242", "--xflare-toml", "scripts/config/Resource.mu.d1.toml.in", "--scale-factor",
+             "100", "--executors", "4", "--executor-cores", "6", "1", "6"]
+
+
+def rid() -> str:
+    return str(uuid.uuid4())
+
+
+def flat_elapsed(xflare: int, velox: int = 3000):
+    return lambda q, r, engine: xflare + q if engine == "xflare" else velox + q
+
+
+def config(data_dir: str) -> dict:
+    """config.yaml's settings with storage pointed at ``data_dir``."""
+    cfg = lb_app.load_config(os.path.join(ROOT, "config.yaml"))
+    cfg["leaderboard"]["storage"] = {"data_dir": data_dir}
+    return cfg
+
+
+class WebCase(unittest.TestCase):
+    def setUp(self):
+        self.data = tempfile.mkdtemp(prefix="lb-web-")
+        # The env override would beat the config's data dir.
+        self._env = os.environ.pop(lb_store.DATA_DIR_ENV, None)
+        self.app = lb_app.create_app(config(self.data))
+        self.c = self.app.test_client()
+
+    def tearDown(self):
+        if self._env is not None:
+            os.environ[lb_store.DATA_DIR_ENV] = self._env
+        os.chmod(self.data, 0o755)
+        shutil.rmtree(self.data, ignore_errors=True)
+
+    def post(self, envelope, query="", status=201):
+        r = self.c.post(SUBMIT + query, json=envelope)
+        self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:500])
+        return r.get_json()
+
+    def submit(self, argv=None, **kw):
+        kw.setdefault("run_id", rid())
+        m = build_manifest(**kw)
+        if argv is not None:
+            m["run"]["argv"] = argv
+        self.post(build_envelope(m))
+        return m["run_id"]
+
+    def page_data(self) -> dict:
+        """The board page's real data block, for the page-script harnesses."""
+        html = self.c.get(LB).get_data(as_text=True)
+        return {"lb-page-data": re.search(r'id="lb-page-data">(.*?)</script>', html, re.S).group(1)}
+
+    def board(self, query="", status=200):
+        r = self.c.get("/api/leaderboard/board" + query)
+        self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:500])
+        return r.get_json()
+
+
+class TestService(WebCase):
+    """The standalone service: config.yaml settings, the data dir env override, app.py serving on its port."""
+
+    def test_config_yaml(self):
+        cfg = lb_app.load_config()
+        self.assertEqual(cfg["server"], {"port": 8894, "bind": "0.0.0.0"})
+        lb = cfg["leaderboard"]
+        self.assertEqual((lb["tabs"], lb["default_filter"]), (["100", "1000"], {"executors": 4, "executor_cores": 6}))
+        self.assertEqual(lb_store.resolve_data_dir(lb), lb["storage"]["data_dir"])
+        other = os.path.join(self.data, "other.yaml")
+        with open(other, "w") as f:
+            f.write("leaderboard: {title: x}\n")
+        with mock.patch.dict(os.environ, {lb_app.CONFIG_ENV: other}):
+            self.assertEqual(lb_app.load_config(), {"leaderboard": {"title": "x"}})
+
+    def test_links_follow_the_route_not_the_config(self):
+        """The board script builds run and compare links from the board route; no config key names it."""
+        cfg = config(self.data)
+        cfg["leaderboard"].pop("id", None)
+        cfg["leaderboard"]["title"] = "Other title"
+        c = lb_app.create_app(cfg).test_client()
+        page = c.get(LB).get_data(as_text=True)
+        self.assertIn("<h1>Other title</h1>", page)
+        data = json.loads(re.search(r'id="lb-page-data">(.*?)</script>', page, re.S).group(1))
+        self.assertEqual(data["board"], LB)
+
+    def test_data_dir_env_override(self):
+        """XFLARE_LEADERBOARD_DATA beats the config's storage.data_dir."""
+        override = os.path.join(self.data, "override")
+        os.mkdir(override)
+        with mock.patch.dict(os.environ, {lb_store.DATA_DIR_ENV: override}):
+            c = lb_app.create_app(config(os.path.join(self.data, "configured"))).test_client()
+            run_id = build_manifest(run_id=rid())["run_id"]
+            self.assertEqual(c.post(SUBMIT, json=build_envelope(build_manifest(run_id=run_id))).status_code, 201)
+            self.assertEqual([r["run_id"] for r in c.get("/api/leaderboard/runs").get_json()], [run_id])
+        self.assertEqual(sorted(os.listdir(self.data)), ["override"])
+        self.assertIn(lb_store.DB_NAME, os.listdir(override))
+
+    @staticmethod
+    def free_port() -> int:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    def serve(self, args: list[str], port: int, **env_vars) -> str:
+        """Starts `python3 app.py ARGS` with ``env_vars`` set (None: unset) and returns the page "/" redirects
+        to, once it answers on ``port``."""
+        env = dict(os.environ)
+        for k, v in env_vars.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+        # A log file, not a pipe: a server that logs more than a pipe holds would block mid-request.
+        log = open(os.path.join(self.data, "app.log"), "w+")
+        self.addCleanup(log.close)
+        proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "app.py"), *args], cwd=self.data, env=env,
+                                stdout=log, stderr=subprocess.STDOUT)
+        self.addCleanup(proc.wait, 10)
+        self.addCleanup(proc.terminate)
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=10) as r:   # follows "/" → the board
+                    return r.read().decode()
+            except urllib.error.HTTPError as e:
+                raise AssertionError(f"app.py answered {e.code}") from None
+            except OSError:
+                if proc.poll() is not None or time.monotonic() > deadline:
+                    log.seek(0)
+                    raise AssertionError("app.py did not serve:\n" + log.read()[-2000:]) from None
+                time.sleep(0.1)
+
+    def test_app_py_serves_from_its_config_file(self):
+        """`python3 app.py --config FILE` with no flags: bind, port and data dir all come from the file, as the
+        systemd unit runs it (there with config.yaml)."""
+        port = self.free_port()
+        cfg = config(self.data)
+        cfg["server"] = {"port": port, "bind": "127.0.0.1"}
+        path = os.path.join(self.data, "service.yaml")
+        with open(path, "w") as f:
+            yaml.safe_dump(cfg, f)
+        page = self.serve(["--config", path], port, XFLARE_LEADERBOARD_DATA=None)
+        self.assertIn('data-page="board"', page)
+        self.assertIn("<h1>XFLARE TPC-H Leaderboard</h1>", page)
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/leaderboard/board", timeout=10) as r:
+            self.assertEqual(json.load(r)["tabs"], ["100", "1000"])
+        self.assertIn(lb_store.DB_NAME, os.listdir(self.data))          # the file's data dir
+
+    def test_app_py_flags_override_the_server_block(self):
+        """With no --config it reads config.yaml; --host/--port beat its server block, the env its data dir."""
+        port = self.free_port()
+        page = self.serve(["--host", "127.0.0.1", "--port", str(port)], port,
+                          XFLARE_LEADERBOARD_DATA=self.data, XFLARE_LEADERBOARD_CONFIG=None)
+        self.assertIn("<h1>XFLARE TPC-H Leaderboard</h1>", page)
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/leaderboard/board", timeout=10) as r:
+            self.assertEqual(r.status, 200)
+        self.assertIn(lb_store.DB_NAME, os.listdir(self.data))
+
+
+class TestBodyCap(WebCase):
+    """Over 8 MiB → 413, by Content-Length and by a bounded read when there is none."""
+
+    def test_content_length_over_cap(self):
+        r = self.c.post(SUBMIT, data=b" " * (MAX_BODY_BYTES + 1), content_type="application/json")
+        self.assertEqual(r.status_code, 413)
+        self.assertEqual(os.listdir(self.data), [])
+
+    def test_chunked_body_over_cap(self):
+        """No Content-Length and wsgi.input_terminated, as the dev server passes a chunked body: Werkzeug then
+        hands over the raw stream (no global MAX_CONTENT_LENGTH), so only the bounded read stops it."""
+        class Endless(io.RawIOBase):
+            served = 0
+
+            def readable(self):
+                return True
+
+            def readinto(self, buf):
+                Endless.served += len(buf)
+                buf[:] = b" " * len(buf)
+                return len(buf)
+
+        env = EnvironBuilder(path=SUBMIT, method="POST", content_type="application/json").get_environ()
+        env.pop("CONTENT_LENGTH", None)
+        env.update({"wsgi.input": io.BufferedReader(Endless()), "wsgi.input_terminated": True,
+                    "HTTP_TRANSFER_ENCODING": "chunked"})
+        app_iter, status, _headers = run_wsgi_app(self.app, env, buffered=True)
+        self.assertTrue(status.startswith("413"), status)
+        self.assertLess(Endless.served, MAX_BODY_BYTES + (1 << 20))
+        self.assertEqual(os.listdir(self.data), [])
+
+    def test_at_cap_is_parsed(self):
+        body = json.dumps(build_envelope(build_manifest(run_id=rid()))).encode()
+        body += b" " * (MAX_BODY_BYTES - len(body))
+        r = self.c.post(SUBMIT, data=body, content_type="application/json")
+        self.assertEqual(r.status_code, 201)
+
+
+class TestIdentity(WebCase):
+    """Receipts over HTTP: 201 created, 200 identical replay, 409 changed content, 400 rejects; dry run stores nothing."""
+
+    def test_created_existing_conflict(self):
+        m = build_manifest(run_id=rid())
+        first = self.post(build_envelope(m))
+        self.assertEqual(set(first), {"run_id", "content_id", "url", "ranked_total", "warnings"})
+        self.assertTrue(first["ranked_total"])
+        self.assertEqual(first["url"], f"{LB}/run/{m['run_id']}")
+        self.assertEqual(self.post(build_envelope(m), status=200), first)
+
+        # Envelope metadata is mutable and outside the hash.
+        again = self.post(build_envelope(m, note="second note"), status=200)
+        self.assertEqual(again["content_id"], first["content_id"])
+        self.assertEqual(self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()["meta"]["note"],
+                         "second note")
+
+        changed = build_manifest(run_id=m["run_id"], elapsed=flat_elapsed(500))
+        r = self.c.post(SUBMIT, json=build_envelope(changed))
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.get_json()["content_id"], first["content_id"])
+
+    def test_rejects(self):
+        m = build_manifest(run_id=rid())
+        for body in (b'{"schema": 1, "schema": 2}', b"[1, 2]", b"{not json", b'{"x": NaN}'):
+            r = self.c.post(SUBMIT, data=body, content_type="application/json")
+            self.assertEqual(r.status_code, 400, body)
+            self.assertTrue(r.get_json()["errors"])
+        r = self.c.post(SUBMIT, json=m)            # a bare manifest only on the dry-run path
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(os.listdir(self.data), [])
+
+    def test_dry_run_writes_nothing(self):
+        m = build_manifest(run_id=rid())
+        for body in (m, build_envelope(m)):
+            out = self.post(body, "?dry_run=1", status=200)
+            self.assertTrue(out["dry_run"])
+            self.assertTrue(out["ranked_total"])
+        self.assertEqual(os.listdir(self.data), [])       # no DB file, no raw/, no row
+        # It never opens storage, so it answers even when there is none.
+        shutil.rmtree(self.data)
+        self.post(m, "?dry_run=1", status=200)
+        os.mkdir(self.data)
+
+
+class TestWithdraw(WebCase):
+    """Withdraw over HTTP: idempotent, drops the run from boards and hero, not revived by a re-upload."""
+
+    def test_withdraw_idempotent_and_not_revived(self):
+        m = build_manifest(run_id=rid())
+        first = self.post(build_envelope(m))
+        url = f"/api/leaderboard/runs/{m['run_id']}/withdraw"
+        r = self.c.post(url, json={"actor": "a@x", "reason": "bad run"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["withdrawn"])
+        r = self.c.post(url, json={"actor": "b@x", "reason": "again"})
+        self.assertEqual(r.get_json()["withdrawal"]["actor"], "a@x")          # first record kept
+
+        b = self.board()
+        self.assertIsNone(b["hero"])
+        self.assertEqual(b["rows"], [])
+        # A replay returns the receipt as first issued, even after the withdrawal.
+        self.assertEqual(self.post(build_envelope(m), status=200), first)
+        self.assertIsNone(self.board()["hero"])
+        self.assertTrue(self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()["withdrawn"])
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        self.assertIn("Withdrawn", page)
+        self.assertNotIn('id="lb-withdraw"', page)
+
+    def test_withdraw_errors(self):
+        self.assertEqual(self.c.post(f"/api/leaderboard/runs/{rid()}/withdraw",
+                                     json={"actor": "a", "reason": "r"}).status_code, 404)
+        run_id = self.submit()
+        url = f"/api/leaderboard/runs/{run_id}/withdraw"
+        for body in ({}, {"actor": "", "reason": "r"}, {"actor": "a", "reason": 3}, {"actor": " ", "reason": "r"}):
+            self.assertEqual(self.c.post(url, json=body).status_code, 400, body)
+        # No length cap: any non-empty strings are accepted (summaries cut them for display).
+        r = self.c.post(url, json={"actor": "a" * 5000, "reason": "r" * 50_000})
+        self.assertEqual(r.status_code, 200)
+        whole = self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()["withdrawal"]
+        self.assertEqual((len(whole["actor"]), len(whole["reason"])), (5000, 50_000))
+
+
+class TestRawRoute(WebCase):
+    """Raw download: found only through the DB, attachment + nosniff, traversal/encoded ids and symlinks refused."""
+
+    def test_raw_attachment(self):
+        m = build_manifest(run_id=rid())
+        receipt = self.post(build_envelope(m))
+        r = self.c.get(f"/api/leaderboard/runs/{m['run_id']}/raw")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "application/json")
+        self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
+        self.assertTrue(r.headers["Content-Disposition"].startswith("attachment;"))
+        self.assertEqual(hashlib.sha256(r.data).hexdigest(), receipt["content_id"])
+
+    def test_rejects_non_ids_and_symlinks(self):
+        m = build_manifest(run_id=rid())
+        receipt = self.post(build_envelope(m))
+        for bad in ("abc", "..", "%2e%2e", "..%2F..%2Fetc%2Fpasswd", "..%252F", m["run_id"].upper(),
+                    m["run_id"] + "%00", rid()):
+            r = self.c.get(f"/api/leaderboard/runs/{bad}/raw")
+            self.assertIn(r.status_code, (400, 404), bad)
+            self.assertNotEqual(r.mimetype, "application/octet-stream")
+        raw = os.path.join(self.data, "raw", receipt["content_id"] + ".json")
+        secret = os.path.join(self.data, "secret.json")
+        with open(secret, "w") as f:
+            f.write('{"secret": 1}')
+        os.unlink(raw)
+        os.symlink(secret, raw)
+        r = self.c.get(f"/api/leaderboard/runs/{m['run_id']}/raw")
+        self.assertEqual(r.status_code, 404)
+        self.assertNotIn(b"secret", r.data)
+
+
+class TestHostileStrings(WebCase):
+    """Uploaded strings are inert on the board API, detail, compare and error responses."""
+
+    def hostile_envelope(self):
+        m = build_manifest(run_id=rid())
+        # values of options spark-tpch.sh takes, so the run page also prints them in its reproduce script
+        m["run"]["argv"] = REAL_ARGV + [x for h in HOSTILE for x in ("--xflare", h)]
+        m["run"]["xflare_overrides"].append({"key": HOSTILE[0], "value": HOSTILE[1],
+                                             "source": "cli", "destination": "session"})
+        m["run"]["xflare_toml"]["name"] = HOSTILE[2]
+        m["run"]["xflare_toml"]["rendered_text"] += HOSTILE[1] + "\n"
+        m["build"]["bundle"]["resolved"] = HOSTILE[0]
+        for rep in m["repeats"]:
+            rep["bundle"] = HOSTILE[0]
+        env = build_envelope(m, note=" ".join(HOSTILE), submitter={"email": HOSTILE[0], "sdp_id": HOSTILE[2]})
+        env["environment"]["host"] = HOSTILE[1]
+        env["environment"]["devices"][0]["id"] = HOSTILE[2]
+        return env
+
+    def assert_inert(self, html: str, where: str):
+        for s in HOSTILE:
+            self.assertNotIn(s, html, where)
+
+    def test_pages_escape(self):
+        env = self.hostile_envelope()
+        self.post(env)
+        hostile_id = env["manifest"]["run_id"]
+        other = self.submit()
+
+        run_page = self.c.get(f"{LB}/run/{hostile_id}")
+        self.assertEqual(run_page.status_code, 200)
+        html = run_page.get_data(as_text=True)
+        self.assert_inert(html, "run page")
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", html)            # shown, escaped
+        self.assertIn("--xflare &#39;&lt;img src=x onerror=alert(1)&gt;&#39;", html)   # in the script too
+
+        cmp_page = self.c.get(f"{LB}/compare?runs={hostile_id},{other}")
+        self.assertEqual(cmp_page.status_code, 200)
+        self.assert_inert(cmp_page.get_data(as_text=True), "compare page")
+
+        self.assert_inert(self.c.get(LB).get_data(as_text=True), LB)
+
+        # The board API returns them as JSON data; the page sets them with textContent.
+        b = self.c.get("/api/leaderboard/board?executors=&executor_cores=")
+        self.assertEqual(b.mimetype, "application/json")
+        self.assertIn(HOSTILE[0], [r["submitter"] for r in b.get_json()["rows"]])
+
+    def test_error_responses(self):
+        r = self.c.post(SUBMIT, json={"schema": HOSTILE[0], "manifest": HOSTILE[1]})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.mimetype, "application/json")
+        for url in (f"{LB}/run/{HOSTILE[0]}", f"{LB}/compare?runs={HOSTILE[0]},{HOSTILE[1]}",
+                    f"/api/leaderboard/runs/{HOSTILE[2]}"):
+            r = self.c.get(url)
+            self.assertIn(r.status_code, (400, 404), url)
+            self.assert_inert(r.get_data(as_text=True), url)
+
+    def test_no_html_sinks_in_templates_or_js(self):
+        """The grep half: no path from data to HTML parsing in the leaderboard's own templates/JS."""
+        sinks = re.compile(r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function")
+        unsafe = re.compile(r"\|\s*safe\b|autoescape\s+false|Markup\(")
+        files = [os.path.join(ROOT, "static", "leaderboard.js")] + [
+            os.path.join(ROOT, "templates", n) for n in sorted(os.listdir(os.path.join(ROOT, "templates")))]
+        self.assertEqual(len(files), 5)
+        for path in files:
+            with open(path) as f:
+                text = f.read()
+            self.assertIsNone(sinks.search(text), path)
+            self.assertIsNone(unsafe.search(text), path)
+
+
+class TestStorageDown(WebCase):
+    """Storage missing or read-only: every route that reads or writes it 503s; the board page (which reads none)
+    and the "/" redirect keep their status."""
+
+    LB_ROUTES = ["/api/leaderboard/board", "/api/leaderboard/runs"]
+    NO_STORAGE = {"/": 302, LB: 200}
+
+    def statuses(self, routes):
+        return {u: self.c.get(u).status_code for u in routes}
+
+    def check_down(self, run_id):
+        for u in self.LB_ROUTES + [f"{LB}/run/{run_id}", f"/api/leaderboard/runs/{run_id}",
+                                   f"/api/leaderboard/runs/{run_id}/raw"]:
+            r = self.c.get(u)
+            self.assertEqual(r.status_code, 503, u)
+            self.assertNotIn(self.data, r.get_data(as_text=True))
+        self.assertEqual(self.c.post(SUBMIT, json=build_envelope(build_manifest(run_id=rid()))).status_code, 503)
+        self.assertEqual(self.c.post(f"/api/leaderboard/runs/{run_id}/withdraw",
+                                     json={"actor": "a", "reason": "r"}).status_code, 503)
+        self.assertEqual(self.statuses(self.NO_STORAGE), self.NO_STORAGE)
+
+    def test_missing_and_read_only(self):
+        run_id = self.submit()
+        moved = self.data + ".moved"
+        os.rename(self.data, moved)
+        try:
+            self.check_down(run_id)
+        finally:
+            os.rename(moved, self.data)
+
+        if os.geteuid() != 0:                         # root ignores the mode bits
+            os.chmod(self.data, 0o555)
+            self.check_down(run_id)
+
+
+class TestBoard(WebCase):
+    """SF tabs, default filter, hero from one run, top-N, Q tabs, filters, compare."""
+
+    def test_tabs_default_filter_and_hero(self):
+        hero = self.submit(elapsed=flat_elapsed(1000))
+        slower = self.submit(elapsed=flat_elapsed(2000))
+        off_filter = self.submit(elapsed=flat_elapsed(100), executors=1)
+        sf1000 = self.submit(sf="1000", elapsed=flat_elapsed(9000))
+        self.submit(elapsed=flat_elapsed(50), record_answers=True)       # never ranks
+
+        b = self.board()
+        self.assertEqual(b["tabs"], ["100", "1000"])
+        self.assertEqual(b["sf"], "100")
+        self.assertEqual(b["filter"], {"executors": "4", "executor_cores": "6"})
+        self.assertEqual([r["run_id"] for r in b["rows"]], [hero, slower])
+        self.assertEqual(b["hero"]["run_id"], hero)
+        detail = self.c.get(f"/api/leaderboard/runs/{hero}").get_json()["derived"]["per_query"]
+        self.assertEqual([p["xflare_ms"] for p in b["hero"]["per_query"]],
+                         [detail[str(q)]["xflare_ms"] for q in range(1, 23)])
+        self.assertEqual(len(b["hero"]["per_query"]), 22)
+        self.assertEqual(b["hero"]["totals"]["xflare_ms"], sum(1000 + q for q in range(1, 23)))
+
+        lifted = self.board("?executors=&executor_cores=")
+        self.assertEqual(lifted["filter"], {})
+        self.assertEqual(lifted["hero"]["run_id"], off_filter)
+        self.assertEqual(self.board("?executors=1&executor_cores=")["hero"]["run_id"], off_filter)
+        self.assertEqual(self.board("?sf=1000")["hero"]["run_id"], sf1000)
+        dev = self.board("?badge=dev%20bundle")          # nothing matches: the hero falls back, the rows do not
+        self.assertEqual((dev["hero"]["run_id"], dev["hero_fallback"], dev["rows"]), (off_filter, True, []))
+        self.assertIn({"token": facet_token("4"), "label": "4"}, b["facets"]["executors"])
+        self.assertIn({"token": facet_token("1"), "label": "1"}, b["facets"]["executors"])
+
+        self.board("?sf=10", status=400)
+        self.board("?metric=q23", status=400)
+
+    def test_top_n_and_query_tabs(self):
+        ids = [self.submit(elapsed=flat_elapsed(1000 + 10 * i)) for i in range(6)]
+        self.assertEqual(len(self.board("?top=5")["rows"]), 5)
+        self.assertEqual(len(self.board("?top=25")["rows"]), 6)
+        self.assertEqual(len(self.board("?top=7")["rows"]), 6)              # not a choice → default 10
+        # Q3 ranks by that query's median; the slowest-total run is fastest on Q3.
+        q3 = self.submit(elapsed=lambda q, r, e: (10 if q == 3 else 5000) if e == "xflare" else 6000)
+        b = self.board("?metric=q3")
+        self.assertEqual(b["rows"][0]["run_id"], q3)
+        self.assertEqual(b["rows"][0]["value"]["xflare_ms"], 10)
+        self.assertEqual(self.board()["rows"][0]["run_id"], ids[0])
+
+    def test_pages_and_compare(self):
+        a, b, c = (self.submit(argv=REAL_ARGV, elapsed=flat_elapsed(1000 + i)) for i in range(3))
+        page = self.c.get(f"{LB}/run/{a}")
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertRegex(html, r'<pre id="repro-cmd">[^<]*scripts/spark-tpch.sh [^<]*--reservation &#34;\$RESERVATION&#34;')
+        self.assertIn('class="d-add"', html)                               # input vs rendered toml diff
+        self.assertEqual(self.c.get(f"{LB}/run/{rid()}").status_code, 404)
+
+        r = self.c.get(f"{LB}/compare?runs={a},{b},{c}")
+        self.assertEqual(r.status_code, 200)
+        for x in (a, b, c):
+            self.assertIn(x[:8], r.get_data(as_text=True))
+        self.assertEqual(self.c.get(f"{LB}/compare?runs={a}").status_code, 400)
+        self.assertEqual(self.c.get(f"{LB}/compare?runs={a},{a}").status_code, 400)
+        self.assertEqual(self.c.get(f"{LB}/compare?runs={','.join([a, b, c, rid(), rid()])}").status_code, 400)
+        self.assertEqual(self.c.get(f"{LB}/compare?runs={a},{rid()}").status_code, 404)
+
+    def test_root_redirects_to_the_board(self):
+        r = self.c.get("/")
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(r.headers["Location"], LB)
+        page = self.c.get("/", follow_redirects=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('data-page="board"', page.get_data(as_text=True))
+
+
+class TestRawStorage(WebCase):
+    """The raw download is the whole stored file; any storage failure under it is a 503, never a 404 or 500."""
+
+    def test_served_whole_past_body_cap(self):
+        """A compact body whose canonical form is bigger than 8 MiB ("1E5" re-serialises as "100000.0")."""
+        m = build_manifest(run_id=rid())
+        m["x_probe"] = "__PROBE__"
+        body = json.dumps(build_envelope(m)).replace('"__PROBE__"', "[" + ",".join(["1E5"] * 1_200_000) + "]")
+        self.assertLess(len(body), MAX_BODY_BYTES)
+        receipt = self.c.post(SUBMIT, data=body, content_type="application/json").get_json()
+        r = self.c.get(f"/api/leaderboard/runs/{m['run_id']}/raw")
+        self.assertEqual(r.status_code, 200)
+        self.assertGreater(len(r.data), MAX_BODY_BYTES)
+        self.assertEqual(hashlib.sha256(r.data).hexdigest(), receipt["content_id"])
+
+    def _raw_io_fails(self, target: str):
+        """os.fstat or the read of the raw file raises EIO inside the store; every other call is untouched."""
+        m = build_manifest(run_id=rid())
+        raw = os.path.realpath(os.path.join(self.data, "raw", self.post(build_envelope(m))["content_id"] + ".json"))
+        is_raw = lambda fd: os.readlink(f"/proc/self/fd/{fd}") == raw          # noqa: E731
+        real_fstat, real_fdopen = os.fstat, os.fdopen
+
+        def fstat(fd):
+            if isinstance(fd, int) and is_raw(fd):
+                raise OSError(errno.EIO, "injected")
+            return real_fstat(fd)
+
+        class FailingRead:
+            def __init__(self, f):
+                self.f = f
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.f.close()
+
+            def read(self, *a):
+                raise OSError(errno.EIO, "injected")
+
+        def fdopen(fd, *a, **kw):
+            f = real_fdopen(fd, *a, **kw)
+            return FailingRead(f) if is_raw(fd) and "r" in (a[0] if a else kw.get("mode", "r")) else f
+
+        patch = {"fstat": mock.patch.object(lb_store.os, "fstat", fstat),
+                 "read": mock.patch.object(lb_store.os, "fdopen", fdopen)}[target]
+        with patch:
+            r = self.c.get(f"/api/leaderboard/runs/{m['run_id']}/raw")
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.get_json(), {"errors": ["leaderboard storage unavailable"]})
+
+    def test_fstat_failure_is_503(self):
+        self._raw_io_fails("fstat")
+
+    def test_read_failure_is_503(self):
+        self._raw_io_fails("read")
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads mode-000 files")
+    def test_unreadable_raw_is_503(self):
+        m = build_manifest(run_id=rid())
+        raw = os.path.join(self.data, "raw", self.post(build_envelope(m))["content_id"] + ".json")
+        os.chmod(raw, 0)
+        try:
+            r = self.c.get(f"/api/leaderboard/runs/{m['run_id']}/raw")
+        finally:
+            os.chmod(raw, 0o644)
+        self.assertEqual(r.status_code, 503)
+        self.assertTrue(r.is_json)
+
+    @unittest.skipIf(os.geteuid() == 0, "root traverses mode-000 dirs")
+    def test_data_dir_under_untraversable_parent(self):
+        """503 JSON without the path on the storage routes; the board page still loads."""
+        run_id = self.submit()
+        parent = tempfile.mkdtemp(prefix="lb-locked-")
+        inner = os.path.join(parent, "data")
+        os.rename(self.data, inner)
+        c = lb_app.create_app(config(inner)).test_client()
+        os.chmod(parent, 0)
+        try:
+            for u in ("/api/leaderboard/runs", "/api/leaderboard/board", f"/api/leaderboard/runs/{run_id}"):
+                r = c.get(u)
+                self.assertEqual(r.status_code, 503, u)
+                self.assertEqual(r.get_json(), {"errors": ["leaderboard storage unavailable"]})
+            r = c.get(f"{LB}/run/{run_id}")
+            self.assertEqual(r.status_code, 503)
+            self.assertNotIn(parent, r.get_data(as_text=True))
+            self.assertEqual(c.get(LB).status_code, 200)
+        finally:
+            os.chmod(parent, 0o755)
+            os.rename(inner, self.data)
+            os.rmdir(parent)
+
+
+class TestAcceptedExtremes(WebCase):
+    """Whatever the validator accepts never turns into a 500 later."""
+
+    def test_huge_integers(self):
+        def huge_q1(q, r, engine):
+            return 10 ** 400 + r if q == 1 and engine == "xflare" else 1000 + q
+        cases = [build_manifest(run_id=rid(), elapsed=huge_q1),
+                 build_manifest(run_id=rid(), elapsed=huge_q1, repeats=2),    # even-N median past float range
+                 build_manifest(run_id=rid(), elapsed=lambda q, r, e: 10 ** 400 if e == "velox" else 1000)]
+        for n in (100_000_000, 10 ** 20):
+            m = build_manifest(run_id=rid())
+            m["run"]["repeat_requested"] = n
+            cases.append(m)
+        for m in cases:
+            self.post(m, "?dry_run=1", status=200)
+            self.post(build_envelope(m), status=201)
+            self.assertEqual(self.c.get(f"{LB}/run/{m['run_id']}").status_code, 200)
+        other = self.submit()
+        self.assertEqual(self.c.get(f"{LB}/compare?runs={cases[0]['run_id']},{cases[2]['run_id']},{other}")
+                         .status_code, 200)
+        for u in ("/api/leaderboard/board?executors=&executor_cores=", "/api/leaderboard/runs"):
+            self.assertEqual(self.c.get(u).status_code, 200, u)
+
+    def test_non_ascii_digit_timestamps_rejected(self):
+        """Unicode digits (U+0661) are not RFC 3339: 400 at the door, so the board never meets them."""
+        for ts in ("2026-10-01T01:03:00.١Z", "2026-10-01T01:03:0١Z", "٢026-10-01T01:03:00Z"):
+            m = build_manifest(run_id=rid())
+            m["run"]["finished_at"] = ts
+            r = self.c.post(SUBMIT, json=build_envelope(m))
+            self.assertEqual(r.status_code, 400, ts)
+            self.assertTrue(r.get_json()["errors"])
+        self.submit()
+        for u in ("/api/leaderboard/board", "/api/leaderboard/runs"):
+            self.assertEqual(self.c.get(u).status_code, 200, u)
+
+
+# Runs leaderboard.js against a minimal DOM stub: ids the page has become elements (all ids when "ids" is
+# null), "data" seeds their textContent, fetch answers with "fetch", "slots" are the board's filter slots. Prints
+# the listeners it saw, the text of every element by id, and the text, value, title and href of every element it
+# created. "check" ticks that many of the board's row checkboxes in order, then "click" names an element whose click
+# handlers run ("clickClass": every element of that class); "secure" is window.isSecureContext. The compare button's
+# disabled state after each tick ("gate"), location.href, clipboard writes and execCommand calls are reported.
+_JS_HARNESS = r"""
+const fs = require('fs'), vm = require('vm');
+const cfg = JSON.parse(fs.readFileSync(0, 'utf8'));
+const listeners = {}, handlers = {}, byId = {}, all = [], clipboard = [], execs = [];
+class Element {
+  constructor(tag, id) {
+    Object.assign(this, { tagName: tag, id, children: [], dataset: {}, hidden: false, value: '', attrs: {},
+                          title: '', textContent: (cfg.data || {})[id] || '' });
+    this.style = { setProperty() {} };
+    this.classList = { add() {}, remove() {}, toggle() {}, contains() { return false; } };
+    all.push(this);
+  }
+  appendChild(c) { this.children.push(c); return c; }
+  replaceChildren(...c) { this.children = c; }
+  setAttribute(k, v) { this.attrs[k] = v; }
+  addEventListener(t, h) {
+    if (t === 'click') (this.clicks = this.clicks || []).push(h);
+    if (t === 'change') (this.changes = this.changes || []).push(h);
+    if (!this.id) return;
+    (listeners[this.id] = listeners[this.id] || []).push(t);
+    if (t === 'click') (handlers[this.id] = handlers[this.id] || []).push(h);
+  }
+  select() {}
+  remove() {}
+  insertRow() { return this.appendChild(new Element('tr')); }
+  insertCell() { return this.appendChild(new Element('td')); }
+}
+global.Node = Element;
+global.document = {
+  body: { dataset: { page: cfg.page }, appendChild(c) { return c; } },
+  createRange() { return { selectNodeContents() {} }; },
+  getElementById(id) {
+    if (cfg.ids && !cfg.ids.includes(id)) return null;
+    return byId[id] = byId[id] || new Element('div', id);
+  },
+  querySelector(sel) { return byId[sel] = byId[sel] || new Element('div'); },
+  querySelectorAll() {
+    return (cfg.slots || []).map(k => Object.assign(new Element('span'), { dataset: { key: k, label: k } }));
+  },
+  createElement(tag) { return new Element(tag); },
+  execCommand(c) { execs.push(c); return true; },
+};
+global.window = { isSecureContext: !!cfg.secure };
+// Node has a read-only global navigator of its own; replace it.
+Object.defineProperty(globalThis, 'navigator',
+                      { value: { clipboard: { writeText: async t => { clipboard.push(t); } } }, configurable: true });
+global.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
+global.location = { search: '', pathname: '/b/xflare_leaderboard' };
+global.history = { replaceState() {} };
+global.fetch = async () => ({ ok: true, status: 200, json: async () => JSON.parse(cfg.fetch) });
+vm.runInThisContext(fs.readFileSync(cfg.js, 'utf8'));
+setTimeout(async () => {
+  const gate = [];
+  for (const box of all.filter(e => !e.id && e.type === 'checkbox').slice(0, cfg.check || 0)) {
+    box.checked = true;
+    for (const h of box.changes) h();
+    gate.push(byId['lb-compare'].disabled);
+  }
+  for (const h of handlers[cfg.click] || []) await h();
+  for (const e of all.filter(e => cfg.clickClass && e.className === cfg.clickClass)) for (const h of e.clicks || []) await h();
+  const text = {};
+  for (const [id, e] of Object.entries(byId)) if (e.id) text[id] = e.textContent;
+  console.log(JSON.stringify({ listeners, text, texts: all.map(e => String(e.textContent)),
+                               values: all.map(e => String(e.value)), titles: all.map(e => String(e.title)),
+                               hrefs: all.map(e => String(e.href || '')), gate, location: location.href || null,
+                               clipboard, execs }));
+}, 50);
+"""
+
+
+def run_page_js(page: str, ids=None, data=None, fetch=None, slots=None, click=None, click_class=None,
+                secure=False, check=0) -> dict:
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node not installed: the page-script tests need it (README: Run locally)")
+    cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "page": page, "ids": ids,
+           "data": data or {}, "fetch": fetch, "slots": slots, "click": click,
+           "clickClass": click_class, "secure": secure, "check": check}
+    out = subprocess.run([node, "-e", _JS_HARNESS], input=json.dumps(cfg), capture_output=True, text=True,
+                         timeout=30)
+    if out.returncode:
+        raise AssertionError("leaderboard.js failed:\n" + out.stderr[-2000:])
+    return json.loads(out.stdout)
+
+
+class TestPageBudgets(WebCase):
+    """Pages and board/runs summaries show a bounded cut of whatever was accepted; the raw JSON keeps it all."""
+
+    def test_toml_diff_budget(self):
+        m = build_manifest(run_id=rid())
+        lines = [str(i) for i in range(12000)]
+        swapped = [lines[i ^ 1] for i in range(len(lines))]
+        t = m["run"]["xflare_toml"]
+        t["input_text"], t["rendered_text"] = "\n".join(lines), "\n".join(swapped)
+        t["input_sha256"] = hashlib.sha256(t["input_text"].encode()).hexdigest()
+        t["rendered_sha256"] = hashlib.sha256(t["rendered_text"].encode()).hexdigest()
+        self.post(build_envelope(m))
+        t0 = time.monotonic()
+        r = self.c.get(f"{LB}/run/{m['run_id']}")
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("too large to diff", r.get_data(as_text=True))
+
+    def test_uploaded_lists_bounded(self):
+        m = build_manifest(run_id=rid())
+        m["run"]["argv"] = [""] * 1_000_000
+        m["run"]["xflare_overrides"] = [{"key": f"k{i}", "value": "v", "source": "cli", "destination": "session"}
+                                        for i in range(10_000)]
+        env = build_envelope(m)
+        env["environment"]["devices"] = [{"id": str(i), "serial": None, "type": None, "fw": None}
+                                         for i in range(10_000)]
+        env["environment"]["overlapping"] = [{"owner": "o", "start": "2026-10-01T00:00:00Z",
+                                              "end": "2026-10-01T00:01:00Z"} for _ in range(10_000)]
+        env["environment"]["booking_overlap"] = "present"
+        self.post(env)
+        other = self.submit()
+        for u in (f"{LB}/run/{m['run_id']}", f"{LB}/compare?runs={m['run_id']},{other}"):
+            r = self.c.get(u)
+            self.assertEqual(r.status_code, 200, u)
+            self.assertLess(len(r.data), 512 * 1024, u)
+            self.assertIn("more — see raw JSON", r.get_data(as_text=True), u)
+
+    def test_long_scalars_cut_everywhere(self):
+        """Megabyte-long producer / sdp_id / bundle / submitter: every page and summary stays small."""
+        big = "x" * 1_000_000
+        m = build_manifest(run_id=rid())
+        m["build"]["bundle"]["resolved"] = "b" + big
+        env = build_envelope(m, producer="p" + big, submitter={"email": "s" + big, "sdp_id": "d" + big})
+        self.post(env)
+        other = self.submit()
+        for u in (f"{LB}/run/{m['run_id']}", f"{LB}/compare?runs={m['run_id']},{other}",
+                  "/api/leaderboard/board", "/api/leaderboard/runs"):
+            r = self.c.get(u)
+            self.assertEqual(r.status_code, 200, u)
+            self.assertLess(len(r.data), 512 * 1024, u)
+        rows = self.c.get("/api/leaderboard/runs").get_json()
+        mine = next(x for x in rows if x["run_id"] == m["run_id"])
+        self.assertEqual(mine["submitter"], ("s" + big)[:512] + "…")
+        # Filters still compare the full stored value, not the cut one.
+        self.assertEqual([x["run_id"] for x in self.c.get("/api/leaderboard/runs?submitter=s" + big).get_json()],
+                         [m["run_id"]])
+        self.assertEqual(self.c.get("/api/leaderboard/runs?submitter=" + mine["submitter"]).get_json(), [])
+        self.assertEqual(len(self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()["meta"]["producer"]),
+                         1_000_001)
+
+    def test_long_invocations_cut_per_repeat(self):
+        """repeats[].invocation is an identifier shown once per repeat row: cut like any scalar, so 100 repeats
+        with 60,000-char invocations still give a small run page."""
+        m = build_manifest(run_id=rid(), repeats=100)
+        for rep in m["repeats"]:
+            rep["invocation"] = "i" * 60_000
+        self.post(build_envelope(m))
+        r = self.c.get(f"{LB}/run/{m['run_id']}")
+        self.assertEqual(r.status_code, 200)
+        self.assertLess(len(r.data), 1024 * 1024)
+        self.assertIn("i" * 512 + "…", r.get_data(as_text=True))
+
+    def test_many_devices_bounded(self):
+        m = build_manifest(run_id=rid())
+        env = build_envelope(m)
+        env["environment"]["devices"] = [{"id": f"dev-{i}", "serial": None, "type": None, "fw": None}
+                                         for i in range(20_000)]
+        self.post(env)
+        r = self.c.get("/api/leaderboard/board")
+        self.assertLess(len(r.data), 512 * 1024)
+        b = r.get_json()
+        self.assertEqual(len(b["facets"]["device"]), 200)
+        self.assertTrue(b["facets_truncated"])
+        self.assertEqual((len(b["hero"]["device_ids"]), b["hero"]["device_count"]), (100, 20_000))
+        self.assertEqual(len(b["rows"][0]["device_ids"]), 100)
+        self.assertIn('id="lb-facets-note"', self.c.get(LB).get_data(as_text=True))
+        self.assertFalse(self.board("?sf=1000")["facets_truncated"])
+
+    def test_omitted_command_says_why(self):
+        too_many = build_manifest(run_id=rid())
+        too_many["run"]["argv"] = ["--download-logs"] * (repro.MAX_ARGS + 1)
+        too_long = build_manifest(run_id=rid())
+        too_long["run"]["argv"] = ["--results-dir", "y" * repro.MAX_CHARS]
+        unparsed = build_manifest(run_id=rid())
+        unparsed["run"]["argv"] = ["--note", "x", "1"]                # spark-tpch.sh has no --note
+        for m in (too_many, too_long, unparsed):
+            self.post(build_envelope(m))
+        html = self.c.get(f"{LB}/run/{too_many['run_id']}").get_data(as_text=True)
+        self.assertIn(f"argv 항목이 너무 많습니다 ({repro.MAX_ARGS + 1} entries, 한도 {repro.MAX_ARGS})", html)
+        html = self.c.get(f"{LB}/run/{too_long['run_id']}").get_data(as_text=True)
+        self.assertIn("명령이 너무 깁니다 (", html)
+        self.assertIn(f"characters, 한도 {repro.MAX_CHARS})", html)
+        self.assertNotIn("항목이 너무 많습니다", html)
+        html = self.c.get(f"{LB}/run/{unparsed['run_id']}").get_data(as_text=True)
+        self.assertIn("argv 를 spark-tpch.sh 의 옵션으로 읽지 못했습니다", html)
+        self.assertNotIn('id="repro-cmd"', html)
+
+    def test_withdraw_attaches_without_copy_button(self):
+        """With the command omitted there is no copy button; the page script must still wire withdraw."""
+        m = build_manifest(run_id=rid())
+        m["run"]["argv"] = ["--download-logs"] * (repro.MAX_ARGS + 1)
+        self.post(build_envelope(m))
+        html = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        self.assertIn('id="lb-withdraw"', html)
+        self.assertNotIn('id="repro-copy"', html)
+        data = re.search(r'id="lb-run-data">(.*?)</script>', html, re.S).group(1)
+        out = run_page_js("run", ids=re.findall(r'id="([^"]+)"', html), data={"lb-run-data": data})
+        self.assertEqual(out["listeners"].get("lb-withdraw"), ["click"])
+
+    def test_board_script_says_out_of_range(self):
+        """A per-query median past float range is an exact JSON integer that parses as Infinity; the board row
+        prints "out of range" for it, as the server-rendered pages do."""
+        self.submit(elapsed=lambda q, r, e: 10 ** 400 if (q, e) == (1, "xflare") else 1000)
+        board = self.board("?metric=q1")
+        self.assertGreater(board["rows"][0]["value"]["xflare_ms"], 10 ** 399)
+        out = run_page_js("board", data=self.page_data(),
+                          fetch=self.c.get("/api/leaderboard/board?metric=q1").get_data(as_text=True))
+        self.assertIn("out of range", out["texts"])
+
+
+def nested(levels: int) -> str:
+    """JSON text of `levels` nested arrays: each array is one level."""
+    return "[" * levels + "]" * levels
+
+
+class TestNestingDepth(WebCase):
+    """Any JSON value in a body is at most 64 levels deep (the envelope itself is level 1); deeper is a 400 before
+    anything is stored, wherever the depth sits."""
+
+    def body(self, where: str, levels: int):
+        """An envelope (or, for "bare", a manifest) whose total depth is `levels`, reached under `where`."""
+        m = build_manifest(run_id=rid())
+        doc, base = build_envelope(m), {"envelope": 1, "manifest": 2, "resources": 4, "bare": 1}[where]
+        target = {"envelope": doc, "manifest": m, "resources": m["run"]["resources"], "bare": m}[where]
+        target["x_deep"] = "__DEEP__"
+        text = json.dumps(m if where == "bare" else doc).replace('"__DEEP__"', nested(levels - base))
+        return m["run_id"], text
+
+    def post_raw(self, text, query=""):
+        return self.c.post(SUBMIT + query, data=text, content_type="application/json")
+
+    def test_depth_65_rejected_everywhere(self):
+        for where in ("envelope", "manifest", "resources"):
+            _, text = self.body(where, 65)
+            for query in ("", "?dry_run=1"):
+                r = self.post_raw(text, query)
+                self.assertEqual(r.status_code, 400, (where, query))
+                self.assertTrue(r.is_json)
+                self.assertTrue(r.get_json()["errors"])
+        _, bare = self.body("bare", 65)
+        self.assertEqual(self.post_raw(bare, "?dry_run=1").status_code, 400)
+        self.assertEqual(os.listdir(self.data), [])            # nothing stored, not even the DB file
+        run_id = self.submit()
+        r = self.c.post(f"/api/leaderboard/runs/{run_id}/withdraw",
+                        data='{"actor": "a", "reason": "r", "x": ' + nested(64) + "}", content_type="application/json")
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()["withdrawn"])
+
+    def test_depth_64_accepted_end_to_end(self):
+        ids = []
+        for where in ("envelope", "manifest", "resources"):
+            run_id, text = self.body(where, 64)
+            self.assertEqual(self.post_raw(text, "?dry_run=1").status_code, 200, where)
+            self.assertEqual(self.post_raw(text).status_code, 201, where)
+            ids.append(run_id)
+        _, bare = self.body("bare", 64)
+        self.assertEqual(self.post_raw(bare, "?dry_run=1").status_code, 200)
+        for run_id in ids:
+            for u in (f"/api/leaderboard/runs/{run_id}", f"{LB}/run/{run_id}", f"/api/leaderboard/runs/{run_id}/raw"):
+                self.assertEqual(self.c.get(u).status_code, 200, u)
+        for u in ("/api/leaderboard/board", "/api/leaderboard/runs", f"{LB}/compare?runs={','.join(ids)}", LB):
+            self.assertEqual(self.c.get(u).status_code, 200, u)
+        r = self.c.post(f"/api/leaderboard/runs/{ids[0]}/withdraw",
+                        data='{"actor": "a", "reason": "r", "x": ' + nested(63) + "}", content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+
+
+class TestDisplayRules(WebCase):
+    """What the pages and summaries show of accepted values: declared fields only, cut labels, finite numbers."""
+
+    def test_unknown_resource_keys_not_rendered(self):
+        m = build_manifest(run_id=rid())
+        m["run"]["resources"]["x_ext"] = {"a": [1, {"b": "nested"}]}
+        m["run"]["resources"]["x_long"] = "z" * 100_000
+        self.post(build_envelope(m))
+        html = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        self.assertIn("executors=4", html)
+        self.assertNotIn("x_ext", html)
+        self.assertNotIn("x_long", html)
+        resources = self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()["manifest"]["run"]["resources"]
+        self.assertEqual(resources["x_ext"], {"a": [1, {"b": "nested"}]})
+
+    def test_filter_echo_whole_option_label_cut(self):
+        """The board echoes the requested filter whole; the page labels the option cut and sends it whole."""
+        self.submit()
+        wanted = "s" * 2000
+        board = self.c.get("/api/leaderboard/board?submitter=" + wanted)
+        self.assertEqual(board.get_json()["filter"]["submitter"], wanted)
+        out = run_page_js("board", data=self.page_data(),
+                          fetch=board.get_data(as_text=True), slots=["submitter"])
+        self.assertIn(wanted[:512] + "…", out["texts"])
+        self.assertNotIn(wanted, out["texts"])
+        self.assertIn(facet_token(wanted), out["values"])          # the option selects by token
+
+    def test_compare_delta_never_inf(self):
+        small = self.submit(elapsed=lambda q, r, e: 1)
+        big = self.submit(elapsed=lambda q, r, e: 10 ** 307 if e == "xflare" else 1)
+        html = self.c.get(f"{LB}/compare?runs={small},{big}").get_data(as_text=True)
+        self.assertNotIn("inf%", html)
+        self.assertNotIn("nan%", html)
+        self.assertIn("out of range", html)
+
+    def test_withdrawal_cut_in_summaries(self):
+        run_id = self.submit()
+        reason = "r" * 2000
+        r = self.c.post(f"/api/leaderboard/runs/{run_id}/withdraw", json={"actor": "a@x", "reason": reason})
+        self.assertEqual(r.get_json()["withdrawal"]["reason"], reason[:512] + "…")
+        listed = self.c.get("/api/leaderboard/runs?include_withdrawn=1").get_json()[0]
+        self.assertEqual(listed["withdrawal"]["reason"], reason[:512] + "…")
+        self.assertEqual(self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()["withdrawal"]["reason"], reason)
+
+    def test_toml_diff_char_budget(self):
+        """One line per side over 64 KiB: no diff, a small page."""
+        m = build_manifest(run_id=rid())
+        t = m["run"]["xflare_toml"]
+        t["input_text"], t["rendered_text"] = "a" * 1_000_000, "a" * 999_999 + "b"
+        t["input_sha256"] = hashlib.sha256(t["input_text"].encode()).hexdigest()
+        t["rendered_sha256"] = hashlib.sha256(t["rendered_text"].encode()).hexdigest()
+        self.post(build_envelope(m))
+        r = self.c.get(f"{LB}/run/{m['run_id']}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("too large to diff", r.get_data(as_text=True))
+        self.assertLess(len(r.data), 512 * 1024)
+
+    def test_bad_json_message_has_one_prefix(self):
+        r = self.c.post(SUBMIT, data=b"{not json", content_type="application/json")
+        self.assertEqual(r.status_code, 400)
+        msg = r.get_json()["errors"][0]
+        self.assertTrue(msg.startswith("invalid JSON"), msg)
+        self.assertEqual(msg.count("invalid JSON"), 1, msg)
+
+
+class TestHeroFallback(WebCase):
+    """No Total-eligible run under the filter: the hero is the tab's fastest run in any configuration, flagged and
+    announced; the board rows stay filtered, and nothing crosses SF tabs."""
+
+    def test_board_falls_back_and_rows_stay_filtered(self):
+        slow_1x6 = self.submit(executors=1, elapsed=flat_elapsed(3000))
+        fast_2x12 = self.submit(executors=2, executor_cores=12, elapsed=flat_elapsed(2000))
+        self.submit(executors=4, record_answers=True)                     # 4×6 but never Total-eligible
+        b = self.board()
+        self.assertEqual(b["filter"], {"executors": "4", "executor_cores": "6"})
+        self.assertTrue(b["hero_fallback"])
+        self.assertEqual(b["hero"]["run_id"], fast_2x12)
+        self.assertEqual(b["rows"], [])
+        other = self.board("?executors=1&executor_cores=6")
+        self.assertEqual((other["hero"]["run_id"], other["hero_fallback"]), (slow_1x6, False))
+        self.assertTrue(self.board("?executors=8")["hero_fallback"])
+        sf1000 = self.board("?sf=1000")                                   # the fallback never crosses tabs
+        self.assertEqual((sf1000["hero"], sf1000["hero_fallback"]), (None, False))
+
+        # A 4×6 run, even a slower one, takes the hero back from the fallback.
+        four = self.submit(elapsed=flat_elapsed(5000))
+        b = self.board()
+        self.assertEqual((b["hero"]["run_id"], b["hero_fallback"]), (four, False))
+        self.assertEqual([r["run_id"] for r in b["rows"]], [four])
+
+    def test_no_eligible_run_anywhere(self):
+        self.submit(record_answers=True)
+        b = self.board()
+        self.assertEqual((b["hero"], b["hero_fallback"]), (None, False))
+
+    def test_hero_label_is_cut(self):
+        m = build_manifest(run_id=rid(), executors=2)
+        m["build"]["bundle"]["resolved"] = "b" * 5000
+        self.post(build_envelope(m))
+        label = self.board()["hero"]["config_label"]                   # the fallback hero
+        self.assertTrue(label.endswith("…"))
+        self.assertLessEqual(len(label), 513)
+
+    def test_board_page_notice(self):
+        self.submit(executors=2, executor_cores=12, elapsed=flat_elapsed(2000))
+        page_data = self.page_data()
+        board = self.c.get("/api/leaderboard/board").get_data(as_text=True)
+        label = json.loads(board)["hero"]["config_label"]
+        out = run_page_js("board", data=page_data, fetch=board)
+        self.assertEqual(out["text"]["hero-notice"], "no 4×6 result yet")
+        self.assertEqual(out["text"]["hero-config"], label)
+        other = self.c.get("/api/leaderboard/board?executors=8").get_data(as_text=True)
+        self.assertEqual(run_page_js("board", data=page_data, fetch=other)["text"]["hero-notice"],
+                         "no result for this filter yet")
+        self.submit(elapsed=flat_elapsed(5000))
+        normal = self.c.get("/api/leaderboard/board").get_data(as_text=True)
+        self.assertEqual(run_page_js("board", data=page_data, fetch=normal)["text"]["hero-notice"], "")
+        html = self.c.get(LB).get_data(as_text=True)
+        self.assertLess(html.index('id="hero-notice"'), html.index('id="hero-body"'))
+
+
+class TestWrongAnswersShown(WebCase):
+    """A wrong answer in a failed or aborted repeat disqualifies the query; the run page says why."""
+
+    def test_failed_repeat_error_reason_on_run_page(self):
+        m = build_manifest(run_id=rid())
+        rep = m["repeats"][2]
+        rep["status"] = "failed"
+        q5 = next(q for q in rep["queries"] if q["id"] == 5)
+        q5["engines"]["xflare"].update(status="error", elapsed_ms=None, error="boom")
+        q7 = next(q for q in rep["queries"] if q["id"] == 7)
+        q7["engines"]["velox"]["verify"] = {"against": "answers", "status": "mismatch", "detail": "row 1"}
+        self.post(build_envelope(m))
+        reasons = self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()["derived"]["ineligible_reasons"]
+        self.assertTrue(any("failed repeat 3" in r for r in reasons["q5"]), reasons)
+        self.assertTrue(any("failed repeat 3" in r for r in reasons["q7"]), reasons)
+        html = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        for r in reasons["q5"] + reasons["q7"]:
+            self.assertIn(r, html)
+
+
+# Drives the board script step by step against a DOM stub and a Chart stub. Every fetch stays pending until a step
+# answers it ({"answer": i, "with": key} resolves the i-th request with responses[key]); {"click": text} clicks the
+# button with that text; {"toggle": id} flips a checkbox. Prints what the page ended up showing.
+_BOARD_HARNESS = r"""
+const fs = require('fs'), vm = require('vm');
+const cfg = JSON.parse(fs.readFileSync(0, 'utf8'));
+const byId = {}, all = [], pending = [], charts = [], problems = [];
+let lastUrl = '';
+class Element {
+  constructor(tag, id) {
+    Object.assign(this, { tagName: tag, id, children: [], dataset: {}, hidden: false, value: '', className: '',
+                          href: '', checked: false, on: {}, textContent: (cfg.data || {})[id] || '' });
+    this.style = { setProperty() {} };
+    this.classList = { add() {}, remove() {}, toggle() {}, contains() { return false; } };
+    all.push(this);
+  }
+  appendChild(c) { this.children.push(c); return c; }
+  replaceChildren(...c) { this.children = c; }
+  setAttribute() {}
+  addEventListener(t, f) { (this.on[t] = this.on[t] || []).push(f); }
+  fire(t) { for (const f of this.on[t] || []) f({ target: this }); }
+  insertRow() { return this.appendChild(new Element('tr')); }
+  insertCell() { return this.appendChild(new Element('td')); }
+}
+global.Node = Element;
+global.document = {
+  body: { dataset: { page: 'board' } },
+  getElementById(id) { return byId[id] = byId[id] || new Element('div', id); },
+  querySelector(sel) { return byId[sel] = byId[sel] || new Element('div'); },
+  querySelectorAll() { return []; },
+  createElement(tag) { return new Element(tag); },
+};
+global.location = { search: '', pathname: '/b/xflare_leaderboard' };
+global.history = { replaceState(a, b, u) { lastUrl = u; } };
+global.fetch = url => new Promise(res => pending.push({ url, res }));
+global.Chart = class {
+  constructor(canvas, conf) { this.options = conf.options; this.destroyed = false; charts.push(this); }
+  update() { if (this.destroyed) problems.push('update on a destroyed chart'); }
+  destroy() { this.destroyed = true; }
+};
+vm.runInThisContext(fs.readFileSync(cfg.js, 'utf8'));
+const tick = () => new Promise(r => setTimeout(r, 5));
+(async () => {
+  for (const step of cfg.steps) {
+    await tick();
+    if (step.answer !== undefined) {
+      const text = cfg.responses[step.with];
+      pending[step.answer].res({ ok: true, status: 200, json: async () => JSON.parse(text) });
+    } else if (step.click) {
+      all.filter(e => e.tagName === 'button' && e.textContent === step.click).pop().fire('click');
+    } else if (step.toggle) {
+      const e = byId[step.toggle];
+      e.checked = !e.checked;
+      e.fire('change');
+    }
+  }
+  await tick(); await tick();
+  const tabs = byId['lb-sf-tabs'].children;
+  console.log(JSON.stringify({
+    lastUrl, activeTab: (tabs.find(b => b.className.includes('active')) || {}).textContent,
+    heroLink: byId['hero-link'].href, logListeners: (byId['hero-log'].on.change || []).length,
+    charts: charts.map(c => ({ destroyed: c.destroyed, y: c.options.scales.y.type })), problems,
+    requests: pending.map(p => p.url) }));
+})();
+"""
+
+
+class TestBoardScript(WebCase):
+    """The board page script under controlled timing: stale answers never win, one log toggle drives the chart."""
+
+    def drive(self, steps, responses):
+        node = shutil.which("node")
+        if node is None:
+            raise AssertionError("node not installed: the page-script tests need it (README: Run locally)")
+        cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "data": self.page_data(), "steps": steps,
+               "responses": responses}
+        out = subprocess.run([node, "-e", _BOARD_HARNESS], input=json.dumps(cfg), capture_output=True, text=True,
+                             timeout=30)
+        if out.returncode:
+            raise AssertionError("leaderboard.js failed:\n" + out.stderr[-2000:])
+        return json.loads(out.stdout)
+
+    def two_tabs(self):
+        hundred = self.submit()
+        thousand = self.submit(sf="1000")
+        return hundred, thousand, {"100": self.c.get("/api/leaderboard/board?sf=100").get_data(as_text=True),
+                                   "1000": self.c.get("/api/leaderboard/board?sf=1000").get_data(as_text=True)}
+
+    def test_stale_answer_does_not_win(self):
+        """SF-1000 then SF-100 clicked; SF-100's answer arrives first, SF-1000's last: the page stays on SF-100."""
+        hundred, _, responses = self.two_tabs()
+        out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-1000"}, {"click": "SF-100"},
+                          {"answer": 2, "with": "100"}, {"answer": 1, "with": "1000"}], responses)
+        self.assertIn("sf=1000", out["requests"][1])
+        self.assertEqual(out["activeTab"], "SF-100")
+        self.assertTrue(out["heroLink"].endswith(hundred), out)
+        self.assertIn("sf=100", out["lastUrl"])
+
+    def test_one_log_toggle_listener(self):
+        _, _, responses = self.two_tabs()
+        out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-100"}, {"answer": 1, "with": "100"},
+                          {"click": "SF-100"}, {"answer": 2, "with": "100"}, {"toggle": "hero-log"}], responses)
+        self.assertEqual(out["logListeners"], 1)
+        self.assertEqual(out["problems"], [])
+        self.assertEqual(out["charts"][-1], {"destroyed": False, "y": "logarithmic"})
+
+
+class TestDisplayRound(WebCase):
+    """Facet tokens for long values, server-made notices, numbers that stay JSON, budgets in one place."""
+
+    def test_facet_tokens_and_literals_never_collide(self):
+        """One run's bundle is 513 b's, another's is literally the token of that value: every offered option and
+        every exact full value selects the right run, on /board and /runs."""
+        long_bundle = "b" * 513
+        ids = {}
+        for bundle in (long_bundle, facet_token(long_bundle)):
+            m = build_manifest(run_id=rid())
+            m["build"]["bundle"]["resolved"] = bundle
+            self.post(build_envelope(m))
+            ids[bundle] = m["run_id"]
+        b = self.board()
+        options = {o["token"]: o["label"] for o in b["facets"]["bundle"]}
+        self.assertEqual(set(options), {facet_token(v) for v in ids})
+        self.assertEqual(options[facet_token(long_bundle)], "b" * 512 + "…")
+
+        def runs(query):
+            return ([r["run_id"] for r in self.board(query)["rows"]],
+                    [r["run_id"] for r in self.c.get("/api/leaderboard/runs" + query).get_json()])
+
+        for value, run_id in ids.items():
+            self.assertEqual(runs("?bundle_t=" + facet_token(value)), ([run_id], [run_id]), value[:20])
+            self.assertEqual(runs("?bundle=" + value), ([run_id], [run_id]), value[:20])
+            both = f"?bundle={value}&bundle_t={facet_token(value)}"
+            self.assertEqual(runs(both), ([run_id], [run_id]))
+        other = facet_token(long_bundle)
+        self.assertEqual(runs(f"?bundle={long_bundle}&bundle_t={facet_token(other)}"), ([], []))  # must both match
+        self.assertEqual(runs("?bundle_t=h:0000000000000000"), ([], []))
+        echo = self.board("?bundle=" + long_bundle)
+        self.assertEqual(echo["filter"]["bundle"], long_bundle)
+        self.assertEqual(echo["filter_tokens"]["bundle"], facet_token(long_bundle))
+
+    def test_shared_literal_url_selects_the_offered_option(self):
+        """A URL with the full literal value selects the existing option instead of adding a second one."""
+        long_bundle = "b" * 513
+        m = build_manifest(run_id=rid())
+        m["build"]["bundle"]["resolved"] = long_bundle
+        self.post(build_envelope(m))
+        board = self.c.get("/api/leaderboard/board?bundle=" + long_bundle).get_data(as_text=True)
+        out = run_page_js("board", data=self.page_data(), fetch=board, slots=["bundle"])
+        self.assertEqual(out["texts"].count("b" * 512 + "…"), 1)
+        self.assertIn(facet_token(long_bundle), out["values"])
+
+    def test_api_is_strict_json(self):
+        """Two Total-eligible runs whose totals are finite but far apart: no Infinity/NaN anywhere in the API."""
+        def strict(text):
+            return json.loads(text, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
+        import datetime
+        t0 = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
+        a = self.submit(started_at=t0, elapsed=lambda q, r, e: 1)
+        b = self.submit(started_at=t0 + datetime.timedelta(days=1),
+                        elapsed=lambda q, r, e: 5 * 10 ** 306 if e == "xflare" else 1)
+        for u in ("/api/leaderboard/board", "/api/leaderboard/runs", f"/api/leaderboard/runs/{a}",
+                  f"/api/leaderboard/runs/{b}"):
+            r = self.c.get(u)
+            self.assertEqual(r.status_code, 200, u)
+            strict(r.get_data(as_text=True))
+
+    def test_run_chart_numbers_stay_finite(self):
+        m = build_manifest(run_id=rid(), elapsed=lambda q, r, e: 10 ** 400 if (q, e) == (1, "xflare") else 1000)
+        self.post(build_envelope(m))
+        html = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        chart = json.loads(re.search(r'id="lb-run-data">(.*?)</script>', html, re.S).group(1))
+        self.assertIsNone(chart["xflare"][0])
+        self.assertEqual(chart["xflare"][1], 1000.0)
+
+    def test_notice_made_by_the_server(self):
+        self.submit(executors=2, executor_cores=12)
+        self.assertEqual(self.board()["hero_notice"], "no 4×6 result yet")
+        self.assertEqual(self.board("?executors=8")["hero_notice"], "no result for this filter yet")
+        self.assertEqual(self.board("?executors=4&executor_cores=6&bundle=x")["hero_notice"],
+                         "no result for this filter yet")
+        self.submit()
+        self.assertIsNone(self.board()["hero_notice"])
+
+    def test_board_page_texts_and_budgets(self):
+        html = self.c.get(LB).get_data(as_text=True)
+        self.assertIn('<h3 id="hero-title">Hero</h3>', html)
+        self.assertIn("이 SF 탭에 Total-eligible run 이 아직 없습니다", html)
+        self.assertIn("항목당 200개", html)
+        self.assertEqual(json.loads(self.page_data()["lb-page-data"])["scalar_chars"], 512)
+
+    def test_common_reasons_shown_once(self):
+        m = build_manifest(run_id=rid(), record_answers=True)
+        self.post(build_envelope(m))
+        reasons = self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()["derived"]["ineligible_reasons"]
+        self.assertIn("recording mode (record_answers=true)", reasons["common"])
+        html = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        self.assertIn('id="common-reasons"', html)
+        self.assertEqual(html.count("recording mode (record_answers=true)"), 1)
+
+    def test_dry_run_reason_lists_capped(self):
+        m = build_manifest(run_id=rid(), repeats=60)
+        for rep in m["repeats"][1:]:
+            rep["status"] = "aborted"
+        out = self.post(m, "?dry_run=1", status=200)
+        total = out["ineligible_reasons"]["total"]
+        self.assertEqual(len(total), 51)
+        self.assertRegex(total[-1], r"^\.\.\. \d+ more$")
+        for v in out["ineligible_reasons"].values():
+            self.assertLessEqual(len(v), 51)
+
+    def test_runs_listed_by_instant(self):
+        ids = {}
+        for ts in ("2026-10-01T01:03:00.5Z", "2026-10-01T01:03:00Z"):
+            m = build_manifest(run_id=rid())
+            m["run"]["finished_at"] = ts
+            self.post(build_envelope(m))
+            ids[ts] = m["run_id"]
+        self.assertEqual([r["run_id"] for r in self.c.get("/api/leaderboard/runs").get_json()],
+                         [ids["2026-10-01T01:03:00Z"], ids["2026-10-01T01:03:00.5Z"]])
+
+
+class TestApiContract(WebCase):
+    def test_replay_returns_original_warnings(self):
+        m = build_manifest(run_id=rid())
+        env = build_envelope(m)
+        env["x_extra"] = 1                                  # unknown property: a warning, not an error
+        first = self.post(env)
+        self.assertTrue(first["warnings"])
+        self.assertEqual(self.post(build_envelope(m), status=200), first)
+
+    def test_malformed_run_id_json_404(self):
+        for method, u in (("get", "/api/leaderboard/runs/abc"), ("get", "/api/leaderboard/runs/abc/raw"),
+                          ("post", "/api/leaderboard/runs/abc/withdraw")):
+            r = getattr(self.c, method)(u, json={"actor": "a", "reason": "r"} if method == "post" else None)
+            self.assertEqual(r.status_code, 404, u)
+            self.assertEqual(r.get_json(), {"errors": ["unknown run_id"]}, u)
+
+    def test_runs_takes_filters_without_default(self):
+        four = self.submit()
+        one = self.submit(executors=1)
+        got = lambda q: {r["run_id"] for r in self.c.get("/api/leaderboard/runs" + q).get_json()}  # noqa: E731
+        self.assertEqual(got(""), {four, one})
+        self.assertEqual(got("?executors=1"), {one})
+        self.assertEqual(got("?executors=4&executor_cores=6"), {four})
+        self.assertEqual(got("?from=2099-01-01"), set())
+        self.assertEqual(self.c.get("/api/leaderboard/runs?sf=7").status_code, 400)
+
+
+class TestCompare(WebCase):
+    """Compare: the board's selection leads there, Δ% is against the first run, the diff marks what differs."""
+
+    def test_board_selection_navigates_to_compare(self):
+        ids = [self.submit(elapsed=flat_elapsed(1000 + 10 * i)) for i in range(5)]       # board order = ids
+        fetch = self.c.get("/api/leaderboard/board").get_data(as_text=True)
+        out = run_page_js("board", data=self.page_data(), fetch=fetch, check=3, click="lb-compare")
+        self.assertEqual(out["gate"], [True, False, False])                  # 2–4 selected enable the button
+        self.assertEqual(out["location"], f"{LB}/compare?runs={','.join(ids[:3])}")
+        self.assertEqual(self.c.get(out["location"]).status_code, 200)
+        self.assertEqual(run_page_js("board", data=self.page_data(), fetch=fetch, check=5)["gate"],
+                         [True, False, False, False, True])                 # five is one too many
+
+    def compare_deltas(self, *runs):
+        """The Δ% texts of the Xflare total row and the Q1 row, left to right."""
+        html = self.c.get(f"{LB}/compare?runs={','.join(runs)}").get_data(as_text=True)
+        pct = re.compile(r"[+-]\d+\.\d%")
+        total = re.search(r'<tr class="lb-total-row">(.*?)</tr>', html, re.S).group(1)
+        q1 = re.search(r"<td>Q1</td>(.*?)</tr>", html, re.S).group(1)
+        return pct.findall(total), pct.findall(q1)
+
+    def test_delta_is_against_the_first_run(self):
+        ms100, ms50, ms200 = (self.submit(elapsed=lambda q, r, e, x=x: x if e == "xflare" else 3000)
+                              for x in (100, 50, 200))
+        self.assertEqual(self.compare_deltas(ms100, ms50, ms200), (["-50.0%", "+100.0%"], ["-50.0%", "+100.0%"]))
+        self.assertEqual(self.compare_deltas(ms50, ms100, ms200), (["+100.0%", "+300.0%"], ["+100.0%", "+300.0%"]))
+
+    def test_parameter_diff_marks_what_differs(self):
+        a = build_manifest(run_id=rid())
+        b = build_manifest(run_id=rid(), executors=8)
+        b["run"]["xflare_overrides"][0]["value"] = "4096"
+        for m in (a, b):
+            self.post(build_envelope(m))
+        html = self.c.get(f"{LB}/compare?runs={a['run_id']},{b['run_id']}").get_data(as_text=True)
+        rows = {key: (cls, cells) for cls, key, cells in
+                re.findall(r'<tr class="(lb-differs|lb-same)">\s*<td><code>([^<]*)</code></td>(.*?)</tr>', html, re.S)}
+        self.assertEqual(rows["resources.executors"][0], "lb-differs")
+        self.assertIn(">4<", rows["resources.executors"][1])
+        self.assertIn(">8<", rows["resources.executors"][1])
+        self.assertEqual(rows["override.join.output_batch_rows"][0], "lb-differs")
+        self.assertIn("4096", rows["override.join.output_batch_rows"][1])
+        self.assertEqual(rows["resources.executor_cores"][0], "lb-same")
+
+
+class TestConcurrency(WebCase):
+    def test_two_concurrent_posts(self):
+        envs = [build_envelope(build_manifest(run_id=rid(), elapsed=flat_elapsed(1000 + i))) for i in range(2)]
+        barrier = threading.Barrier(2)
+        codes = []
+
+        def go(env):
+            client = self.app.test_client()
+            barrier.wait()
+            codes.append(client.post(SUBMIT, json=env).status_code)
+
+        threads = [threading.Thread(target=go, args=(e,)) for e in envs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(codes, [201, 201])
+        got = {r["run_id"] for r in self.c.get("/api/leaderboard/runs").get_json()}
+        self.assertEqual(got, {e["manifest"]["run_id"] for e in envs})
+
+
+class TestReproAndBoardLabels(WebCase):
+    """The board names a run by when it finished and spells its config out on hover; the run page's reproduce
+    script pastes into a shell as is and copies over plain http."""
+
+    # Every option is one spark-tpch.sh accepts; the hostile value rides in --results-dir.
+    ARGV = ["--reservation", "4242", "--xflare-toml", "scripts/config/Resource.mu.d1.toml.in", "--scale-factor",
+            "100", "--xflare", "driver.skip_tiling=false", "--results-dir", "$(touch pwned) 'q\"", "1", "6"]
+
+    def run_with_argv(self, argv, **kw):
+        m = build_manifest(run_id=rid(), **kw)
+        m["run"]["argv"] = argv
+        self.post(build_envelope(m))
+        return m, self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+
+    @staticmethod
+    def script_of(page):
+        return html.unescape(re.search(r'<pre id="repro-cmd">(.*?)</pre>', page, re.S).group(1))
+
+    def paste(self, script, reservation):
+        """Runs the script in bash from a fake checkout whose git and spark-tpch.sh only record their argv
+        (NUL-separated; git also ends each call with a newline)."""
+        bash = shutil.which("bash")
+        if bash is None:
+            raise AssertionError("bash not installed: the reproduce-script tests need it (README: Run locally)")
+        root = tempfile.mkdtemp(prefix="lb-repro-")
+        self.addCleanup(shutil.rmtree, root, True)
+        os.makedirs(os.path.join(root, "bin"))
+        os.makedirs(os.path.join(root, "scripts"))
+        for path, name, tail in ((os.path.join(root, "bin", "git"), "git", 'printf "\\n" >> "$REC_DIR/git"\n'),
+                                 (os.path.join(root, "scripts", "spark-tpch.sh"), "spark", "")):
+            with open(path, "w") as f:
+                f.write(f'#!/bin/sh\nfor a in "$@"; do printf "%s\\0" "$a"; done >> "$REC_DIR/{name}"\n{tail}')
+            os.chmod(path, 0o755)
+        env = {"PATH": os.path.join(root, "bin") + os.pathsep + os.environ.get("PATH", ""), "REC_DIR": root}
+        if reservation is not None:
+            env["RESERVATION"] = reservation
+        out = subprocess.run([bash], input=script, cwd=root, env=env, capture_output=True, text=True, timeout=30)
+
+        def recorded(name):
+            p = os.path.join(root, name)
+            if not os.path.exists(p):
+                return ""
+            with open(p) as f:
+                return f.read()
+        spark = recorded("spark")
+        return out, recorded("git"), spark.split("\0")[:-1] if spark else [], root
+
+    def test_script_runs_the_run_again(self):
+        m, page = self.run_with_argv(self.ARGV)
+        out, git, spark, root = self.paste(self.script_of(page), "777")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(git, f"fetch\0origin\0\ncheckout\0{m['client']['revision']}\0\n")
+        # artifact and bundle are pinned to what the run resolved; its own booking becomes the reader's, in place
+        self.assertEqual(spark, ["--artifact", m["build"]["artifact_id"], "--bundle", m["build"]["bundle"]["resolved"],
+                                 "--reservation", "777", *self.ARGV[2:]])
+        self.assertFalse(os.path.exists(os.path.join(root, "pwned")))
+
+    def test_script_waits_for_a_reservation(self):
+        _, page = self.run_with_argv(self.ARGV)
+        out, git, spark, _ = self.paste(self.script_of(page), None)
+        self.assertEqual((git, spark), ("", []))
+        self.assertIn("set RESERVATION", out.stderr)
+
+    def test_script_keeps_the_runs_own_pins_and_flags_a_dirty_checkout(self):
+        m = build_manifest(run_id=rid(), bundle_kind="dev")
+        m["run"]["argv"] = ["--reservation", "1", "--bundle", "dev:abc", "--artifact", "art-9", "3"]
+        m["client"]["dirty"] = True
+        self.post(build_envelope(m))
+        script = self.script_of(self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True))
+        self.assertIn("uncommitted changes", script)
+        self.assertIn("Dev bundle: only its owner", script)
+        _, _, spark, _ = self.paste(script, "5")
+        self.assertEqual(spark, ["--reservation", "5", "--bundle", "dev:abc", "--artifact", "art-9", "3"])
+
+    def test_run_page_shows_the_stored_script(self):
+        """The run page prints the script derive() stored with the run -- the board's copy -- and never rebuilds it."""
+        m, page = self.run_with_argv(self.ARGV)
+        stored = self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()["derived"]["repro"]
+        with mock.patch.object(repro, "script", side_effect=AssertionError("rebuilt")):
+            again = self.c.get(f"{LB}/run/{m['run_id']}")
+            row = self.board()["rows"][0]
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(self.script_of(again.get_data(as_text=True)), stored["command"])
+        self.assertEqual(row["repro"], stored["command"])
+
+    def test_copy_without_a_secure_context(self):
+        _, page = self.run_with_argv(self.ARGV)
+        script = self.script_of(page)
+        data = {"lb-run-data": re.search(r'id="lb-run-data">(.*?)</script>', page, re.S).group(1),
+                "repro-cmd": script}
+        ids = re.findall(r'id="([^"]+)"', page)
+        plain = run_page_js("run", ids=ids, data=data, click="repro-copy")
+        self.assertEqual((plain["execs"], plain["clipboard"]), (["copy"], []))
+        self.assertEqual(plain["text"]["repro-copy"], "copied")
+        secure = run_page_js("run", ids=ids, data=data, click="repro-copy", secure=True)
+        self.assertEqual((secure["execs"], secure["clipboard"]), ([], [script]))
+
+    def test_board_run_label_and_config_tooltip(self):
+        run_id = self.submit()
+        row = self.board()["rows"][0]
+        out = run_page_js("board", data=self.page_data(),
+                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        self.assertIn(row["finished_at"].replace("T", " ")[:16], out["texts"])
+        self.assertNotIn(run_id[:8], out["texts"])
+        self.assertIn(f"{run_id}\nfinished {row['finished_at']}", out["titles"])
+        self.assertIn(f"{LB}/run/{run_id}", out["hrefs"])
+        # the board cell says only the resources (the hero keeps the full label); the tooltip spells every field out
+        self.assertIn("4×6 64g", out["texts"])
+        self.assertIn("\n".join(f"{k}: {'—' if v is None else v}" for k, v in row["config"].items()), out["titles"])
+
+    def test_board_row_copies_its_reproduce_script(self):
+        m, page = self.run_with_argv(self.ARGV)
+        row = self.board()["rows"][0]
+        self.assertEqual(row["repro"], self.script_of(page))          # the board offers the run page's script
+        out = run_page_js("board", data=self.page_data(), click_class="lb-copy",
+                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        self.assertEqual((out["execs"], out["clipboard"]), (["copy"], []))
+        self.assertIn("copied", out["texts"])
+        self.assertIn(row["repro"], out["titles"])
+        # a script past the budget is not offered; the cell points at the run page
+        self.run_with_argv(["--download-logs"] * (repro.MAX_ARGS + 1), elapsed=flat_elapsed(500))
+        long_row = self.board()["rows"][0]
+        self.assertIsNone(long_row["repro"])
+        out = run_page_js("board", data=self.page_data(),
+                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        self.assertIn("run page", out["texts"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -1,0 +1,92 @@
+{#- Submitted values are printed through Jinja autoescape only, every uploaded
+    scalar through v (cut); _params (web.py) caps the uploaded lists. -#}
+{%- from "leaderboard_macros.html" import v, pct -%}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Compare {{ runs | length }} runs — {{ benchmark.title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='leaderboard.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body data-page="compare">
+<header class="lb-header">
+  <h1><a href="{{ url_for('leaderboard.board_page') }}">{{ benchmark.title }}</a> / compare</h1>
+</header>
+
+<main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
+  <section class="lb-panel">
+    <h3>Runs</h3>
+    <p class="lb-note">Δ 는 첫 번째 run 대비 xflare median 변화 (음수 = 빨라짐).</p>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table">
+        <thead><tr>
+          <th></th>
+          {% for r in runs %}<th><a href="{{ r.summary.url }}">{{ r.row.run_id[:8] }}</a>{% if loop.first %} (base){% endif %}</th>{% endfor %}
+        </tr></thead>
+        <tbody>
+          <tr><td>SF</td>{% for r in runs %}<td>SF-{{ v(r.d.sf) }}</td>{% endfor %}</tr>
+          <tr><td>Finished</td>{% for r in runs %}<td>{{ v(r.d.finished_at) }}</td>{% endfor %}</tr>
+          <tr><td>Submitter</td>{% for r in runs %}<td>{{ v(r.d.submitter) }}</td>{% endfor %}</tr>
+          <tr><td>Config</td>{% for r in runs %}<td class="lb-wrap-cell">{{ v(r.d.config_label) }}</td>{% endfor %}</tr>
+          <tr><td>Repeats</td>{% for r in runs %}<td>x{{ r.d.repeats_completed }}</td>{% endfor %}</tr>
+          <tr><td>Badges</td>{% for r in runs %}<td class="lb-wrap-cell">{% for b in r.d.badges %}<span class="lb-badge">{{ v(b) }}</span>{% endfor %}{% if r.summary.withdrawn %}<span class="lb-badge b-bad">withdrawn</span>{% endif %}</td>{% endfor %}</tr>
+          <tr class="lb-total-row"><td>Xflare total</td>{% for t in totals %}<td>{{ t.xflare_ms | lb_ms }} {% if not loop.first %}{{ pct(t.delta_pct) }}{% endif %}</td>{% endfor %}</tr>
+          <tr><td>Velox total</td>{% for t in totals %}<td>{{ t.velox_ms | lb_ms }}</td>{% endfor %}</tr>
+          <tr><td>Speedup</td>{% for t in totals %}<td>{{ t.speedup | lb_x }}</td>{% endfor %}</tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="lb-panel">
+    <h3>Per-query xflare medians</h3>
+    <div class="chart-tools">
+      <label><input type="checkbox" id="compare-log"> log scale</label>
+    </div>
+    <div class="lb-chart"><canvas id="compare-chart"></canvas></div>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table">
+        <thead><tr>
+          <th>Query</th>
+          {% for r in runs %}<th class="num">{{ r.row.run_id[:8] }} xflare</th><th class="num">velox</th>{% endfor %}
+        </tr></thead>
+        <tbody>
+        {% for q in queries %}
+          <tr>
+            <td>Q{{ q.q }}</td>
+            {% for c in q.cells %}
+              <td class="num">{{ c.xflare_ms | lb_ms }} {% if not loop.first %}{{ pct(c.delta_pct) }}{% endif %}</td>
+              <td class="num lb-dim">{{ c.velox_ms | lb_ms }}</td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="lb-panel">
+    <h3>Config / parameters / revisions</h3>
+    <label class="lb-toggle"><input type="checkbox" id="params-only-diff" checked> 다른 것만 보기</label>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table only-diff" id="params-table">
+        <thead><tr><th>Key</th>{% for r in runs %}<th>{{ r.row.run_id[:8] }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for p in params %}
+          <tr class="{{ 'lb-differs' if p.differs else 'lb-same' }}">
+            <td><code>{{ v(p.key) }}</code></td>
+            {% for val in p['values'] %}<td class="lb-wrap-cell">{{ v(val) }}</td>{% endfor %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script type="application/json" id="lb-compare-data">{{ chart | tojson }}</script>
+<script src="{{ url_for('static', filename='leaderboard.js') }}"></script>
+</body>
+</html>
