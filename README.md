@@ -14,7 +14,7 @@ A small Flask service that ranks hand-run `spark-tpch.sh` batches people upload.
 | `leaderboard/store.py` | SQLite (WAL) + raw manifest files |
 | `leaderboard/web.py` | Blueprint: API and pages |
 | `leaderboard/display.py` | display budgets (cut lengths, list and facet sizes) and the helpers that apply them |
-| `leaderboard/backup.py`, `systemd/` | the service unit, daily backup to the NAS, restore |
+| `leaderboard/backup.py`, `systemd/` | the service unit; an optional daily NAS backup and its restore (not installed on server 60) |
 | `leaderboard/fixtures/` | contract fixtures; `make_fixtures.py` regenerates them |
 | `templates/`, `static/` | the board, run and compare pages |
 
@@ -229,7 +229,11 @@ Nothing in CI does this today. A job that wants its runs on the board would:
   lock, and so is the one-time setup (WAL mode, tables, `user_version`). Run the service as a single process;
   nothing else should open the DB read-write (`backup.py` opens it read-only).
 
-## Backup and restore
+## Backup and restore (optional)
+
+The server 60 deployment runs without a backup: the data lives only in the data dir on that host's local disk, and a
+lost disk loses the submissions. `backup.py` and its units stay in the repo so it can be turned on later (see the end
+of the deploy runbook).
 
 ```
 python3 leaderboard/backup.py backup  --data /home/sw-devops/data/xflare_leaderboard \
@@ -256,49 +260,71 @@ leaves a dir the service would open as a partial leaderboard (without the DB it 
 target must be empty or absent. To restore the live data: stop the service, restore into a new dir, move the old dir
 aside, move the new one into place, start the service.
 
-The units are in `systemd/`: `xflare-leaderboard.service` (the service), and the backup
-`xflare-leaderboard-backup.{service,timer}` (daily 03:30 + up to 10 min jitter, `Persistent=true`, oneshot). All
-run as `sw-devops` with `/usr/bin/python3` from `/home/sw-devops/xflare-leaderboard`.
+The units are in `systemd/`: `xflare-leaderboard.service` (the service) and, for the optional backup,
+`xflare-leaderboard-backup.{service,timer}` (daily 03:30 host time + up to 10 min jitter, `Persistent=true`, oneshot).
+All run as `sw-devops` with `/usr/bin/python3` from `/home/sw-devops/xflare-leaderboard`.
 
 ## Deploy runbook (server 60, done by a person)
 
-The service runs on its own port next to anything else on the host; it shares nothing with other services. The
-checkout path `/home/sw-devops/xflare-leaderboard` and port 8894 are proposals: if either changes, change the
-units in `systemd/` (paths) or `server.port` in `config.yaml` to match before installing.
+The service runs on its own port next to anything else on the host and shares nothing with other services
+(Benchmark Hub on :8892 is unrelated and unchanged). Every git command runs as `sw-devops`, the checkout's owner
+(git refuses a repository owned by someone else).
 
-Every git command runs as `sw-devops`, the checkout's owner (git refuses a repository owned by someone else).
+Server 60 as checked at the first deploy (2026-10-20): Ubuntu 22.04.5; `/usr/bin/python3` 3.10.12 with Flask 2.3.3,
+Werkzeug 3.1.3, PyYAML 6.0.1 and SQLite 3.37.2; port 8894 free; ufw inactive and `INPUT ACCEPT` (no firewall
+change needed); `/home` is local ext4. Re-run step 0 before a fresh install on another host; if port 8894 or the
+checkout path must differ there, change `server.port` in `config.yaml` or the paths in `systemd/` before step 4.
 
-1. Clone and record the SHA:
+0. Pre-checks (read-only):
    ```
-   sudo -u sw-devops git clone git@github.com:xcena-dev/xflare-leaderboard.git /home/sw-devops/xflare-leaderboard
+   sudo -u sw-devops /usr/bin/python3 -c 'import sys,sqlite3; from importlib.metadata import version as v; print(sys.version.split()[0], "flask", v("flask"), "werkzeug", v("werkzeug"), "pyyaml", v("pyyaml"), "sqlite", sqlite3.sqlite_version)'
+   ss -ltnp 'sport = :8894'                       # must list no socket
+   sudo ufw status; sudo iptables -S INPUT | head  # ufw active: sudo ufw allow 8894/tcp; another firewall: open 8894/tcp there
+   findmnt -T /home/sw-devops; df -h /home/sw-devops
+   ```
+   `requirements.txt` sets the floor: Flask ≥ 2.2 (Werkzeug comes with it) and PyYAML ≥ 6.0; below that, stop. The
+   SQLite WAL-reset bug is fixed in 3.51.3 and backported to 3.44.6 and 3.50.7, so a version is fixed when it is
+   ≥ 3.51.3, or 3.50.7–3.50.x, or 3.44.6–3.44.x. Server 60's 3.37.2 is not. What this app does about it: the
+   service opens, uses and closes every connection (close-time checkpoints and the one-time setup included) under
+   one process-wide lock, and `backup.py`, when used, reads through a read-only connection that can neither write
+   nor checkpoint. That keeps the concurrent write/checkpoint pattern the advisory describes out of the app's own
+   paths. What remains: any other process that opens the DB read-write (a `sqlite3` shell, a second service
+   instance) — do not; on an unpatched host such as server 60, do not open the DB file at all while the service runs.
+   Upgrading SQLite is the only mitigation the advisory itself offers.
+1. Give `sw-devops` a read-only deploy key for this repo (its default GitHub key belongs to a person):
+   ```
+   sudo -u sw-devops ssh-keygen -t ed25519 -N '' -C 'sw-devops@server60 xflare-leaderboard (read-only)' -f /home/sw-devops/.ssh/xflare_leaderboard_deploy
+   sudo -u sw-devops cat /home/sw-devops/.ssh/xflare_leaderboard_deploy.pub
+   ```
+   Add the printed line under the repo's Settings → Deploy keys, with "Allow write access" unchecked. Then add an
+   ssh alias that uses only that key (`ssh -T` naming a person instead of the repo means another key was used):
+   ```
+   printf '%s\n' '' 'Host github-xflare-leaderboard' '    HostName github.com' '    User git' \
+     '    IdentityFile ~/.ssh/xflare_leaderboard_deploy' '    IdentitiesOnly yes' |
+     sudo -u sw-devops tee -a /home/sw-devops/.ssh/config >/dev/null
+   sudo -u sw-devops ssh -T github-xflare-leaderboard      # "Hi xcena-dev/xflare-leaderboard!" = the deploy key
+   sudo -u sw-devops git ls-remote github-xflare-leaderboard:xcena-dev/xflare-leaderboard.git   # lists HEAD and main
+   ```
+2. Clone and record the SHA:
+   ```
+   sudo -u sw-devops git clone github-xflare-leaderboard:xcena-dev/xflare-leaderboard.git /home/sw-devops/xflare-leaderboard
    sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard rev-parse HEAD
    ```
-2. Check the port is free: `ss -ltn 'sport = :8894'` must list no socket.
-3. Create the data dir as `sw-devops` on local disk and confirm it is not a network mount:
+3. Create the data dir as `sw-devops` on local disk:
    ```
    sudo -u sw-devops mkdir -p /home/sw-devops/data/xflare_leaderboard
    findmnt -T /home/sw-devops/data/xflare_leaderboard     # FSTYPE must be a local fs (ext4/xfs), not nfs/cifs
    ```
-4. Check the service interpreter:
-   ```
-   sudo -u sw-devops /usr/bin/python3 -c 'import sqlite3; from importlib.metadata import version as v; print("flask", v("flask"), "werkzeug", v("werkzeug"), "pyyaml", v("pyyaml"), "sqlite", sqlite3.sqlite_version)'
-   ```
-   `requirements.txt` sets the floor: Flask ≥ 2.2 (Werkzeug comes with it) and PyYAML ≥ 6.0. Below that, stop: this
-   runbook does not cover installing them. The SQLite WAL-reset bug is fixed in 3.51.3 and backported to 3.44.6 and
-   3.50.7, so a version is fixed when it is ≥ 3.51.3, or 3.50.7–3.50.x, or 3.44.6–3.44.x. If it is older, record the
-   version in the deploy notes. What this app does about it: the service opens, uses and closes every connection
-   (close-time checkpoints and the one-time setup included) under one process-wide lock, and `backup.py` reads
-   through a read-only connection that can neither write nor checkpoint. That keeps the concurrent write/checkpoint
-   pattern the advisory describes out of the app's own paths. What remains: any other process that opens the DB
-   read-write (a `sqlite3` shell, a second service instance) — do not. Upgrading SQLite is the only mitigation the
-   advisory itself offers.
-5. Install and start the service:
+   The service checks the dir on every request, so creating it after the service started needs no restart.
+4. Install and start the service:
    ```
    sudo cp /home/sw-devops/xflare-leaderboard/systemd/xflare-leaderboard.service /etc/systemd/system/
    sudo systemctl daemon-reload && sudo systemctl enable --now xflare-leaderboard
-   systemctl status xflare-leaderboard --no-pager
+   systemctl status xflare-leaderboard --no-pager | head -5    # active (running)
+   ss -ltn 'sport = :8894'                                      # LISTEN 0.0.0.0:8894, a second or two after start
    ```
-6. Smoke:
+   The journal's "This is a development server" warning is expected: the service is Flask's own threaded server.
+5. Smoke:
    ```
    for p in / /b/xflare_leaderboard /api/leaderboard/board; do curl -s -o /dev/null -w "%{http_code} $p\n" "http://127.0.0.1:8894$p"; done
    curl -s -X POST -H 'Content-Type: application/json' --data-binary @/home/sw-devops/xflare-leaderboard/leaderboard/fixtures/valid-envelope.json \
@@ -306,28 +332,16 @@ Every git command runs as `sw-devops`, the checkout's owner (git refuses a repos
    curl -s 'http://127.0.0.1:8894/api/leaderboard/runs'                    # [] — the dry run stored nothing
    find /home/sw-devops/data/xflare_leaderboard -name '*.json' | wc -l     # 0 raw files
    ```
-   Expect `302 /`, `200` for the other two. Then open `http://<server 60>:8894/` from another machine; if it does
-   not answer, the host firewall is closed for the port (outside this runbook).
-7. Install the backup timer (create the NAS destination once, as `sw-devops`, while the share is mounted):
+   Expect `302 /`, `200` for the other two. Then open `http://192.168.97.60:8894/` from another machine.
+6. Jail egress, once per user, on that user's jail host (the submit skill and a jail's browser both need it):
    ```
-   findmnt -T /mnt/sw_nas_ext/public                                        # note the TARGET; it must equal --mount in the unit
-   sudo -u sw-devops mkdir -p /mnt/sw_nas_ext/public/xcena_xflare_leaderboard_backup
-   sudo cp /home/sw-devops/xflare-leaderboard/systemd/xflare-leaderboard-backup.{service,timer} /etc/systemd/system/
-   sudo systemctl daemon-reload && sudo systemctl enable --now xflare-leaderboard-backup.timer
-   systemctl list-timers xflare-leaderboard-backup.timer --no-pager
+   jail egress-policy allow 192.168.97.60:8894
    ```
-   If `findmnt` reports a different TARGET than `/mnt/sw_nas_ext`, edit `--mount` in the installed unit before
-   enabling it.
-8. One backup and restore check by hand, after the first real submission:
-   ```
-   sudo systemctl start xflare-leaderboard-backup.service; journalctl -u xflare-leaderboard-backup -n 20 --no-pager
-   G=$(ls -d /mnt/sw_nas_ext/public/xcena_xflare_leaderboard_backup/2*Z | tail -1)
-   sudo -u sw-devops /usr/bin/python3 /home/sw-devops/xflare-leaderboard/leaderboard/backup.py restore --from "$G" --data /tmp/lb-restore-check
-   sudo -u sw-devops /usr/bin/python3 -c 'import sqlite3; c=sqlite3.connect("/tmp/lb-restore-check/leaderboard.sqlite3"); print(c.execute("PRAGMA integrity_check").fetchone(), c.execute("SELECT COUNT(*) FROM runs").fetchone())'
-   sudo rm -rf /tmp/lb-restore-check
-   ```
+   (Syntax as the jail tooling documents it; confirm with `jail egress-policy --help`.) Check from inside the jail:
+   `curl -sS -o /dev/null -w '%{http_code}\n' http://192.168.97.60:8894/` prints `302`; `000` means no HTTP answer
+   — egress still closed, or the service down — and curl's error line says which.
 
-**Upgrade.** Record the running SHA, pull, restart, and run step 6's status loop and dry run (its `/runs` and
+**Upgrade.** Record the running SHA, pull, restart, and run step 5's status loop and dry run (its `/runs` and
 raw-file counts apply to a fresh install only):
 ```
 sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard rev-parse HEAD      # keep it: the version to go back to
@@ -339,6 +353,26 @@ To go back a version: `sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboa
 `sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard checkout main` after recording the SHA and before the
 pull (record first: the SHA to keep is the one running, not main's).
 
-**Rollback.** `sudo systemctl disable --now xflare-leaderboard xflare-leaderboard-backup.timer`. Nothing else on
-the host depends on the service. Leave `/home/sw-devops/data/xflare_leaderboard` and the NAS backups in place, so a
-re-deploy picks them up.
+**Rollback.** `sudo systemctl disable --now xflare-leaderboard` (and `xflare-leaderboard-backup.timer` if the
+backup was turned on). Nothing else on the host depends on the service. Leave `/home/sw-devops/data/xflare_leaderboard`
+in place so a re-deploy picks it up. To remove it entirely, also delete `/etc/systemd/system/xflare-leaderboard.service`
+and any `xflare-leaderboard-backup.{service,timer}` there (then `sudo systemctl daemon-reload`), the checkout, the
+data dir, and the deploy key (GitHub Deploy keys, the `Host github-xflare-leaderboard` block, the key files).
+
+**Turning the backup on later** (create the NAS destination once, as `sw-devops`, while the share is mounted). If
+`findmnt` reports a different TARGET than `/mnt/sw_nas_ext`, edit `--mount` in the installed unit before enabling it:
+```
+findmnt -T /mnt/sw_nas_ext/public                                        # the TARGET must equal --mount in the unit
+sudo -u sw-devops test -w /mnt/sw_nas_ext/public && sudo -u sw-devops mkdir -p /mnt/sw_nas_ext/public/xcena_xflare_leaderboard_backup
+sudo cp /home/sw-devops/xflare-leaderboard/systemd/xflare-leaderboard-backup.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now xflare-leaderboard-backup.timer
+sudo systemctl start xflare-leaderboard-backup.service; journalctl -u xflare-leaderboard-backup -n 20 --no-pager
+```
+Check one restore by hand once the board holds at least one run (an empty board exercises no raw files):
+```
+G=$(ls -d /mnt/sw_nas_ext/public/xcena_xflare_leaderboard_backup/2*Z | tail -1)
+sudo -u sw-devops /usr/bin/python3 /home/sw-devops/xflare-leaderboard/leaderboard/backup.py restore --from "$G" --data /tmp/lb-restore-check
+sudo -u sw-devops /usr/bin/python3 -c 'import sqlite3; c=sqlite3.connect("/tmp/lb-restore-check/leaderboard.sqlite3"); print(c.execute("PRAGMA integrity_check").fetchone(), c.execute("SELECT COUNT(*) FROM runs").fetchone())'
+sudo rm -rf /tmp/lb-restore-check
+```
+To turn it off again: `sudo systemctl disable --now xflare-leaderboard-backup.timer`.
