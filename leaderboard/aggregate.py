@@ -17,13 +17,15 @@ from fractions import Fraction
 from . import repro
 from .schema import _snip, application_mode_state
 
-DERIVE_VERSION = 7  # A5: structured Spark settings and legacy argv fallback
+DERIVE_VERSION = 8  # A6: only per-engine applications may rank
 QUERY_IDS = range(1, 23)
 METRICS = ("total",) + tuple(f"q{q}" for q in QUERY_IDS)
 DEFAULT_FILTER = {"executors": 4, "executor_cores": 6}
 CONFIG_KEYS = ("executors", "executor_cores", "offheap", "shuffle_partitions", "devices", "toml", "bundle",
                "application_mode", "spark_conf")
 OUT_OF_RANGE = "value beyond numeric range"
+SHARED_REASON = "shared application: engine order affects timings"
+SHARED_BADGE = "shared application"
 
 
 def canonical_manifest_bytes(manifest: dict) -> bytes:
@@ -100,8 +102,8 @@ def _unfinished_problems(entry: dict, repeat: dict) -> list[str]:
 
 def _query_eligibility(manifest: dict, completed: list[dict], application_mode: str,
                        application_problems: list[str]) -> tuple[list[str], dict[int, list[str]]]:
-    """Common and query-specific reasons Q fails. Completed repeats must be fully ok; failed/aborted ones must
-    not have recorded a wrong answer for q. A query is eligible only when both reason lists are empty."""
+    """Measurement problems, before A6's per-engine ranking gate. Completed repeats must be fully ok;
+    failed/aborted ones must not have recorded a wrong answer for q."""
     run = manifest["run"]
     common = list(application_problems)
     if run["record_answers"]:
@@ -190,7 +192,10 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
         spark_conf = "custom" if repro.has_option(run["argv"], "--spark-conf") else "default"
     common, q_reasons = _query_eligibility(manifest, completed, application_mode, application_problems)
 
+    # Shared timings stay visible on stored runs; only per-engine measurements may rank (A6).
+    rankable_mode = application_mode == "per-engine"
     per_query = {}
+    measured_queries = []
     for q in QUERY_IDS:
         xs, vs = _samples(completed, q, "xflare"), _samples(completed, q, "velox")
         x = v = None
@@ -201,7 +206,10 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
                 x = v = None
                 q_reasons[q].append(OUT_OF_RANGE)
         ok = not common and not q_reasons[q]
-        per_query[str(q)] = {"eligible": ok, "xflare_ms": x, "velox_ms": v, "speedup": _ratio(v, x) if ok else None,
+        if ok:
+            measured_queries.append(q)
+        per_query[str(q)] = {"eligible": ok and rankable_mode, "xflare_ms": x, "velox_ms": v,
+                             "speedup": _ratio(v, x) if ok else None,
                              "n": len(completed), "xflare_samples": xs, "velox_samples": vs}
     eligible = [q for q in QUERY_IDS if per_query[str(q)]["eligible"]]
 
@@ -212,7 +220,8 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
     if run["exit_status"] != "ok":
         total_reasons.append(f"exit_status {run['exit_status']}")
     totals = {"xflare_ms": None, "velox_ms": None, "speedup": None}
-    if not total_reasons:
+    if (len(measured_queries) == len(QUERY_IDS) and len(completed) == len(repeats)
+            and run["exit_status"] == "ok"):
         try:
             tx = _exact_sum([per_query[str(q)]["xflare_ms"] for q in QUERY_IDS])
             tv = _exact_sum([per_query[str(q)]["velox_ms"] for q in QUERY_IDS])
@@ -220,6 +229,8 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
         except OverflowError:
             total_reasons.append(OUT_OF_RANGE)
     total_eligible = not total_reasons
+    if application_mode == "shared":
+        common.insert(0, SHARED_REASON)
 
     res = run["resources"]
     bundle = manifest["build"]["bundle"]
@@ -230,6 +241,8 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
 
     env = (envelope or {}).get("environment") or {}
     badges = [f"x{len(completed)}"]
+    if application_mode == "shared":
+        badges.append(SHARED_BADGE)
     if _reproducible(manifest):
         badges.append("reproducible")
     if bundle["kind"] == "dev":
@@ -285,7 +298,10 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
 
 
 def metric_values(derived: dict, metric: str) -> dict:
-    """{"xflare_ms", "velox_ms", "speedup"} of `metric` ("total" | "q1".."q22"); all null when not eligible."""
+    """{"xflare_ms", "velox_ms", "speedup"} of `metric` ("total" | "q1".."q22").
+
+    Shared runs retain valid measurements for display, although they never rank.
+    """
     src = derived["totals"] if metric == "total" else derived["per_query"][metric[1:]]
     return {k: src[k] for k in ("xflare_ms", "velox_ms", "speedup")}
 

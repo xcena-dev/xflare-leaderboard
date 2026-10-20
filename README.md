@@ -37,7 +37,7 @@ XFLARE_LEADERBOARD_DATA=/tmp/lb-data python3 app.py --host 127.0.0.1 --port 8894
 ## Payload contract
 
 This section restates data contract v1 (frozen 2026-10-19, shared with the producer `spark-tpch.sh --submission`
-and the submit skill) with amendments A1–A5; this README is the contract's home, and code comments cite it as
+and the submit skill) with amendments A1–A6; this README is the contract's home, and code comments cite it as
 README §1–§4. The schema files give each field's type; the meanings are stated here.
 
 ### §1 Manifest
@@ -71,6 +71,8 @@ A4 (additive; a manifest without these fields is unchanged and means `shared`):
   the last finish (`null` when the last has none), `cleanup` is `ok` only if every application's is, else `failed`
   if any failed, else `unknown`; `artifact_id` / `bundle` the common value when all applications agree, else
   `null`. `status` keeps its meaning.
+- A6: only `per-engine` runs rank (§4), so `spark-tpch.sh --submission` runs in per-engine mode and its manifest
+  always says `application_mode: "per-engine"`. A `shared` manifest is still valid and accepted.
 
 A5 (additive; absent = unknown, a manifest from before A5):
 - `run.spark_conf`: object `{"<key>": "<value>"}` (string values) of the `spark-tpch.sh --spark-conf KEY=VALUE`
@@ -122,9 +124,19 @@ Computed on the server, never taken from the client.
   (else no query counts: `applications missing <engine> in completed repeat N`), and `artifact_id` and `bundle`
   must each be one value across all applications of all completed repeats (`null` counts as a value), on top of the
   repeat-level check above (`artifact differs across applications of completed repeats`, likewise `bundle`).
-- Reasons (`derived.ineligible_reasons`): causes shared by every query (recording mode, incomplete repeat list, no
-  completed repeat, artifact or bundle differing across repeats, and the A4 application checks) are listed once under
-  `common`; `qN` lists only
+- A6 (supersedes A4's "both modes ranked together"): `Q(run, q)` and total-eligible additionally require the
+  interpreted `run.application_mode` to be `per-engine`. A `shared` run (field absent or `"shared"`) — ABBA
+  measurement 2026-10-20: the engine that runs first in a shared application is ~2% slower overall and up to 25% on
+  short queries, so its ranking would depend on its `--engines` order — is accepted (dry run and a new POST answer as
+  usual, `ranked_total: false`; an identical retry of a run stored before A6 returns its original §3 receipt, whose
+  `ranked_total` may read true although the run no longer ranks), stored and listed, but is on no board (Total or any query), is never the hero and
+  is never an A3 fallback candidate. It gets the common reason `shared application: engine order affects timings`
+  (first in `common`) and the `shared application` badge. Its per-query medians and totals are still computed and
+  shown (run page, detail API, compare) as measurements; every `per_query[q].eligible` and `total_eligible` is
+  false. A run whose stored mode is unreadable (`-`, below) keeps its own reason and gets no shared badge.
+- Reasons (`derived.ineligible_reasons`): causes shared by every query (A6's shared application, recording mode,
+  incomplete repeat list, no completed repeat, artifact or bundle differing across repeats, and the A4 application
+  checks) are listed once under `common`; `qN` lists only
   what is specific to that query, and `total` the Total-specific causes. A reason never embeds an unbounded value
   (a huge repeat index is shortened). The dry-run response lists at most 50 reasons per key, then `... N more`; the
   stored run keeps them all.
@@ -143,16 +155,18 @@ Computed on the server, never taken from the client.
   `executor_cores=6`). A3: when none matches, the hero falls back to the tab's fastest total-eligible run in any
   configuration, under a notice ("no 4×6 result yet" for the default filter, "no result for this filter yet"
   otherwise) and with its config label shown at the top; the board itself stays filtered. The fallback never
-  crosses tabs. Tabs: SF-100, then SF-1000.
+  crosses tabs, and (A6) its candidates are total-eligible, hence `per-engine`, runs only; with none on the tab
+  there is no hero. Tabs: SF-100, then SF-1000.
 - Badges never gate: `xN`, `reproducible` (`build.provenance_source=artifact-manifest`, `build.dirty=false`,
   `client.dirty=false`, and a bundle that is not `dev` or one with `gluten.commit` set and `gluten.dirty=false`),
   `dev bundle`, `booking overlap` / `overlap unknown`, `partial`,
   `offload:<status>` (the evidence status of the completed repeats, whole; `offload:mixed` when they disagree),
-  `spark conf` (A5: the Spark settings state is `custom`).
-  Bundle and resources are columns and filters, never separate boards.
-- A4: `shared` and `per-engine` runs rank together on the same boards under the same order and hero rules; the
-  application mode is part of the config label, a board column (Mode) and a filter, never a board split, and the
-  default filter does not narrow it.
+  `spark conf` (A5: the Spark settings state is `custom`), `shared application` (A6: informational; the gate is the
+  rule above). Bundle and resources are columns and filters, never separate boards.
+- A4: the application mode is part of the config label, a board column (Mode) and a filter, never a board split,
+  and the default filter does not narrow it. (A4's "both modes rank together" is superseded by A6: only
+  `per-engine` runs rank, so the Mode column shows `per-engine`; filtering to `shared` leaves the board empty and
+  the page lists those runs below it.)
 - A5: every run has a Spark settings state, `custom` when `run.spark_conf` is a non-empty object and `default` when
   it is `{}`. It never gates (§4 eligibility, order and hero are unchanged) and never splits a board: a `custom` run
   gets the `spark conf` badge and a ` +conf` marker at the end of its config label, and the filter `spark_conf`
@@ -168,8 +182,8 @@ Interpretations the contract leaves open (decided here, not contract changes):
   not strings.
 - A4 on runs stored before it: a mode outside the enum shows as `-` (`application_mode not understood: …`), and a
   per-engine run whose applications break the A4 rules gets `applications missing or malformed in repeat N`; both
-  stay listed but never rank. A shared run's stray `applications` stay uninterpreted, so it ranks as before. An
-  identical re-upload of such a run still gets 200 with its original receipt (§3), although today's validator would
+  stay listed but never rank. A shared run's stray `applications` stay uninterpreted (since A6 it never ranks, as a
+  shared run). An identical re-upload of such a run still gets 200 with its original receipt (§3), although today's validator would
   reject the manifest as a new submission; nothing is stored or updated by it.
 - A5 on manifests without `run.spark_conf` (contract: unknown): the state is read from argv, `custom` when argv
   has an actual `--spark-conf` option and `default` otherwise. argv is read with `spark-tpch.sh`'s option arity
@@ -194,16 +208,20 @@ reads no storage and still loads.
 | `GET /api/leaderboard/runs` | `sf=100\|1000`, `include_withdrawn=1`, and the board's filters with NO default (absent = any) | 200 `[run summary]`, oldest `finished_at` instant first (then `run_id`); 400 bad sf |
 | `GET /api/leaderboard/runs/<run_id>` | | 200 run summary + `derived`, `meta`, `manifest`; 404 `unknown run_id` |
 | `GET /api/leaderboard/runs/<run_id>/raw` | | 200 the whole stored manifest file (no size cap), `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`; 404 `raw manifest not found` (no row, file missing, symlink or not a regular file); 503 when the file cannot be read |
-| `GET /api/leaderboard/board` | `sf` (default first tab), `metric=total\|q1..q22`, `top=5\|10\|25` (default 10), filters `executors`, `executor_cores`, `offheap`, `shuffle_partitions`, `devices`, `toml`, `bundle`, `application_mode` (`shared\|per-engine`), `spark_conf` (`default\|custom`, or `unknown`; §4 A5), `device`, `submitter`, `badge` (each also as `<key>_t` = facet token), `from`, `to` (YYYY-MM-DD) | 200 `{sf, tabs, metric, top, filter, filter_tokens, default_filter, facets, facets_truncated, hero, hero_fallback, hero_notice, eligible_count, rows}`; `hero_fallback` is true when `hero` is the tab's fallback run (rows stay filtered, possibly empty) and `hero_notice` is then the line the page shows above it, else null; `hero` adds `per_query` (22 entries from that one run); each row is a run summary plus `rank`, `value {xflare_ms, velox_ms, speedup}` and `repro` (the reproduce script, or null when none is offered); 400 bad sf or metric |
+| `GET /api/leaderboard/board` | `sf` (default first tab), `metric=total\|q1..q22`, `top=5\|10\|25` (default 10), filters `executors`, `executor_cores`, `offheap`, `shuffle_partitions`, `devices`, `toml`, `bundle`, `application_mode` (`shared\|per-engine`), `spark_conf` (`default\|custom`, or `unknown`; §4 A5), `device`, `submitter`, `badge` (each also as `<key>_t` = facet token), `from`, `to` (YYYY-MM-DD) | 200 `{sf, tabs, metric, top, filter, filter_tokens, default_filter, facets, facets_truncated, hero, hero_fallback, hero_notice, eligible_count, shared_count, shared_runs, rows}`; `shared_count` is the number of non-withdrawn `shared` runs under the filter (A6: stored and listed, never ranked) and `shared_runs` the first `top` of them, oldest `finished_at` first, as `{run_id, url, finished_at, config_label}`; `hero_fallback` is true when `hero` is the tab's fallback run (rows stay filtered, possibly empty) and `hero_notice` is then the line the page shows above it, else null; `hero` adds `per_query` (22 entries from that one run); each row is a run summary plus `rank`, `value {xflare_ms, velox_ms, speedup}` and `repro` (the reproduce script, or null when none is offered); 400 bad sf or metric |
 | `GET /` | | 302 to `/b/xflare_leaderboard` |
-| `GET /b/xflare_leaderboard` | | page: tabs, hero chart, board |
-| `GET /b/xflare_leaderboard/run/<run_id>` | | page: argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table (plus, for a `per-engine` run, each repeat's applications: engine, cleanup, app_id, artifact, bundle, started/finished, invocation), application mode, Spark settings (the state and where it came from, then `run.spark_conf` and `run.spark_conf_readback` as key → value tables, each "not recorded" when absent, "none ({})" when empty and "not a key/value object" when stored before A5 validated it), raw download, how to reproduce, withdraw |
+| `GET /b/xflare_leaderboard` | | page: tabs, hero chart, board, and under the board the `shared_runs` (A6) linked to their pages; a tab or filter where nothing ranks shows the empty hero and board with that reason |
+| `GET /b/xflare_leaderboard/run/<run_id>` | | page: for a `shared` run (A6) a notice at the top ("shared application: engine order affects timings — this run is listed but never ranked (amendment A6)…") and its measured totals beside the reasons it is not ranked; argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table (plus, for a `per-engine` run, each repeat's applications: engine, cleanup, app_id, artifact, bundle, started/finished, invocation), application mode, Spark settings (the state and where it came from, then `run.spark_conf` and `run.spark_conf_readback` as key → value tables, each "not recorded" when absent, "none ({})" when empty and "not a key/value object" when stored before A5 validated it), raw download, how to reproduce, withdraw |
 | `GET /b/xflare_leaderboard/compare?runs=a,b[,c,d]` | 2–4 distinct run ids | page: per-query deltas vs the first run, parameter diff (including `application_mode` and four Spark settings rows: `spark_conf (state)`, `spark_conf.source`, and `spark_conf (settings)` / `spark_conf_readback (settings)`, each map on one line as "not recorded" (absent), "{}" (empty), "not an object" (stored before A5 validated it) or its sorted `k=v` pairs joined by "; ", cut like any scalar; a settings row differs when the full maps differ); 400 / 404 |
 
 A run summary is `{run_id, content_id, url, sf, finished_at, submitter, total_eligible, repeats, totals, config,
-config_label, build, device_ids, device_count, host, badges, withdrawn, withdrawal}`. It is a display view: every
-uploaded string in it (`withdrawal.actor`/`reason` included) is cut to 512 characters plus "…", and `device_ids`
-holds at most 100 ids (`device_count` is the full count). The detail API's `withdrawal`, `derived`, `meta`,
+config_label, build, device_ids, device_count, host, badges, ineligible_reasons, withdrawn, withdrawal}`. It is a
+display view: every uploaded string in it (`withdrawal.actor`/`reason` included) is cut to 512 characters plus "…",
+and `device_ids` holds at most 100 ids (`device_count` is the full count). `ineligible_reasons` is
+`{"common": [...]}`: the run's common reasons (§4), why no query of it can rank — for a shared run (A6) it starts
+with `shared application: engine order affects timings`; empty for a run whose queries can rank. Each reason is cut
+like any scalar and the list stops at 50 plus `... N more`; the per-query and Total reasons are in the detail API's
+`derived.ineligible_reasons`, uncut. The detail API's `withdrawal`, `derived`, `meta`,
 `manifest` and the raw download are never cut. A `run_id` that is not a lowercase uuid4 is refused before any
 lookup: JSON 404 `unknown run_id` on the API, HTML 404 on the run page, 400 on compare.
 
@@ -240,7 +258,16 @@ copies it on click (a run without one links to its page). Copying also works on 
 
 On the board, the Run column shows when each run finished (UTC) and links to its page; the config cell shows only
 the resources (e.g. `4×6 64g`, plus `sp…`/`d…` when set, and ` +conf` for custom Spark settings) and its tooltip
-spells out every config field; the Mode column shows the application mode (`shared` or `per-engine`).
+spells out every config field; the Mode column shows the application mode (always `per-engine` since A6). Badge
+colours come from one fixed map (`display.BADGE_CLASS`, sent to the board script in the page's data block):
+`reproducible` green; `partial`, `dev bundle`, `spark conf` and `shared application` amber; `booking overlap` red;
+`overlap unknown` and `offload:*` dim. The run and compare pages colour badges the same way.
+
+A6 on the live service: the four runs submitted in shared mode on 2026-10-20 (SF-100 and SF-1000, each at 1×6 and
+4×6) stay stored and visible — `/api/leaderboard/runs`, their run pages, compare and the raw download, with the
+shared reason and badge, and their content ids, medians and totals unchanged — but they leave the boards: until
+per-engine runs arrive both SF tabs show no rows and no hero, and list the runs matching the filter under the board
+(the 4×6 one by default; clear the filter for both). They are not withdrawn.
 
 ## How a CI job would submit (method only)
 

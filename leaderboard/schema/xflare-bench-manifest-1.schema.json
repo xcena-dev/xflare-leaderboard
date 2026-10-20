@@ -555,7 +555,7 @@
             "per-engine"
           ],
           "default": "shared",
-          "description": "Optional; absence means shared. Both modes rank on the same boards."
+          "description": "Optional; absence means shared. Amendment A6: only per-engine runs rank; shared runs remain accepted, stored and listed."
         },
         "spark_conf": {
           "type": "object",

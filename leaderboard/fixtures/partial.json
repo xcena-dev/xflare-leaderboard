@@ -43,6 +43,7 @@
     "64g",
     "--submission",
     "out.json",
+    "--application-per-engine",
     "1",
     "2",
     "3",
@@ -131,13 +132,14 @@
    },
    "started_at": "2026-10-01T00:00:00Z",
    "finished_at": "2026-10-01T01:03:00Z",
-   "exit_status": "failed"
+   "exit_status": "failed",
+   "application_mode": "per-engine"
   },
   "repeats": [
    {
     "index": 1,
-    "invocation": "spark-submit --app tpch-100-r1",
-    "app_id": "app-cbf7d882",
+    "invocation": "spark-submit --app tpch-100-r1-velox",
+    "app_id": "app-379632e9",
     "artifact_id": "xflare-build-0001",
     "bundle": "xflare-admin-2026.10.1",
     "started_at": "2026-10-01T00:00:00Z",
@@ -827,12 +829,34 @@
        "detail": null
       }
      }
+    ],
+    "applications": [
+     {
+      "engine": "velox",
+      "invocation": "spark-submit --app tpch-100-r1-velox",
+      "app_id": "app-379632e9",
+      "artifact_id": "xflare-build-0001",
+      "bundle": "xflare-admin-2026.10.1",
+      "started_at": "2026-10-01T00:00:00Z",
+      "finished_at": "2026-10-01T00:10:00Z",
+      "cleanup": "ok"
+     },
+     {
+      "engine": "xflare",
+      "invocation": "spark-submit --app tpch-100-r1-xflare",
+      "app_id": "app-08c9ebe2",
+      "artifact_id": "xflare-build-0001",
+      "bundle": "xflare-admin-2026.10.1",
+      "started_at": "2026-10-01T00:10:00Z",
+      "finished_at": "2026-10-01T00:20:00Z",
+      "cleanup": "ok"
+     }
     ]
    },
    {
     "index": 2,
-    "invocation": "spark-submit --app tpch-100-r2",
-    "app_id": "app-2aa21c20",
+    "invocation": "spark-submit --app tpch-100-r2-velox",
+    "app_id": "app-ccdb7d7d",
     "artifact_id": "xflare-build-0001",
     "bundle": "xflare-admin-2026.10.1",
     "started_at": "2026-10-01T00:21:00Z",
@@ -1491,12 +1515,34 @@
        "detail": null
       }
      }
+    ],
+    "applications": [
+     {
+      "engine": "velox",
+      "invocation": "spark-submit --app tpch-100-r2-velox",
+      "app_id": "app-ccdb7d7d",
+      "artifact_id": "xflare-build-0001",
+      "bundle": "xflare-admin-2026.10.1",
+      "started_at": "2026-10-01T00:21:00Z",
+      "finished_at": "2026-10-01T00:31:00Z",
+      "cleanup": "ok"
+     },
+     {
+      "engine": "xflare",
+      "invocation": "spark-submit --app tpch-100-r2-xflare",
+      "app_id": "app-b4484bf6",
+      "artifact_id": "xflare-build-0001",
+      "bundle": "xflare-admin-2026.10.1",
+      "started_at": "2026-10-01T00:31:00Z",
+      "finished_at": "2026-10-01T00:41:00Z",
+      "cleanup": "ok"
+     }
     ]
    },
    {
     "index": 3,
-    "invocation": "spark-submit --app tpch-100-r3",
-    "app_id": "app-9caeacd5",
+    "invocation": "spark-submit --app tpch-100-r3-velox",
+    "app_id": "app-9771cec9",
     "artifact_id": "xflare-build-0001",
     "bundle": "xflare-admin-2026.10.1",
     "started_at": "2026-10-01T00:42:00Z",
@@ -2185,6 +2231,28 @@
        "status": "offloaded",
        "detail": null
       }
+     }
+    ],
+    "applications": [
+     {
+      "engine": "velox",
+      "invocation": "spark-submit --app tpch-100-r3-velox",
+      "app_id": "app-9771cec9",
+      "artifact_id": "xflare-build-0001",
+      "bundle": "xflare-admin-2026.10.1",
+      "started_at": "2026-10-01T00:42:00Z",
+      "finished_at": "2026-10-01T00:52:00Z",
+      "cleanup": "ok"
+     },
+     {
+      "engine": "xflare",
+      "invocation": "spark-submit --app tpch-100-r3-xflare",
+      "app_id": "app-e64a5d09",
+      "artifact_id": "xflare-build-0001",
+      "bundle": "xflare-admin-2026.10.1",
+      "started_at": "2026-10-01T00:52:00Z",
+      "finished_at": "2026-10-01T01:02:00Z",
+      "cleanup": "ok"
      }
     ]
    }

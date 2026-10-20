@@ -5,6 +5,8 @@
 {%- macro pct(x) -%}
   {%- if x is not none -%}<span class="{{ 'diff-good' if x < 0 else 'diff-bad' if x > 0 else 'diff-neutral' }}">{{ x | lb_pct }}</span>{%- endif -%}
 {%- endmacro -%}
+{#- One badge, coloured by display.BADGE_CLASS (the text stays escaped and cut). -#}
+{%- macro badge(b) -%}<span class="{{ ('lb-badge ' ~ (b | lb_badge_class)) | trim }}">{{ v(b) }}</span>{%- endmacro -%}
 {#- The rest of an uploaded list a page did not print. -#}
 {%- macro more(items, limit, tag='p') -%}
   {%- if items | length > limit -%}<{{ tag }} class="lb-more">{{ items | length - limit }} more — see raw JSON</{{ tag }}>{%- endif -%}

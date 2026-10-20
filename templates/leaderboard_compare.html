@@ -1,6 +1,6 @@
 {#- Submitted values are printed through Jinja autoescape only, every uploaded
     scalar through v (cut); _params (web.py) caps the uploaded lists. -#}
-{%- from "leaderboard_macros.html" import v, pct -%}
+{%- from "leaderboard_macros.html" import v, pct, badge -%}
 <!doctype html>
 <html lang="ko">
 <head>
@@ -31,7 +31,7 @@
           <tr><td>Submitter</td>{% for r in runs %}<td>{{ v(r.d.submitter) }}</td>{% endfor %}</tr>
           <tr><td>Config</td>{% for r in runs %}<td class="lb-wrap-cell">{{ v(r.d.config_label) }}</td>{% endfor %}</tr>
           <tr><td>Repeats</td>{% for r in runs %}<td>x{{ r.d.repeats_completed }}</td>{% endfor %}</tr>
-          <tr><td>Badges</td>{% for r in runs %}<td class="lb-wrap-cell">{% for b in r.d.badges %}<span class="lb-badge">{{ v(b) }}</span>{% endfor %}{% if r.summary.withdrawn %}<span class="lb-badge b-bad">withdrawn</span>{% endif %}</td>{% endfor %}</tr>
+          <tr><td>Badges</td>{% for r in runs %}<td class="lb-wrap-cell">{% for b in r.d.badges %}{{ badge(b) }}{% endfor %}{% if r.summary.withdrawn %}<span class="lb-badge b-bad">withdrawn</span>{% endif %}</td>{% endfor %}</tr>
           <tr class="lb-total-row"><td>Xflare total</td>{% for t in totals %}<td>{{ t.xflare_ms | lb_ms }} {% if not loop.first %}{{ pct(t.delta_pct) }}{% endif %}</td>{% endfor %}</tr>
           <tr><td>Velox total</td>{% for t in totals %}<td>{{ t.velox_ms | lb_ms }}</td>{% endfor %}</tr>
           <tr><td>Speedup</td>{% for t in totals %}<td>{{ t.speedup | lb_x }}</td>{% endfor %}</tr>

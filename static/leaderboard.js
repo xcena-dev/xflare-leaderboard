@@ -10,11 +10,6 @@
   const XFLARE_COLOR = '#14B8A6';
   const VELOX_COLOR = '#94A3B8';
   const SERIES_COLORS = ['#14B8A6', '#F59E0B', '#818CF8', '#F472B6'];
-  // Badge text is uploaded-derived; the class comes from this fixed map.
-  const BADGE_CLASS = {
-    reproducible: 'b-good', partial: 'b-warn', 'dev bundle': 'b-warn',
-    'booking overlap': 'b-bad', 'overlap unknown': 'b-dim', 'spark conf': 'b-warn',
-  };
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -83,10 +78,13 @@
   }
   function runHref(board, runId) { return `${board}/run/${encodeURIComponent(runId)}`; }
 
-  function badgeList(badges) {
+  // Badge text is uploaded-derived; the class comes from the server's fixed map (display.BADGE_CLASS, in the
+  // board page's data block), looked up as an own property only.
+  function badgeList(badges, classes) {
     const wrap = el('span', 'lb-badges');
     for (const b of badges || []) {
-      const cls = BADGE_CLASS[b] || (String(b).startsWith('offload:') ? 'b-dim' : '');
+      const own = Object.prototype.hasOwnProperty.call(classes || {}, b);
+      const cls = own ? classes[b] : (String(b).startsWith('offload:') ? 'b-dim' : '');
       wrap.appendChild(el('span', `lb-badge ${cls}`.trim(), b));
     }
     return wrap;
@@ -261,16 +259,42 @@
       kv(meta, 'Submitter', hero.submitter);
       kv(meta, 'Finished', fmtTs(hero.finished_at));
       kv(meta, 'Devices', fmtDevices(hero));
-      kv(meta, 'Badges', badgeList(hero.badges));
+      kv(meta, 'Badges', badgeList(hero.badges, cfg.badge_class));
       chart = perQueryChart(document.getElementById('hero-chart'), [
         bar('xflare', hero.per_query.map(p => p.xflare_ms), XFLARE_COLOR),
         bar('velox', hero.per_query.map(p => p.velox_ms), VELOX_COLOR),
       ], heroLog);
     }
 
+    // A6: shared-application runs under the filter, stored and listed but never ranked, named under the board
+    // (at most `top` of them, linked to their pages) so an empty board does not hide them.
+    function renderShared(data) {
+      const runs = data.shared_runs || [];
+      const count = data.shared_count || 0;
+      const box = document.getElementById('lb-shared');
+      const list = document.getElementById('lb-shared-list');
+      list.replaceChildren();
+      box.hidden = !count;
+      if (!count) return;
+      document.getElementById('lb-shared-note').textContent =
+        `shared application run ${count}개는 이 필터에 해당하지만 순위에 오르지 않습니다 ` +
+        '(engine order affects timings, A6) — run 페이지와 /api/leaderboard/runs 에는 남습니다' +
+        (count > runs.length ? ` · 처음 ${runs.length}개:` : ':');
+      for (const r of runs) {
+        const li = el('li');
+        const a = el('a', null, fmtTs(r.finished_at));
+        a.href = runHref(cfg.board, r.run_id);
+        a.title = `${r.run_id}\nfinished ${r.finished_at}`;
+        li.appendChild(a);
+        li.appendChild(el('span', 'lb-dim', ` · ${r.config_label ?? '—'}`));
+        list.appendChild(li);
+      }
+    }
+
     function renderBoard(data) {
       const tbody = document.querySelector('#lb-board tbody');
       tbody.replaceChildren();
+      renderShared(data);
       const metricName = data.metric === 'total' ? 'Total' : data.metric.toUpperCase();
       document.getElementById('lb-board-note').textContent =
         `${metricName}: ${data.eligible_count} eligible run(s) under the filter · top ${data.top} · ` +
@@ -281,7 +305,8 @@
         const td = tr.insertCell();
         td.colSpan = 13;
         td.className = 'lb-empty';
-        td.textContent = '이 필터에 순위에 오를 run 이 없습니다.';
+        td.textContent = '이 필터에 순위에 오를 run 이 없습니다.' +
+          (data.shared_count ? ' shared application run 은 순위에 오르지 않습니다 — 아래 목록을 보세요.' : '');
         return;
       }
       for (const r of data.rows) {
@@ -305,7 +330,7 @@
           if (cls) td.className = cls;
           if (title) td.title = title;
         }
-        tr.insertCell().appendChild(badgeList(r.badges));
+        tr.insertCell().appendChild(badgeList(r.badges, cfg.badge_class));
         reproCell(tr.insertCell(), r);
         const box = el('input');
         box.type = 'checkbox';

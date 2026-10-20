@@ -75,7 +75,8 @@ class Validator(unittest.TestCase):
     """Validator accept/reject (the HTTP 8 MiB cap is in test_leaderboard_web.py)."""
 
     def test_accept_contract_fixtures(self):
-        for name in ("valid-envelope.json", "velox-mismatch.json", "partial.json", "recording-mode.json"):
+        for name in ("valid-envelope.json", "valid-shared-envelope.json", "velox-mismatch.json",
+                     "partial.json", "recording-mode.json"):
             obj = schema.parse_json_strict((FIX / name).read_bytes())
             self.assertEqual(schema.validate_envelope(obj), ([], []), name)
         self.assertEqual(schema.validate_manifest(load("valid-manifest.json")), ([], []))
@@ -162,7 +163,7 @@ class Validator(unittest.TestCase):
 
     def test_many_duplicates_capped_and_fast(self):
         """Duplicate checks are set-based (linear) and diagnostics are capped."""
-        env = load("valid-envelope.json")
+        env = load("valid-shared-envelope.json")
         env["manifest"]["run"]["engines"] = ["velox"] * 80000
         t0 = time.monotonic()
         errs, _ = schema.validate_envelope(env)
@@ -340,6 +341,7 @@ class Validator(unittest.TestCase):
         m = env["manifest"]
         m["repeats"][0]["queries"][0]["engines"]["velox"]["verify"] = None
         m["repeats"][0]["finished_at"] = None
+        m["repeats"][0]["applications"][-1]["finished_at"] = None
         env["environment"].update(reservation=None, observed_at=None, host=None, source="none",
                                   booking_overlap="unknown")
         m["build"]["bundle"]["kind"] = "dev"
@@ -351,7 +353,7 @@ class Validator(unittest.TestCase):
 
 
 class Eligibility(unittest.TestCase):
-    """Q(run, q) over every completed repeat; total needs all 22, every repeat completed, exit ok."""
+    """Per-engine Q(run, q) over every completed repeat; total needs all 22, every repeat completed, exit ok."""
 
     def test_valid(self):
         d = agg.derive(load("valid-envelope.json")["manifest"], load("valid-envelope.json"))
@@ -396,6 +398,11 @@ class Eligibility(unittest.TestCase):
         return agg.derive(m, None)
 
     def test_predicate_cases(self):
+        def set_identity(rep, key, value):
+            rep[key] = value
+            for application in rep["applications"]:
+                application[key] = value
+
         d = self.derive_m(lambda m: m["repeats"][2].update(status="failed"))
         self.assertEqual(d["eligible_queries"], list(range(1, 23)), "medians come from completed repeats only")
         self.assertEqual(d["ineligible_reasons"], {"total": ["repeat 3 failed"]})
@@ -406,15 +413,16 @@ class Eligibility(unittest.TestCase):
         self.assertEqual(d["eligible_queries"], [], "a missing repeat index disqualifies every query")
         self.assertIn("repeat list incomplete", d["ineligible_reasons"]["common"])
 
-        d = self.derive_m(lambda m: m["repeats"][1].update(artifact_id="other"))
+        d = self.derive_m(lambda m: set_identity(m["repeats"][1], "artifact_id", "other"))
         self.assertEqual(d["eligible_queries"], [])
         self.assertIn("artifact differs across repeats", d["ineligible_reasons"]["common"])
-        d = self.derive_m(lambda m: m["repeats"][2].update(bundle="other"))
+        d = self.derive_m(lambda m: set_identity(m["repeats"][2], "bundle", "other"))
         self.assertIn("bundle differs across repeats", d["ineligible_reasons"]["common"])
         # differing artifact on a failed repeat does not matter; null counts as a value
-        d = self.derive_m(lambda m: (m["repeats"][2].update(status="aborted", artifact_id=None)))
+        d = self.derive_m(lambda m: (m["repeats"][2].update(status="aborted"),
+                                     set_identity(m["repeats"][2], "artifact_id", None)))
         self.assertEqual(len(d["eligible_queries"]), 22)
-        d = self.derive_m(lambda m: [r.update(artifact_id=None) for r in m["repeats"]])
+        d = self.derive_m(lambda m: [set_identity(r, "artifact_id", None) for r in m["repeats"]])
         self.assertTrue(d["total_eligible"])
 
         d = self.derive_m(lambda m: m["run"].update(exit_status="failed"))
@@ -971,7 +979,7 @@ class Aggregation(unittest.TestCase):
         json.dumps(d, allow_nan=False)
         self.assertEqual(d["content_id"], agg.content_id(env["manifest"]))
         self.assertEqual(d["config_label"],
-                         "4×6 · 64g · sp=- · dev=- · Resource.mu.d1.toml.in · xflare-admin-2026.10.1 · shared")
+                         "4×6 · 64g · sp=- · dev=- · Resource.mu.d1.toml.in · xflare-admin-2026.10.1 · per-engine")
         self.assertEqual((d["sf"], d["repeats_requested"], d["repeats_completed"], d["submitter"], d["device_ids"]),
                          ("100", 3, 3, "bench@example.com", ["0"]))
 
@@ -1005,7 +1013,7 @@ class ApplicationMode(unittest.TestCase):
                 self.assertEqual(rep["finished_at"], apps[-1]["finished_at"])
 
     def test_optional_mode_and_shared_rejects_applications_even_when_empty(self):
-        m = mf.build_manifest()
+        m = mf.build_manifest(application_mode=None)
         before = agg.content_id(m)
         self.assert_valid(m)
         self.assertEqual(agg.derive(m, None)["config"]["application_mode"], "shared")
@@ -1199,23 +1207,114 @@ class ApplicationMode(unittest.TestCase):
             self.assert_valid(m)
             self.assertEqual(agg.derive(m, None)["eligible_queries"], list(range(1, 23)))
 
-    def test_modes_rank_together_and_filter_without_changing_medians_or_default(self):
-        shared = row(mf.build_envelope(mf.build_manifest(elapsed=const_elapsed(10))))
-        per_engine = row(mf.build_envelope(self.manifest(run_id=mf.fixture_uuid(6), elapsed=const_elapsed(5))))
-        self.assertEqual(agg.rank([shared, per_engine], "total"), [per_engine, shared])
-        self.assertEqual(agg.hero([shared, per_engine], agg.DEFAULT_FILTER), per_engine)
+    def test_shared_modes_keep_measurements_but_never_rank(self):
+        baseline = agg.derive(self.manifest(), None)
+        for mode in (None, "shared"):
+            with self.subTest(mode=mode):
+                m = mf.build_manifest(application_mode=mode)
+                before = agg.canonical_manifest_bytes(m)
+                self.assert_valid(m)
+                d = agg.derive(m, None)
+                self.assertEqual(agg.canonical_manifest_bytes(m), before)
+                self.assertEqual(d["content_id"], agg.content_id(m))
+                self.assertFalse(d["total_eligible"])
+                self.assertEqual(d["eligible_queries"], [])
+                self.assertEqual(d["ineligible_reasons"]["common"],
+                                 ["shared application: engine order affects timings"])
+                self.assertEqual(d["ineligible_reasons"]["total"],
+                                 ["queries not eligible: " + ", ".join(map(str, range(1, 23)))])
+                self.assertEqual(d["badges"].count("shared application"), 1)
+                self.assertNotIn("partial", d["badges"])
+                self.assertEqual(d["totals"], baseline["totals"])
+                for q in map(str, range(1, 23)):
+                    self.assertFalse(d["per_query"][q]["eligible"])
+                    for key in baseline["per_query"][q].keys() - {"eligible"}:
+                        self.assertEqual(d["per_query"][q][key], baseline["per_query"][q][key], (q, key))
+                shared = row(mf.build_envelope(m))
+                for metric in agg.METRICS:
+                    self.assertEqual(agg.rank([shared], metric), [], metric)
+                self.assertIsNone(agg.hero([shared], {}))
+                self.assertEqual(agg.hero_or_fallback([shared], {"executors": 8}), (None, False))
+
+    def test_only_per_engine_ranks_and_is_a_fallback_candidate(self):
+        shared = row(mf.build_envelope(mf.build_manifest(application_mode="shared", elapsed=const_elapsed(1))))
+        per_engine = row(mf.build_envelope(self.manifest(run_id=mf.fixture_uuid(6), executors=1,
+                                                       elapsed=const_elapsed(5))))
+        for metric in agg.METRICS:
+            self.assertEqual(agg.rank([shared, per_engine], metric), [per_engine], metric)
+        self.assertEqual(agg.hero_or_fallback([shared, per_engine], agg.DEFAULT_FILTER), (per_engine, True))
+        self.assertEqual(agg.hero_or_fallback([shared, per_engine], {"application_mode": "shared"}),
+                         (per_engine, True))
         self.assertEqual(agg.DEFAULT_FILTER, {"executors": 4, "executor_cores": 6})
         self.assertIn("application_mode", agg.CONFIG_KEYS)
+        self.assertNotIn("shared application", per_engine["derived"]["badges"])
         for item, mode in ((shared, "shared"), (per_engine, "per-engine")):
             d = item["derived"]
             self.assertEqual(d["config"]["application_mode"], mode)
             self.assertTrue(d["config_label"].endswith(" · " + mode))
             self.assertTrue(agg.matches_filter(d, {"application_mode": mode}))
             self.assertFalse(agg.matches_filter(d, {"application_mode": "other"}))
-        m = self.manifest()
-        old = mf.build_manifest()
-        for key in ("per_query", "totals", "total_eligible"):
-            self.assertEqual(agg.derive(m, None)[key], agg.derive(old, None)[key])
+
+    def test_unknown_historical_mode_keeps_its_reason_without_shared_badge(self):
+        for mode in ("-", "separate", None, 1, [], {}):
+            with self.subTest(mode=mode):
+                m = mf.build_manifest(application_mode=None)
+                m["run"]["application_mode"] = mode
+                d = agg.derive(m, None)
+                self.assertEqual(d["config"]["application_mode"], "-")
+                self.assertEqual(d["eligible_queries"], [])
+                self.assertFalse(d["total_eligible"])
+                self.assertTrue(d["ineligible_reasons"]["common"][0].startswith("application_mode not understood:"))
+                self.assertNotIn("shared application", d["badges"])
+                self.assertNotIn("shared application: engine order affects timings", d["ineligible_reasons"]["common"])
+
+    def test_shared_mode_does_not_restore_invalid_measurements(self):
+        m = mf.build_manifest(application_mode="shared")
+        m["repeats"][1]["queries"][6]["engines"]["velox"]["verify"]["status"] = "mismatch"
+        d = agg.derive(m, None)
+        self.assertFalse(d["per_query"]["7"]["eligible"])
+        self.assertIsNone(d["per_query"]["7"]["xflare_ms"])
+        self.assertEqual(d["ineligible_reasons"]["q7"], ["velox verify mismatch in repeat 2"])
+        self.assertEqual(d["totals"], {"xflare_ms": None, "velox_ms": None, "speedup": None})
+        self.assertEqual(d["per_query"]["1"]["xflare_ms"], 1041)
+        self.assertIn("shared application: engine order affects timings", d["ineligible_reasons"]["common"])
+
+    def test_version_seven_shared_row_rederives_once_without_changing_identity_or_receipt(self):
+        import sqlite3
+        self.assertGreater(agg.DERIVE_VERSION, 7)
+        m = mf.build_manifest(application_mode=None)
+        env = mf.build_envelope(m)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            _, before = store.put(env)
+            old = copy.deepcopy(before["derived"])
+            old.update(total_eligible=True, eligible_queries=list(range(1, 23)), ineligible_reasons={}, derive_version=7)
+            old["badges"].remove("shared application")
+            for q in old["per_query"].values():
+                q["eligible"] = True
+            receipt = {"ranked_total": True, "warnings": ["original warning"]}
+            with sqlite3.connect(store.db_path) as conn:
+                conn.execute("UPDATE runs SET derived_json=?, derive_version=7, total_eligible=1, receipt_json=?",
+                             (json.dumps(old), json.dumps(receipt)))
+                conn.row_factory = sqlite3.Row
+                persisted_before = dict(conn.execute("SELECT * FROM runs").fetchone())
+            with mock.patch.object(agg, "derive", wraps=agg.derive) as derive:
+                after = store.get(m["run_id"])
+                self.assertEqual(store.list_runs(), [after])
+                self.assertEqual(derive.call_count, 1)
+            self.assertFalse(after["derived"]["total_eligible"])
+            self.assertEqual(after["derived"]["eligible_queries"], [])
+            self.assertEqual(after["content_id"], agg.content_id(m))
+            self.assertEqual(after["derived"]["totals"], old["totals"])
+            self.assertEqual(after["receipt"], receipt)
+            self.assertEqual(store.read_raw(m["run_id"]), agg.canonical_manifest_bytes(m))
+            with sqlite3.connect(store.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                persisted_after = dict(conn.execute("SELECT * FROM runs").fetchone())
+            for key in persisted_before.keys() - {"derived_json", "derive_version", "total_eligible"}:
+                self.assertEqual(persisted_before[key], persisted_after[key], key)
+            self.assertEqual((persisted_after["derive_version"], persisted_after["total_eligible"]),
+                             (agg.DERIVE_VERSION, 0))
 
     def test_reproduce_preserves_zero_argument_flag_and_following_options(self):
         m = self.manifest()
@@ -1317,8 +1416,9 @@ class SparkConf(unittest.TestCase):
                     self.assertEqual(d["config_label"].endswith(" +conf"), expected == "custom")
                     self.assertTrue(agg.matches_filter(d, {"spark_conf": expected}))
                     self.assertFalse(agg.matches_filter(d, {"spark_conf": "custom" if expected == "default" else "default"}))
+                    mode_baseline = agg.derive(mf.build_manifest(application_mode=mode), None)
                     for key in ("total_eligible", "eligible_queries", "per_query", "totals", "ineligible_reasons"):
-                        self.assertEqual(d[key], baseline[key], key)
+                        self.assertEqual(d[key], mode_baseline[key], key)
         self.assertEqual(baseline["config"]["spark_conf"], "default")
         self.assertEqual(baseline["spark_conf_source"], "argv")
 

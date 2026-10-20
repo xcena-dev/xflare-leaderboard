@@ -2,7 +2,7 @@
 """Deterministic contract-v1 fixtures. Run: python3 make_fixtures.py  (rewrites the *.json next to it)
 
 The builders are also the shared test factory: `build_manifest(**kw)` gives an SF-100, 4x6, admin-bundle,
-N=3, all-22-queries, all-ok manifest; tests override keywords or mutate the result.
+N=3, per-engine, all-22-queries, all-ok manifest; tests override keywords or mutate the result.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
                    bundle: str = "xflare-admin-2026.10.1", artifact_id: str = "xflare-build-0001",
                    record_answers: bool = False, elapsed=default_elapsed, queries=QUERIES,
                    engines=("velox", "xflare"), started_at: datetime = T0, seed: str = "",
-                   application_mode: str | None = None, spark_conf: dict | None = None,
+                   application_mode: str | None = "per-engine", spark_conf: dict | None = None,
                    spark_conf_readback: dict | None = None) -> dict:
     """`elapsed(q, r, engine) -> int` sets every timing; `seed` varies the hashes/revisions between runs."""
     seed = seed or run_id
@@ -196,6 +196,8 @@ def render_all() -> dict[str, bytes]:
         "valid-envelope.json": dump(valid),
         "valid-per-engine-envelope.json": dump(build_envelope(build_manifest(
             run_id=fixture_uuid(6), application_mode="per-engine"))),
+        "valid-shared-envelope.json": dump(build_envelope(build_manifest(
+            run_id=fixture_uuid(7), application_mode="shared"))),
         "valid-manifest.json": dump(build_manifest(run_id=fixture_uuid(5))),
         "velox-mismatch.json": dump(velox_mismatch_envelope()),
         "partial.json": dump(partial_envelope()),

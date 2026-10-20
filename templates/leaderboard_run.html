@@ -2,7 +2,7 @@
     autoescape; nothing here is marked safe. Uploaded scalars go through v (cut
     to SCALAR_CHARS), long-form texts through lb_text (`chars`), lists are cut to
     `limit` items; the raw JSON download has the rest. -#}
-{%- from "leaderboard_macros.html" import v, more -%}
+{%- from "leaderboard_macros.html" import v, more, badge -%}
 {%- set limit, chars = lb_budget.preview_items, lb_budget.preview_chars -%}
 {%- set run = m.run -%}
 {%- set env = meta.environment or {} -%}
@@ -34,24 +34,34 @@
     이 run 은 순위와 hero 에서 빠집니다.
   </p>
   {% endif %}
+  {% if shared_reason %}
+  <p class="lb-banner lb-banner-warn" id="shared-notice">
+    {{ shared_reason }} — this run is listed but never ranked (amendment A6): it is on no board and never the hero.
+    To rank, run it again in per-engine mode (<code>spark-tpch.sh --submission</code> does this).
+  </p>
+  {% endif %}
 
   <section class="lb-panel">
     <h3>SF-{{ v(d.sf) }} · {{ v(d.config_label) }}</h3>
-    {% if d.total_eligible %}
+    {#- A shared run (A6) keeps its measured totals; they are shown, marked unranked, beside the reasons. -#}
+    {% if d.total_eligible or d.totals.xflare_ms is not none %}
     <div class="lb-stats">
       <div class="lb-stat"><span class="lb-stat-label">Xflare total</span><span class="lb-stat-val">{{ d.totals.xflare_ms | lb_ms }}</span></div>
       <div class="lb-stat"><span class="lb-stat-label">Velox total (same run)</span><span class="lb-stat-val">{{ d.totals.velox_ms | lb_ms }}</span></div>
       <div class="lb-stat"><span class="lb-stat-label">Speedup (velox / xflare)</span><span class="lb-stat-val">{{ d.totals.speedup | lb_x }}</span></div>
     </div>
-    {% else %}
-    {% set reasons = d.ineligible_reasons.total or [] %}
-    <p class="lb-note">Total 순위 대상이 아닙니다{% if reasons %}:{% endif %}</p>
+    {% endif %}
+    {% if not d.total_eligible %}
+    {# A common cause (A6 shared application, recording mode, ...) is why nothing counts: point at it instead of the
+       per-query roll-up it implies. #}
+    {% set reasons = [] if d.ineligible_reasons.common else (d.ineligible_reasons.total or []) %}
+    <p class="lb-note">Total 순위 대상이 아닙니다{% if d.ineligible_reasons.common %} — 공통 원인(common reasons) 때문입니다{% elif reasons %}:{% endif %}</p>
     <ul class="lb-reasons">
       {% for r in reasons[:limit] %}<li>{{ v(r) }}</li>{% endfor %}
       {{ more(reasons, limit, 'li') }}
     </ul>
     {% endif %}
-    <p class="lb-badges">{% for b in d.badges %}<span class="lb-badge">{{ v(b) }}</span>{% endfor %}</p>
+    <p class="lb-badges">{% for b in d.badges %}{{ badge(b) }}{% endfor %}</p>
     <dl class="lb-kv">
       <dt>run_id</dt><dd><code>{{ row.run_id }}</code></dd>
       <dt>content_id</dt><dd><code>{{ row.content_id }}</code></dd>
@@ -72,7 +82,7 @@
     <h3>Per-query medians</h3>
     <div class="chart-tools">
       <label><input type="checkbox" id="run-log"> log scale</label>
-      <span class="chart-note">eligible 이 아닌 쿼리는 막대가 없습니다</span>
+      <span class="chart-note">{% if shared_reason %}shared application run: 막대는 순위에 쓰이지 않는 측정값입니다{% else %}eligible 이 아닌 쿼리는 막대가 없습니다{% endif %}</span>
     </div>
     <div class="lb-chart"><canvas id="run-chart"></canvas></div>
     {#- Causes shared by every query are listed once here, not on each row. -#}

@@ -21,8 +21,9 @@ from fractions import Fraction
 from flask import Blueprint, Response, abort, current_app, jsonify, redirect, render_template, request, url_for
 
 from . import aggregate, repro
-from .display import (BENCH_ID, BUDGET, FACET_VALUES, MATRIX_REPEATS, PREVIEW_CHARS, PREVIEW_ITEMS, SCALAR_CHARS,
-                      as_float, cut, default_filter, facet_option, facet_token, fallback_notice, norm_date, tabs)
+from .display import (BADGE_CLASS, BENCH_ID, BUDGET, FACET_VALUES, MATRIX_REPEATS, PREVIEW_CHARS, PREVIEW_ITEMS,
+                      SCALAR_CHARS, as_float, badge_class, cut, default_filter, facet_option, facet_token,
+                      fallback_notice, norm_date, tabs)
 from .schema import (MANIFEST_SCHEMA, MAX_BODY_BYTES, UUID4_RE, BadJSON, parse_json_strict,
                      validate_envelope, validate_manifest)
 from .store import StorageUnavailable, store_for
@@ -58,9 +59,10 @@ def init_app(app, cfg: dict):
     app.register_blueprint(bp)
 
 
-# The display budgets, for the leaderboard templates and (through the board
-# page's data block) its script.
+# The display budgets and the badge colours, for the leaderboard templates and
+# (through the board page's data block) its script.
 bp.record_once(lambda state: state.app.add_template_global(BUDGET, "lb_budget"))
+bp.record_once(lambda state: state.app.add_template_global(BADGE_CLASS, "lb_badge_classes"))
 
 
 def _cfg() -> dict:
@@ -91,6 +93,11 @@ def _fmt_pct(x) -> str:
 @bp.app_template_filter("lb_cut")
 def _cut_filter(x):
     return cut(x)
+
+
+@bp.app_template_filter("lb_badge_class")
+def _badge_class_filter(x):
+    return badge_class(x)
 
 
 @bp.app_template_filter("lb_text")
@@ -263,6 +270,9 @@ def _run_summary(row: dict) -> dict:
         "device_count": len(devices),
         "host": cut(d["host"]),
         "badges": [cut(b) for b in d["badges"]],
+        # Why no query of the run can rank (A6: a shared run's reason), cut and capped like the dry run's lists;
+        # the per-query and Total reasons are in the run detail API's "derived".
+        "ineligible_reasons": {"common": _capped([cut(x) for x in d["ineligible_reasons"].get("common", [])])},
         "withdrawn": bool(row["withdrawn"]),
         "withdrawal": _withdrawal(row),
     }
@@ -412,6 +422,9 @@ def api_board():
     if hero is None:
         hero = aggregate.hero(rows, {})
         hero_fallback = hero is not None
+    # A6: shared-application runs under the filter are stored and listed but never rank; the board names them so
+    # an empty board does not hide them. list_runs left out the withdrawn ones.
+    shared = [r for r in chosen if r["derived"]["config"]["application_mode"] == "shared"]
     return jsonify({
         "sf": sf,
         "tabs": tabs(cfg),
@@ -429,6 +442,9 @@ def api_board():
         "hero_notice": (fallback_notice({**flt, **{k + "_t": t for k, t in tokens.items()}}, default_filter(cfg))
                         if hero_fallback else None),
         "eligible_count": len(ranked),
+        "shared_count": len(shared),
+        "shared_runs": [{"run_id": r["run_id"], "url": _url(r["run_id"]), "finished_at": r["derived"]["finished_at"],
+                         "config_label": cut(r["derived"]["config_label"])} for r in shared[:top]],
         # A row carries its reproduce script so the board can copy it within the click.
         "rows": [{"rank": i + 1, **_run_summary(r), "value": aggregate.metric_values(r["derived"], metric),
                   "repro": r["derived"]["repro"]["command"]}
@@ -547,6 +563,8 @@ def run_page(run_id):
         "leaderboard_run.html",
         benchmark=cfg, row=row, d=d, meta=row["meta"] or {},
         m=manifest, summary=_run_summary(row),
+        # A6: the run page's notice for a shared-application run (stored and listed, never ranked).
+        shared_reason=aggregate.SHARED_REASON if d["config"]["application_mode"] == "shared" else None,
         per_query=per_query,
         # as_float: a median past float range is a JSON integer the chart would read as Infinity.
         chart={"run_id": run_id, "xflare": [as_float(p["xflare_ms"]) for p in per_query],

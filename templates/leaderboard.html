@@ -28,7 +28,8 @@
       <a id="hero-link" href="#" hidden>run detail →</a>
     </div>
     <p class="lb-hero-notice" id="hero-notice" hidden></p>
-    <p class="lb-empty" id="hero-empty" hidden>이 SF 탭에 Total-eligible run 이 아직 없습니다.</p>
+    <p class="lb-empty" id="hero-empty" hidden>이 SF 탭에 Total-eligible run 이 아직 없습니다.
+      shared application run 은 목록에만 남고 순위와 hero 에는 오르지 않습니다 (A6) — per-engine run 이 필요합니다.</p>
     <div id="hero-body" hidden>
       <p class="lb-hero-config" id="hero-config" hidden></p>
       <div class="lb-stats">
@@ -89,13 +90,17 @@
         <tbody></tbody>
       </table>
     </div>
+    <div class="lb-shared" id="lb-shared" hidden>
+      <p class="lb-note" id="lb-shared-note"></p>
+      <ul class="lb-shared-list" id="lb-shared-list"></ul>
+    </div>
     <div class="lb-compare-bar">
       <button type="button" id="lb-compare" class="lb-btn" disabled>선택한 run 비교 (2–4)</button>
     </div>
   </section>
 </main>
 
-<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars} | tojson }}</script>
+<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars, "badge_class": lb_badge_classes} | tojson }}</script>
 <script src="{{ url_for('static', filename='leaderboard.js') }}"></script>
 </body>
 </html>

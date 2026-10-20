@@ -25,6 +25,10 @@ FACET_VALUES = 200
 MATRIX_REPEATS = 10
 BUDGET = {"scalar_chars": SCALAR_CHARS, "preview_chars": PREVIEW_CHARS, "preview_items": PREVIEW_ITEMS,
           "facet_values": FACET_VALUES}
+# Badge text is uploaded-derived; its colour class comes from this fixed map, for the server-rendered pages
+# (``badge_class``) and, through the board page's data block, the board script. ``offload:*`` badges are dim.
+BADGE_CLASS = {"reproducible": "b-good", "partial": "b-warn", "dev bundle": "b-warn", "booking overlap": "b-bad",
+               "overlap unknown": "b-dim", "spark conf": "b-warn", aggregate.SHARED_BADGE: "b-warn"}
 # Facet options whose bare value would not say what choosing it does (README §4, A5).
 FACET_LABELS = {"spark_conf": {"default": "default Spark settings only", "custom": "custom (--spark-conf)",
                                "unknown": "unknown (spark_conf unreadable)"}}
@@ -72,6 +76,13 @@ def cut(x, limit: int = SCALAR_CHARS):
     if len(text) <= limit:
         return x
     return text[:limit] + "…"
+
+
+def badge_class(badge) -> str:
+    """The colour class of one badge: BADGE_CLASS, "b-dim" for an ``offload:*`` badge, else none."""
+    if isinstance(badge, str) and badge.startswith("offload:"):
+        return "b-dim"
+    return BADGE_CLASS.get(badge, "") if isinstance(badge, str) else ""
 
 
 def facet_token(value: str) -> str:

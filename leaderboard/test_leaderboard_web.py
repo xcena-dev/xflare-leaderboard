@@ -376,6 +376,8 @@ class TestHostileStrings(WebCase):
         m["build"]["bundle"]["resolved"] = HOSTILE[0]
         for rep in m["repeats"]:
             rep["bundle"] = HOSTILE[0]
+            for app in rep["applications"]:                                 # per-engine: the repeat's is derived
+                app["bundle"] = HOSTILE[0]
         env = build_envelope(m, note=" ".join(HOSTILE), submitter={"email": HOSTILE[0], "sdp_id": HOSTILE[2]})
         env["environment"]["host"] = HOSTILE[1]
         env["environment"]["devices"][0]["id"] = HOSTILE[2]
@@ -673,7 +675,7 @@ class TestAcceptedExtremes(WebCase):
 
 # Runs leaderboard.js against a minimal DOM stub: ids the page has become elements (all ids when "ids" is
 # null), "data" seeds their textContent, fetch answers with "fetch", "slots" are the board's filter slots. Prints
-# the listeners it saw, the text of every element by id, and the text, value, title and href of every element it
+# the listeners it saw, the text and hidden flag of every element by id, and the text, value, title and href of every element it
 # created. "check" ticks that many of the board's row checkboxes in order, then "click" names an element whose click
 # handlers run ("clickClass": every element of that class); "secure" is window.isSecureContext. The compare button's
 # disabled state after each tick ("gate"), location.href, clipboard writes and execCommand calls are reported.
@@ -738,8 +740,9 @@ setTimeout(async () => {
   for (const h of handlers[cfg.click] || []) await h();
   for (const e of all.filter(e => cfg.clickClass && e.className === cfg.clickClass)) for (const h of e.clicks || []) await h();
   const text = {};
-  for (const [id, e] of Object.entries(byId)) if (e.id) text[id] = e.textContent;
-  console.log(JSON.stringify({ listeners, text, texts: all.map(e => String(e.textContent)),
+  const hidden = {};
+  for (const [id, e] of Object.entries(byId)) if (e.id) { text[id] = e.textContent; hidden[id] = e.hidden; }
+  console.log(JSON.stringify({ listeners, text, hidden, texts: all.map(e => String(e.textContent)),
                                values: all.map(e => String(e.value)), titles: all.map(e => String(e.title)),
                                classes: all.map(e => String(e.className)), hrefs: all.map(e => String(e.href || '')), gate, location: location.href || null,
                                clipboard, execs }));
@@ -825,7 +828,8 @@ class TestPageBudgets(WebCase):
     def test_long_invocations_cut_per_repeat(self):
         """repeats[].invocation is an identifier shown once per repeat row: cut like any scalar, so 100 repeats
         with 60,000-char invocations still give a small run page."""
-        m = build_manifest(run_id=rid(), repeats=100)
+        # shared: ranking is not the point, and per-engine applications would repeat each invocation past the cap
+        m = build_manifest(run_id=rid(), repeats=100, application_mode=None)
         for rep in m["repeats"]:
             rep["invocation"] = "i" * 60_000
         self.post(build_envelope(m))
@@ -1278,6 +1282,7 @@ class TestDisplayRound(WebCase):
         html = self.c.get(LB).get_data(as_text=True)
         self.assertIn('<h3 id="hero-title">Hero</h3>', html)
         self.assertIn("이 SF 탭에 Total-eligible run 이 아직 없습니다", html)
+        self.assertIn("shared application run 은 목록에만 남고 순위와 hero 에는 오르지 않습니다 (A6)", html)
         self.assertIn("항목당 200개", html)
         self.assertEqual(json.loads(self.page_data()["lb-page-data"])["scalar_chars"], 512)
 
@@ -1565,10 +1570,14 @@ class TestLegacyApplicationMode(WebCase):
             self.assertTrue(all(not q["eligible"] for q in d["per_query"].values()))
             self.assertIn(reason, " ".join(d["ineligible_reasons"]["common"]))
             self.assertEqual(d["config"]["application_mode"], mode)
+            # A6: an unreadable mode keeps its own reason; it is not called a shared application
+            self.assertNotIn(aggregate.SHARED_BADGE, d["badges"])
+            self.assertNotIn(aggregate.SHARED_REASON, json.dumps(d["ineligible_reasons"]))
             self.assertEqual((current["content_id"], current["receipt"]), (cid, receipt))
             self.assertEqual(store.read_raw(run_id), raw)
             if path == f"{LB}/run/{run_id}":
                 self.assertIn(reason, response.get_data(as_text=True))
+                self.assertNotIn('id="shared-notice"', response.get_data(as_text=True))
         listed = self.c.get("/api/leaderboard/runs").get_json()
         self.assertIn(run_id, [r["run_id"] for r in listed])
         # §3: an identical retry keeps its original receipt although today's validator rejects the manifest
@@ -1595,7 +1604,7 @@ class TestLegacyApplicationMode(WebCase):
         good = self.submit(repeats=1)
         for mode in ("per_engine", "", None, 1, True, [], {"x": 1}):
             with self.subTest(mode=mode):
-                m = build_manifest(run_id=rid(), repeats=1)
+                m = build_manifest(run_id=rid(), repeats=1, application_mode=None)
                 old = aggregate.derive(m, None)
                 m["run"]["application_mode"] = mode
                 self.assert_legacy_reads(m, old, good, "application_mode not understood:", "-")
@@ -1610,7 +1619,7 @@ class TestLegacyApplicationMode(WebCase):
         cases += [("bad-field", key) for key in fields]
         for kind, value in cases:
             with self.subTest(kind=kind, value=value):
-                m = build_manifest(run_id=rid(), repeats=1)
+                m = build_manifest(run_id=rid(), repeats=1, application_mode=None)
                 old = aggregate.derive(m, None)
                 m["run"]["application_mode"] = "per-engine"
                 if kind == "applications":
@@ -1629,23 +1638,26 @@ class TestLegacyApplicationMode(WebCase):
 
 class TestApplicationMode(WebCase):
     """A4: the application mode is a board column, a filter with its facet and a compare parameter, never a board
-    split; a per-engine run's page lists every repeat's applications, a shared run's page has no such list."""
+    split; a per-engine run's page lists every repeat's applications, a shared run's page has no such list. A6: only
+    per-engine runs rank (TestSharedUnranked has the rest)."""
 
     def per_engine(self, **kw):
         kw.setdefault("run_id", rid())
         return build_manifest(application_mode="per-engine", **kw)
 
     def test_mode_column_filter_and_facet(self):
-        shared = self.submit(elapsed=flat_elapsed(1000))
+        shared = self.submit(elapsed=flat_elapsed(1000), application_mode=None)
         per_engine = self.per_engine(elapsed=flat_elapsed(2000))
         self.post(build_envelope(per_engine))
         b = self.board()
-        self.assertEqual([r["config"]["application_mode"] for r in b["rows"]], ["shared", "per-engine"])
+        # A6: the faster shared run is not a row; the filter still offers both modes
+        self.assertEqual([r["config"]["application_mode"] for r in b["rows"]], ["per-engine"])
         self.assertEqual(b["facets"]["application_mode"],
                          [{"token": facet_token(x), "label": x} for x in ("per-engine", "shared")])
-        for value, run_id in (("shared", shared), ("per-engine", per_engine["run_id"])):
+        for value, run_id, rows in (("shared", shared, []), ("per-engine", per_engine["run_id"],
+                                                               [per_engine["run_id"]])):
             for query in (f"?application_mode={value}", f"?application_mode_t={facet_token(value)}"):
-                self.assertEqual([r["run_id"] for r in self.board(query)["rows"]], [run_id], query)
+                self.assertEqual([r["run_id"] for r in self.board(query)["rows"]], rows, query)
                 self.assertEqual([r["run_id"] for r in self.c.get("/api/leaderboard/runs" + query).get_json()],
                                  [run_id], query)
         page = self.c.get(LB).get_data(as_text=True)
@@ -1653,27 +1665,33 @@ class TestApplicationMode(WebCase):
         self.assertIn("<th>Mode</th>", page)
         fetch = self.c.get("/api/leaderboard/board").get_data(as_text=True)
         out = run_page_js("board", data=self.page_data(), fetch=fetch, slots=["application_mode"])
-        # one Mode cell per row, plus one filter option per mode
-        self.assertEqual((out["texts"].count("shared"), out["texts"].count("per-engine")), (2, 2))
+        # one Mode cell for the one row, plus one filter option per mode
+        self.assertEqual((out["texts"].count("shared"), out["texts"].count("per-engine")), (1, 2))
         self.assertIn(facet_token("per-engine"), out["values"])
+        self.assertIn(facet_token("shared"), out["values"])
 
-    def test_mixed_modes_rank_on_one_board(self):
-        """Both modes rank together by the usual order; the hero is the fastest of either mode."""
-        slow = self.submit(elapsed=flat_elapsed(3000))
+    def test_mixed_modes_only_per_engine_ranks(self):
+        """A6 (supersedes A4's "ranked together"): with both modes stored, only the per-engine runs rank, in the
+        usual order, on Total and on every query; the hero is the fastest per-engine run even when a shared run is
+        faster, and filtering to shared leaves no rows and a per-engine fallback hero."""
+        slow = self.submit(elapsed=flat_elapsed(3000), application_mode=None)
         fast = self.per_engine(elapsed=flat_elapsed(1000))
         mid = self.per_engine(elapsed=flat_elapsed(2000))
         for m in (fast, mid):
             self.post(build_envelope(m))
-        quickest_shared = self.submit(elapsed=flat_elapsed(1500))
+        quickest_shared = self.submit(elapsed=flat_elapsed(500), application_mode="shared")
         b = self.board()
         self.assertEqual([(r["run_id"], r["config"]["application_mode"]) for r in b["rows"]],
-                         [(fast["run_id"], "per-engine"), (quickest_shared, "shared"),
-                          (mid["run_id"], "per-engine"), (slow, "shared")])
-        self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["eligible_count"]), (fast["run_id"], False, 4))
-        self.assertEqual(self.board("?metric=q5")["rows"][0]["run_id"], fast["run_id"])
+                         [(fast["run_id"], "per-engine"), (mid["run_id"], "per-engine")])
+        self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["eligible_count"]), (fast["run_id"], False, 2))
+        for q in aggregate.QUERY_IDS:
+            self.assertEqual([r["run_id"] for r in self.board(f"?metric=q{q}")["rows"]],
+                             [fast["run_id"], mid["run_id"]], q)
         only_shared = self.board("?application_mode=shared")
-        self.assertEqual((only_shared["hero"]["run_id"], [r["run_id"] for r in only_shared["rows"]]),
-                         (quickest_shared, [quickest_shared, slow]))
+        self.assertEqual((only_shared["hero"]["run_id"], only_shared["hero_fallback"],
+                          [r["run_id"] for r in only_shared["rows"]], only_shared["eligible_count"]),
+                         (fast["run_id"], True, [], 0))
+        self.assertCountEqual([r["run_id"] for r in only_shared["shared_runs"]], [slow, quickest_shared])
 
     def test_per_engine_run_detail_lists_applications(self):
         m = self.per_engine(repeats=2)
@@ -1705,7 +1723,7 @@ class TestApplicationMode(WebCase):
         self.assertRegex(table, r'<tr><td>2</td><td class="lb-dim" colspan="8">no application</td></tr>')
 
     def test_shared_run_detail_unchanged(self):
-        run_id = self.submit(repeats=2)
+        run_id = self.submit(repeats=2, application_mode=None)
         page = self.c.get(f"{LB}/run/{run_id}").get_data(as_text=True)
         self.assertRegex(page, r"<dt>Application mode</dt><dd>shared — ")
         self.assertNotIn('id="applications"', page)
@@ -1737,7 +1755,7 @@ class TestApplicationMode(WebCase):
             self.assertNotIn(s, cmp_page)
 
     def test_compare_shows_the_mode(self):
-        shared = self.submit()
+        shared = self.submit(application_mode=None)
         m = self.per_engine()
         self.post(build_envelope(m))
         html = self.c.get(f"{LB}/compare?runs={shared},{m['run_id']}").get_data(as_text=True)
@@ -1745,6 +1763,225 @@ class TestApplicationMode(WebCase):
                         html, re.S)
         self.assertEqual(row.group(1), "lb-differs")
         self.assertEqual(re.findall(r"<td[^>]*>([^<]*)</td>", row.group(2)), ["shared", "per-engine"])
+
+
+class TestSharedUnranked(WebCase):
+    """A6: a shared-application run (mode field absent or "shared") is accepted, stored and listed with the shared
+    reason and badge, keeps its measured medians and totals, but is on no board, never the hero and never an A3
+    fallback candidate; its page says so. A per-engine run ranks. A tab where nothing ranks renders cleanly."""
+
+    MODES = (None, "shared")                      # absent means shared (A4)
+
+    def shared(self, mode=None, **kw):
+        kw.setdefault("run_id", rid())
+        m = build_manifest(application_mode=mode, **kw)
+        self.assertEqual(m["run"].get("application_mode"), mode)
+        return m
+
+    def assert_unranked(self, run_id):
+        """``run_id`` is on no board (Total and every query, any filter) and not the hero."""
+        for metric in aggregate.METRICS:
+            for query in (f"?metric={metric}", f"?metric={metric}&executors=&executor_cores="):
+                b = self.board(query)
+                self.assertNotIn(run_id, [r["run_id"] for r in b["rows"]], query)
+                self.assertNotEqual((b["hero"] or {}).get("run_id"), run_id, query)
+
+    def test_shared_stored_but_unranked_via_http(self):
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                m = self.shared(mode)
+                run_id = m["run_id"]
+                dry = self.post(build_envelope(m), "?dry_run=1", status=200)
+                self.assertEqual((dry["ranked_total"], dry["run_id"]), (False, run_id))
+                self.assertIn(aggregate.SHARED_BADGE, dry["badges"])
+                self.assertIn(aggregate.SHARED_REASON, dry["ineligible_reasons"]["common"])
+                self.assertEqual(self.c.get(f"/api/leaderboard/runs/{run_id}").status_code, 404)  # dry run stored nothing
+                bare = self.post(m, "?dry_run=1", status=200)
+                self.assertEqual((bare["ranked_total"], bare["content_id"]), (False, aggregate.content_id(m)))
+                receipt = self.post(build_envelope(m))
+                self.assertEqual((receipt["run_id"], receipt["ranked_total"]), (run_id, False))
+                self.assertEqual(self.post(build_envelope(m), status=200), receipt)           # §3 replay
+
+                listed = {r["run_id"]: r for r in self.c.get("/api/leaderboard/runs?sf=100").get_json()}
+                self.assertIn(run_id, listed)
+                self.assertFalse(listed[run_id]["total_eligible"])
+                self.assertIn(aggregate.SHARED_BADGE, listed[run_id]["badges"])
+                self.assertEqual(listed[run_id]["config"]["application_mode"], "shared")
+                self.assertEqual(listed[run_id]["ineligible_reasons"], {"common": [aggregate.SHARED_REASON]})
+                detail = self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()
+                d = detail["derived"]
+                self.assertEqual(detail["manifest"], m)
+                self.assertEqual(d["ineligible_reasons"]["common"][0], aggregate.SHARED_REASON)
+                self.assertEqual((d["total_eligible"], d["eligible_queries"]), (False, []))
+                # the measurements stay shown: medians and totals as a per-engine twin would have them
+                twin = aggregate.derive(build_manifest(run_id=run_id), None)
+                self.assertEqual(d["totals"], twin["totals"])
+                self.assertIsNotNone(d["totals"]["xflare_ms"])
+                for q in aggregate.QUERY_IDS:
+                    self.assertFalse(d["per_query"][str(q)]["eligible"])
+                    self.assertEqual(d["per_query"][str(q)]["xflare_ms"], twin["per_query"][str(q)]["xflare_ms"])
+                self.assert_unranked(run_id)
+
+                page = self.c.get(f"{LB}/run/{run_id}").get_data(as_text=True)
+                notice = re.search(r'<p class="lb-banner lb-banner-warn" id="shared-notice">(.*?)</p>', page, re.S)
+                self.assertIsNotNone(notice)
+                self.assertIn(aggregate.SHARED_REASON + " — this run is listed but never ranked (amendment A6)",
+                              " ".join(notice.group(1).split()))
+                self.assertLess(page.index('id="shared-notice"'), page.index("<h3>SF-"))      # before the content
+                self.assertIn(f'<span class="lb-badge b-warn">{aggregate.SHARED_BADGE}</span>', page)
+                self.assertIn(f"<span class=\"lb-stat-val\">{_ms(d['totals']['xflare_ms'])}</span>", page)
+                self.assertIn("Total 순위 대상이 아닙니다", page)
+                total_box = page[page.index("Total 순위 대상이 아닙니다"):]
+                total_box = total_box[:total_box.index("</ul>")]
+                self.assertIn("공통 원인(common reasons) 때문입니다", total_box)      # the real cause, not "q1..q22"
+                self.assertNotIn("queries not eligible", total_box)
+                self.assertIn(aggregate.SHARED_REASON, re.search(r'id="common-reasons">(.*?)</ul>', page, re.S)
+                              .group(1))
+                self.assertIn("막대는 순위에 쓰이지 않는 측정값입니다", page)
+
+    def test_per_engine_ranked(self):
+        m = build_manifest(run_id=rid())
+        self.assertEqual(m["run"]["application_mode"], "per-engine")    # the fixture default since A6
+        dry = self.post(build_envelope(m), "?dry_run=1", status=200)
+        self.assertTrue(dry["ranked_total"])
+        self.assertNotIn(aggregate.SHARED_BADGE, dry["badges"])
+        self.assertTrue(self.post(build_envelope(m))["ranked_total"])
+        for metric in aggregate.METRICS:
+            b = self.board(f"?metric={metric}")
+            self.assertEqual([r["run_id"] for r in b["rows"]], [m["run_id"]], metric)
+            self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["shared_count"], b["shared_runs"]),
+                             (m["run_id"], False, 0, []), metric)
+        for summary in (self.board()["rows"][0], self.c.get("/api/leaderboard/runs").get_json()[0]):
+            self.assertEqual(summary["ineligible_reasons"], {"common": []})
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        self.assertNotIn('id="shared-notice"', page)
+        self.assertNotIn(aggregate.SHARED_BADGE, page)
+        self.assertIn("eligible 이 아닌 쿼리는 막대가 없습니다", page)
+
+    def test_hero_never_shared_including_the_fallback(self):
+        """A shared run is never the hero, even when it is the fastest run and the only one under the filter: the
+        A3 fallback looks at per-engine runs only, and with none the tab has no hero at all."""
+        fast_shared = self.shared(elapsed=flat_elapsed(500))                     # 4×6, the default filter
+        self.post(build_envelope(fast_shared))
+        b = self.board()
+        self.assertEqual((b["hero"], b["hero_fallback"], b["hero_notice"], b["rows"]), (None, False, None, []))
+        self.assertEqual(self.board("?executors=&executor_cores=")["hero"], None)
+        other = self.shared("shared", executors=2, executor_cores=12, elapsed=flat_elapsed(400))
+        self.post(build_envelope(other))
+        self.assertIsNone(self.board()["hero"])
+
+        per_engine_2x12 = self.submit(executors=2, executor_cores=12, elapsed=flat_elapsed(3000))
+        b = self.board()                                                       # no per-engine 4×6 run: A3 fallback
+        self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["hero_notice"], b["rows"]),
+                         (per_engine_2x12, True, "no 4×6 result yet", []))
+        self.assertEqual(b["shared_count"], 1)                                 # the 4×6 shared run, under the filter
+        b = self.board("?application_mode=shared&executors=&executor_cores=")
+        self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["shared_count"]), (per_engine_2x12, True, 2))
+
+        per_engine_4x6 = self.submit(elapsed=flat_elapsed(4000))                # slower than both shared runs
+        b = self.board()
+        self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], [r["run_id"] for r in b["rows"]]),
+                         (per_engine_4x6, False, [per_engine_4x6]))
+        b = self.board("?executors=&executor_cores=")
+        self.assertEqual([r["run_id"] for r in b["rows"]], [per_engine_2x12, per_engine_4x6])
+        self.assertEqual(b["hero"]["run_id"], per_engine_2x12)
+        for run_id in (fast_shared["run_id"], other["run_id"]):
+            self.assert_unranked(run_id)
+
+    def test_empty_tab_renders(self):
+        """Both tabs as after the A6 deploy: SF-100 holds only shared runs, SF-1000 nothing. The board API, the
+        board script, the run pages and a compare of two shared runs all render, and say why nothing ranks."""
+        ids = []
+        for mode, ms in ((None, 1000), ("shared", 2000)):
+            m = self.shared(mode, elapsed=flat_elapsed(ms))
+            self.post(build_envelope(m))
+            ids.append(m["run_id"])
+        b = self.board()
+        self.assertEqual((b["hero"], b["hero_fallback"], b["rows"], b["eligible_count"]), (None, False, [], 0))
+        self.assertEqual(b["shared_count"], 2)
+        self.assertCountEqual([r["run_id"] for r in b["shared_runs"]], ids)
+        for r in b["shared_runs"]:
+            self.assertEqual(r["url"], f"{LB}/run/{r['run_id']}")
+            self.assertTrue(r["config_label"].endswith("· shared"))
+        self.assertEqual(len(self.board("?top=5")["shared_runs"]), 2)
+        data = self.page_data()
+        self.assertEqual(json.loads(data["lb-page-data"])["badge_class"][aggregate.SHARED_BADGE], "b-warn")
+
+        out = run_page_js("board", data=data, fetch=json.dumps(b))
+        self.assertFalse(out["hidden"]["hero-empty"])
+        self.assertTrue(out["hidden"]["hero-body"])
+        self.assertTrue(out["hidden"]["hero-link"])
+        self.assertTrue(out["hidden"]["hero-notice"])
+        self.assertFalse(out["hidden"]["lb-shared"])
+        self.assertTrue(out["text"]["lb-board-note"].startswith("Total: 0 eligible run(s) under the filter"))
+        self.assertIn("shared application run 2개는 이 필터에 해당하지만 순위에 오르지 않습니다",
+                      out["text"]["lb-shared-note"])
+        self.assertIn("이 필터에 순위에 오를 run 이 없습니다. shared application run 은 순위에 오르지 않습니다 — "
+                      "아래 목록을 보세요.", out["texts"])
+        for run_id in ids:
+            self.assertIn(f"{LB}/run/{run_id}", out["hrefs"])
+
+        empty = self.board("?sf=1000")
+        self.assertEqual((empty["hero"], empty["rows"], empty["shared_count"], empty["shared_runs"]),
+                         (None, [], 0, []))
+        out = run_page_js("board", data=data, fetch=json.dumps(empty))
+        self.assertFalse(out["hidden"]["hero-empty"])
+        self.assertTrue(out["hidden"]["lb-shared"])
+        self.assertIn("이 필터에 순위에 오를 run 이 없습니다.", out["texts"])
+
+        # a shared list past `top` names the first `top` and says how many there are
+        for _ in range(5):
+            self.post(build_envelope(self.shared()))
+        b = self.board("?top=5")
+        self.assertEqual((b["shared_count"], len(b["shared_runs"])), (7, 5))
+        out = run_page_js("board", data=data, fetch=json.dumps(b))
+        self.assertIn("처음 5개:", out["text"]["lb-shared-note"])
+
+        for path in (f"{LB}", f"{LB}/run/{ids[0]}", f"{LB}/compare?runs={ids[0]},{ids[1]}"):
+            self.assertEqual(self.c.get(path).status_code, 200, path)
+        cmp_page = self.c.get(f"{LB}/compare?runs={ids[0]},{ids[1]}").get_data(as_text=True)
+        self.assertEqual(cmp_page.count(f'<span class="lb-badge b-warn">{aggregate.SHARED_BADGE}</span>'), 2)
+
+    def test_withdrawn_shared_run_leaves_the_list(self):
+        m = self.shared()
+        self.post(build_envelope(m))
+        self.assertEqual(self.board()["shared_count"], 1)
+        r = self.c.post(f"/api/leaderboard/runs/{m['run_id']}/withdraw", json={"actor": "a@x", "reason": "r"})
+        self.assertEqual(r.status_code, 200)
+        b = self.board()
+        self.assertEqual((b["shared_count"], b["shared_runs"]), (0, []))
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        self.assertIn('class="lb-banner"', page)                                    # withdrawn, and still shared
+        self.assertIn('id="shared-notice"', page)
+
+    def test_summary_reasons_cut_and_capped(self):
+        """The summary's common reasons follow the summary budgets: each cut to SCALAR_CHARS, at most 50 plus a
+        "... N more" line; the stored derived values stay whole."""
+        from leaderboard import web
+        m = self.shared(repeats=1)
+        self.post(build_envelope(m))
+        row = lb_store.Store(self.data).get(m["run_id"])
+        reasons = [aggregate.SHARED_REASON, "r" * 600] + [f"reason {i}" for i in range(60)]
+        row["derived"]["ineligible_reasons"]["common"] = reasons
+        with self.app.test_request_context():
+            listed = web._run_summary(row)["ineligible_reasons"]["common"]
+        self.assertEqual(len(listed), 51)
+        self.assertEqual(listed[:2], [aggregate.SHARED_REASON, "r" * 512 + "…"])
+        self.assertEqual(listed[-1], "... 12 more")
+        self.assertEqual(row["derived"]["ineligible_reasons"]["common"], reasons)
+
+    def test_shared_fixture(self):
+        """The committed shared fixture is accepted and stored but unranked; the default fixture ranks."""
+        for name, ranked in (("valid-shared-envelope.json", False), ("valid-envelope.json", True)):
+            with open(os.path.join(HERE, "fixtures", name), "rb") as f:
+                r = self.c.post(SUBMIT, data=f.read(), content_type="application/json")
+            self.assertEqual(r.status_code, 201, name)
+            self.assertEqual(r.get_json()["ranked_total"], ranked, name)
+
+
+def _ms(x) -> str:
+    """lb_ms as the pages print it."""
+    return f"{x / 1000:.2f} s" if x >= 1000 else f"{x:.0f} ms"
 
 
 class TestSparkConf(WebCase):
@@ -1826,7 +2063,7 @@ class TestSparkConf(WebCase):
         self.assertIn("4×6 64g +conf", out["texts"])
         self.assertIn("4×6 64g", out["texts"])
         page = self.page(custom["run_id"])
-        self.assertIn('<span class="lb-badge">spark conf</span>', page)
+        self.assertIn('<span class="lb-badge b-warn">spark conf</span>', page)   # the run page colours it alike
         self.assertIn(" +conf</h3>", page)
 
     def test_detail_lists_both_maps(self):

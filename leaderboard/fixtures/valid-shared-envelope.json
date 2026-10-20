@@ -1,0 +1,2256 @@
+{
+ "schema": "xflare-bench-submission/1",
+ "manifest": {
+  "schema": "xflare-bench-manifest/1",
+  "run_id": "00000000-0000-4000-8000-000000000007",
+  "created_at": "2026-10-01T00:00:00Z",
+  "client": {
+   "revision": "d829a8bfc6527bd9a4adfcc4e50748596e364808",
+   "branch": "main",
+   "dirty": false,
+   "dirty_digest": null
+  },
+  "build": {
+   "artifact_id": "xflare-build-0001",
+   "provenance_source": "artifact-manifest",
+   "revision": "9c5ee21cbb53579c744fcb05d98014d363f1afea",
+   "dirty": false,
+   "dirty_digest": null,
+   "bundle": {
+    "requested": "xflare-admin-2026.10.1",
+    "resolved": "xflare-admin-2026.10.1",
+    "kind": "admin"
+   },
+   "gluten": null
+  },
+  "run": {
+   "argv": [
+    "--reservation",
+    "4242",
+    "--xflare-toml",
+    "scripts/config/Resource.mu.d1.toml.in",
+    "--scale-factor",
+    "100",
+    "--engines",
+    "velox,xflare",
+    "--repeat",
+    "3",
+    "--executors",
+    "4",
+    "--executor-cores",
+    "6",
+    "--offheap",
+    "64g",
+    "--submission",
+    "out.json",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "16",
+    "17",
+    "18",
+    "19",
+    "20",
+    "21",
+    "22"
+   ],
+   "scale_factor": "100",
+   "codec": "snappy",
+   "engines": [
+    "velox",
+    "xflare"
+   ],
+   "queries": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22
+   ],
+   "repeat_requested": 3,
+   "record_answers": false,
+   "answers": {
+    "path": "scripts/spark/expected/sf_100.json.gz",
+    "sha256": "caf37784a5077e430bcf1fdbdff4898188cf77608e01e308a9480907556b6895"
+   },
+   "resources": {
+    "executors": 4,
+    "executor_cores": 6,
+    "offheap": "64g",
+    "shuffle_partitions": null,
+    "devices": null
+   },
+   "xflare_toml": {
+    "name": "Resource.mu.d1.toml.in",
+    "input_text": "[resource]\nexecutors = 4\ncores = 6\n",
+    "input_sha256": "b7ba82977d39a754a277d9afc6ce7ff48a96a1d9ebc2b7c239c3a484b1bf8b47",
+    "sent_sha256": "82f7b7bf36bf74a8e051e5cedaad77bdebd67440d45151f078028c9b2f9d6e17",
+    "rendered_text": "[resource]\nexecutors = 4\ncores = 6\n[logging]\nlevel = \"info\"\n",
+    "rendered_sha256": "82f7b7bf36bf74a8e051e5cedaad77bdebd67440d45151f078028c9b2f9d6e17"
+   },
+   "xflare_overrides": [
+    {
+     "key": "join.output_batch_rows",
+     "value": "7680",
+     "source": "default",
+     "destination": "session"
+    }
+   ],
+   "dataset": {
+    "uri": "hdfs:///tpch/sf100",
+    "marker": "tpch-sf100-v1"
+   },
+   "started_at": "2026-10-01T00:00:00Z",
+   "finished_at": "2026-10-01T01:03:00Z",
+   "exit_status": "ok",
+   "application_mode": "shared"
+  },
+  "repeats": [
+   {
+    "index": 1,
+    "invocation": "spark-submit --app tpch-100-r1",
+    "app_id": "app-2c01336f",
+    "artifact_id": "xflare-build-0001",
+    "bundle": "xflare-admin-2026.10.1",
+    "started_at": "2026-10-01T00:00:00Z",
+    "finished_at": "2026-10-01T00:20:00Z",
+    "status": "completed",
+    "cleanup": "ok",
+    "queries": [
+     {
+      "id": 1,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2591,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1037,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 2,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2682,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1074,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 3,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2773,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1111,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 4,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2864,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1148,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 5,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2955,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1185,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 6,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3046,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1222,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 7,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3137,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1259,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 8,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3228,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1296,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 9,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3319,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1333,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 10,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3410,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1370,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 11,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3501,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1407,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 12,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3592,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1444,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 13,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3683,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1481,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 14,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3774,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1518,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 15,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3865,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1555,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 16,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3956,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1592,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 17,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4047,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1629,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 18,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4138,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1666,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 19,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4229,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1703,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 20,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4320,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1740,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 21,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4411,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1777,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 22,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4502,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1814,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     }
+    ]
+   },
+   {
+    "index": 2,
+    "invocation": "spark-submit --app tpch-100-r2",
+    "app_id": "app-051549c8",
+    "artifact_id": "xflare-build-0001",
+    "bundle": "xflare-admin-2026.10.1",
+    "started_at": "2026-10-01T00:21:00Z",
+    "finished_at": "2026-10-01T00:41:00Z",
+    "status": "completed",
+    "cleanup": "ok",
+    "queries": [
+     {
+      "id": 1,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2600,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1046,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 2,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2691,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1083,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 3,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2782,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1120,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 4,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2873,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1157,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 5,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2964,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1194,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 6,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3055,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1231,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 7,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3146,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1268,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 8,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3237,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1305,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 9,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3328,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1342,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 10,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3419,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1379,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 11,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3510,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1416,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 12,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3601,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1453,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 13,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3692,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1490,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 14,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3783,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1527,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 15,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3874,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1564,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 16,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3965,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1601,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 17,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4056,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1638,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 18,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4147,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1675,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 19,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4238,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1712,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 20,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4329,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1749,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 21,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4420,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1786,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 22,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4511,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1823,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     }
+    ]
+   },
+   {
+    "index": 3,
+    "invocation": "spark-submit --app tpch-100-r3",
+    "app_id": "app-805e18df",
+    "artifact_id": "xflare-build-0001",
+    "bundle": "xflare-admin-2026.10.1",
+    "started_at": "2026-10-01T00:42:00Z",
+    "finished_at": "2026-10-01T01:02:00Z",
+    "status": "completed",
+    "cleanup": "ok",
+    "queries": [
+     {
+      "id": 1,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2595,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1041,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 2,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2686,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1078,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 3,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2777,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1115,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 4,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2868,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1152,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 5,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 2959,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1189,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 6,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3050,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1226,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 7,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3141,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1263,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 8,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3232,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1300,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 9,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3323,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1337,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 10,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3414,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1374,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 11,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3505,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1411,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 12,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3596,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1448,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 13,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3687,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1485,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 14,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3778,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1522,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 15,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3869,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1559,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 16,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 3960,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1596,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 17,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4051,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1633,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 18,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4142,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1670,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 19,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4233,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1707,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 20,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4324,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1744,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 21,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4415,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1781,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     },
+     {
+      "id": 22,
+      "engines": {
+       "velox": {
+        "status": "ok",
+        "elapsed_ms": 4506,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       },
+       "xflare": {
+        "status": "ok",
+        "elapsed_ms": 1818,
+        "rows": 4,
+        "verify": {
+         "against": "answers",
+         "status": "ok",
+         "detail": null
+        },
+        "error": null
+       }
+      },
+      "evidence": {
+       "status": "offloaded",
+       "detail": null
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "submitter": {
+  "email": "bench@example.com",
+  "sdp_id": null
+ },
+ "note": "fixture",
+ "isolation_claim": "exclusive",
+ "producer": "xflare-bench-submit@d829a8bfc6527bd9a4adfcc4e50748596e364808",
+ "environment": {
+  "source": "reservation-server",
+  "observed_at": "2026-10-01T00:00:00Z",
+  "host": "GNR-3",
+  "devices": [
+   {
+    "id": "0",
+    "serial": "SN-0001",
+    "type": "MX1P",
+    "fw": "1.2.3"
+   }
+  ],
+  "sdk": "2026.10.0",
+  "pxl": "1.8.0",
+  "reservation": {
+   "id": "rsv-1",
+   "owner": "bench@example.com",
+   "start": "2026-10-01T00:00:00Z",
+   "end": "2026-10-01T01:03:00Z"
+  },
+  "booking_overlap": "none",
+  "overlapping": [],
+  "cpu_contention": "unmeasured"
+ }
+}
