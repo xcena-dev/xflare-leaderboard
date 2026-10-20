@@ -13,7 +13,7 @@
   // Badge text is uploaded-derived; the class comes from this fixed map.
   const BADGE_CLASS = {
     reproducible: 'b-good', partial: 'b-warn', 'dev bundle': 'b-warn',
-    'booking overlap': 'b-bad', 'overlap unknown': 'b-dim',
+    'booking overlap': 'b-bad', 'overlap unknown': 'b-dim', 'spark conf': 'b-warn',
   };
 
   function el(tag, cls, text) {
@@ -54,13 +54,13 @@
     return c ? Object.entries(c).map(([k, v]) => `${k}: ${v ?? '—'}`).join('\n') : '';
   }
   // The board's config cell: resources only (toml and bundle live in the tooltip and the filters, the
-  // application mode in its own column).
+  // application mode in its own column), plus the config label's `+conf` marker for custom Spark settings.
   function compactConfig(c) {
     const parts = [`${c.executors}×${c.executor_cores}`];
     if (c.offheap != null) parts.push(c.offheap);
     if (c.shuffle_partitions != null) parts.push(`sp${c.shuffle_partitions}`);
     if (c.devices != null) parts.push(`d${c.devices}`);
-    return cutLabel(parts.join(' '), 24);
+    return cutLabel(parts.join(' '), 24) + (c.spark_conf === 'custom' ? ' +conf' : '');
   }
 
   // The service is plain http, where navigator.clipboard does not exist; a

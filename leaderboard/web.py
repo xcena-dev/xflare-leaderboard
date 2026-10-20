@@ -13,6 +13,8 @@ What a page or summary shows is bounded by the budgets in ``display``.
 from __future__ import annotations
 
 import difflib
+import itertools
+import json
 import math
 from fractions import Fraction
 
@@ -369,7 +371,7 @@ def _facets(values: dict[str, set]) -> tuple[dict, bool]:
     filter, as {token, label} (``display.facet_option``); the flag says some
     were left out."""
     truncated = any(len(v) > FACET_VALUES for v in values.values())
-    return {k: [facet_option(x) for x in sorted(v, key=lambda s: (len(s), s) if s.isdigit() else (1 << 30, s))
+    return {k: [facet_option(x, k) for x in sorted(v, key=lambda s: (len(s), s) if s.isdigit() else (1 << 30, s))
                 [:FACET_VALUES]]
             for k, v in values.items()}, truncated
 
@@ -499,6 +501,19 @@ def _repro(manifest: dict, stored: dict) -> dict:
             "notes": notes}
 
 
+def _settings(run: dict, field: str) -> dict:
+    """``run[field]`` (A5 ``spark_conf`` / ``spark_conf_readback``) as the run page lists it: ``recorded`` is False
+    when the field is absent (a manifest from before A5), ``items`` holds the first PREVIEW_ITEMS (key, value) pairs
+    and ``count`` all of them; ``items`` is None for a stored value that is not an object (accepted before A5
+    validated it)."""
+    if field not in run:
+        return {"recorded": False, "items": [], "count": 0}
+    value = run[field]
+    if not isinstance(value, dict):
+        return {"recorded": True, "items": None, "count": 0}
+    return {"recorded": True, "items": list(itertools.islice(value.items(), PREVIEW_ITEMS)), "count": len(value)}
+
+
 def _repeat_matrix(repeats: list[dict]) -> list[dict]:
     """Query x (repeat, engine) cells for the given (already cut) repeats."""
     by_rep = [{q["id"]: q for q in r.get("queries") or []} for r in repeats]
@@ -540,19 +555,50 @@ def run_page(run_id):
         matrix=_repeat_matrix(repeats[:MATRIX_REPEATS]),
         toml_diff=_toml_diff(manifest["run"]["xflare_toml"]),
         repro=_repro(manifest, d["repro"]),
+        spark_conf=_settings(manifest["run"], "spark_conf"),
+        spark_conf_readback=_settings(manifest["run"], "spark_conf_readback"),
     )
 
 
-def _params(manifest: dict, meta: dict, mode: str) -> dict:
-    """Flat key -> text view of what a run ran with, for the compare diff. ``mode`` is the interpreted
-    application mode from the derived config (a stored value outside the enum shows as "-")."""
+# A compare cell for a key a run does not have (or an A5 map it did not record): equal only to itself.
+_ABSENT = object()
+
+
+def _cmp_key(full) -> object:
+    """What a compare row's "differs" compares: the JSON text of the full value, so JSON types stay distinct
+    (``true`` is not ``1``) and map key order does not matter; ``_ABSENT`` stays its own value."""
+    return full if full is _ABSENT else json.dumps(full, sort_keys=True, ensure_ascii=False)
+
+
+def _settings_cell(run: dict, field: str) -> tuple:
+    """``run[field]`` (A5 ``spark_conf`` / ``spark_conf_readback``) as one compare cell: (text, full value). The
+    text is "not recorded", "{}", "not an object", or the map as sorted ``k=v`` pairs joined by "; " (a structure,
+    only in a row stored before A5 validated the map, is never stringified); the template cuts it like any scalar.
+    The full value is what the row's "differs" compares."""
+    if field not in run:
+        return "not recorded", _ABSENT
+    value = run[field]
+    if not isinstance(value, dict):
+        return "not an object", value
+    if not value:
+        return "{}", value
+    return "; ".join(f"{k}={'[…]' if isinstance(x, (dict, list)) else x}" for k, x in sorted(value.items())), value
+
+
+def _params(manifest: dict, meta: dict, derived: dict) -> dict:
+    """Flat key -> (text, full value) view of what a run ran with, for the compare diff; the full value is the
+    text except for the Spark settings maps (``_settings_cell``). The application mode and the Spark settings state
+    are the interpreted ones from ``derived`` (a stored mode outside the enum shows as "-")."""
     run, build, client = manifest["run"], manifest["build"], manifest["client"]
     res, toml, env = run["resources"], run["xflare_toml"], meta.get("environment") or {}
     bundle, gluten = build.get("bundle") or {}, build.get("gluten") or {}
     devices = env.get("devices") or []
     p = {
         "scale_factor": run["scale_factor"], "codec": run["codec"],
-        "engines": ",".join(run["engines"]), "application_mode": mode,
+        "engines": ",".join(run["engines"]), "application_mode": derived["config"]["application_mode"],
+        "spark_conf (state)": derived["config"]["spark_conf"],
+        "spark_conf.source": {"field": "run.spark_conf", "argv": "argv (no run.spark_conf)"}.get(derived["spark_conf_source"]),
+        **{f"{field} (settings)": _settings_cell(run, field) for field in ("spark_conf", "spark_conf_readback")},
         "queries": ",".join(str(q) for q in run["queries"]),
         "repeat_requested": run["repeat_requested"], "record_answers": run["record_answers"],
         **{f"resources.{k}": res.get(k) for k in ("executors", "executor_cores", "offheap",
@@ -578,7 +624,8 @@ def _params(manifest: dict, meta: dict, mode: str) -> dict:
         p[f"override.{o.get('key')}"] = f"{o.get('value')} ({o.get('source')} → {o.get('destination')})"
     if len(overrides) > PREVIEW_ITEMS:
         p["override.(more)"] = f"{len(overrides) - PREVIEW_ITEMS} more — see raw JSON"
-    return {k: "—" if v is None else str(v) for k, v in p.items()}
+    text = {k: "—" if v is None else str(v) for k, v in p.items() if not isinstance(v, tuple)}
+    return {k: v if isinstance(v, tuple) else (text[k], text[k]) for k, v in p.items()}
 
 
 @bp.get(f"/b/{BENCH_ID}/compare")
@@ -594,8 +641,7 @@ def compare_page():
         if row is None:
             abort(404)
         runs.append({"row": row, "d": row["derived"], "summary": _run_summary(row),
-                     "params": _params(store.load_manifest(run_id), row["meta"] or {},
-                                        row["derived"]["config"]["application_mode"])})
+                     "params": _params(store.load_manifest(run_id), row["meta"] or {}, row["derived"])})
     base = runs[0]["d"]
 
     def delta(v, b):
@@ -619,9 +665,10 @@ def compare_page():
     keys = list(dict.fromkeys(k for r in runs for k in r["params"]))
     params = []
     for k in keys:
-        values = [r["params"].get(k, "—") for r in runs]
-        # Compared in full; the template's v() cuts them for display.
-        params.append({"key": k, "values": values, "differs": len(set(values)) > 1})
+        cells = [r["params"].get(k, ("—", _ABSENT)) for r in runs]
+        # Compared in full; the template's v() cuts the texts for display.
+        params.append({"key": k, "values": [t for t, _ in cells],
+                       "differs": len({_cmp_key(full) for _, full in cells}) > 1})
     return render_template(
         "leaderboard_compare.html",
         benchmark=cfg, runs=runs, queries=queries, totals=totals,

@@ -251,10 +251,21 @@ def _manifest(v: _V, m, path):
     requested = set()
     r = v.sub(m, "run", path, ("argv", "scale_factor", "codec", "engines", "queries", "repeat_requested",
                                "record_answers", "answers", "resources", "xflare_toml", "xflare_overrides", "dataset",
-                               "started_at", "finished_at", "exit_status"), optional=("application_mode",))
+                               "started_at", "finished_at", "exit_status"),
+              optional=("application_mode", "spark_conf", "spark_conf_readback"))
     if r is not None:
         p = f"{path}.run"
         v.str_(r, "application_mode", p, enum=("shared", "per-engine"))
+        for field in ("spark_conf", "spark_conf_readback"):
+            if field not in r:
+                continue
+            settings = r[field]
+            if not isinstance(settings, dict):
+                v.err(f"{p}.{field}", f"expected object, got {_type_name(settings)}")
+                continue
+            for key, value in settings.items():
+                if not isinstance(value, str):
+                    v.err(f"{p}.{field}[{_snip(key)}]", f"expected string, got {_type_name(value)}")
         for i, s in enumerate(v.list_(r, "argv", p)):
             if not isinstance(s, str):
                 v.err(f"{p}.argv[{i}]", f"expected string, got {_type_name(s)}")

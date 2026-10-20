@@ -741,7 +741,7 @@ setTimeout(async () => {
   for (const [id, e] of Object.entries(byId)) if (e.id) text[id] = e.textContent;
   console.log(JSON.stringify({ listeners, text, texts: all.map(e => String(e.textContent)),
                                values: all.map(e => String(e.value)), titles: all.map(e => String(e.title)),
-                               hrefs: all.map(e => String(e.href || '')), gate, location: location.href || null,
+                               classes: all.map(e => String(e.className)), hrefs: all.map(e => String(e.href || '')), gate, location: location.href || null,
                                clipboard, execs }));
 }, 50);
 """
@@ -1745,6 +1745,249 @@ class TestApplicationMode(WebCase):
                         html, re.S)
         self.assertEqual(row.group(1), "lb-differs")
         self.assertEqual(re.findall(r"<td[^>]*>([^<]*)</td>", row.group(2)), ["shared", "per-engine"])
+
+
+class TestSparkConf(WebCase):
+    """A5: the Spark settings state is a filter (with labelled options), a badge, a board config-cell marker and a
+    compare parameter; the run page lists both maps, says where the state came from, and tells an absent map from
+    an empty one."""
+
+    CONF = {"spark.sql.adaptive.enabled": "false", "spark.sql.shuffle.partitions": "400"}
+    READBACK = {"spark.sql.adaptive.enabled": "false", "spark.sql.shuffle.partitions": "200"}
+
+    def a5(self, spark_conf, readback=None, **kw):
+        """An A5 manifest: spark_conf as given (argv gets the matching --spark-conf options), readback likewise."""
+        kw.setdefault("run_id", rid())
+        m = build_manifest(spark_conf=spark_conf, spark_conf_readback=readback, **kw)
+        self.post(build_envelope(m))
+        return m
+
+    def page(self, run_id) -> str:
+        r = self.c.get(f"{LB}/run/{run_id}")
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True)[:500])
+        return r.get_data(as_text=True)
+
+    @staticmethod
+    def section(page) -> str:
+        return re.search(r'<section class="lb-panel" id="spark-conf">(.*?)</section>', page, re.S).group(1)
+
+    @staticmethod
+    def state(section) -> str:
+        return " ".join(re.search(r"<dt>State</dt><dd>(.*?)</dd>", section, re.S).group(1).split())
+
+    def compare_row(self, *run_ids, key) -> tuple[str, list[str]]:
+        """The compare page's parameter row ``key``: its class and its cell texts."""
+        html_ = self.c.get(f"{LB}/compare?runs={','.join(run_ids)}").get_data(as_text=True)
+        found = re.search(r'<tr class="(lb-differs|lb-same)">\s*<td><code>' + re.escape(key) + r"</code></td>(.*?)</tr>",
+                          html_, re.S)
+        return found.group(1), re.findall(r"<td[^>]*>([^<]*)</td>", found.group(2))
+
+    @staticmethod
+    def tables(section) -> list[list[tuple[str, str]]]:
+        return [re.findall(r"<tr><td><code>(.*?)</code></td><td><code>(.*?)</code></td></tr>", t, re.S)
+                for t in re.findall(r"<tbody>(.*?)</tbody>", section, re.S)]
+
+    def test_filter_facet_and_labels(self):
+        default = self.a5({}, {}, elapsed=flat_elapsed(1000))
+        custom = self.a5(self.CONF, self.READBACK, elapsed=flat_elapsed(2000))
+        legacy = self.submit(elapsed=flat_elapsed(3000))                      # no field, no --spark-conf: default
+        b = self.board()
+        self.assertEqual(b["facets"]["spark_conf"],
+                         [{"token": facet_token("custom"), "label": "custom (--spark-conf)"},
+                          {"token": facet_token("default"), "label": "default Spark settings only"}])
+        for value, ids in (("default", [default["run_id"], legacy]), ("custom", [custom["run_id"]])):
+            for query in (f"?spark_conf={value}", f"?spark_conf_t={facet_token(value)}"):
+                self.assertEqual([r["run_id"] for r in self.board(query)["rows"]], ids, query)
+                self.assertEqual(sorted(r["run_id"] for r in self.c.get("/api/leaderboard/runs" + query).get_json()),
+                                 sorted(ids), query)
+        # the default board filter stays executors x executor_cores only: every state ranks
+        self.assertEqual(len(b["rows"]), 3)
+        self.assertEqual(b["default_filter"], {"executors": 4, "executor_cores": 6})
+        self.assertIn('data-key="spark_conf" data-label="spark conf"', self.c.get(LB).get_data(as_text=True))
+        out = run_page_js("board", data=self.page_data(), fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True),
+                          slots=["spark_conf"])
+        self.assertIn("default Spark settings only", out["texts"])
+        self.assertIn(facet_token("default"), out["values"])
+
+    def test_badge_and_config_cell_marker(self):
+        custom = self.a5(self.CONF, elapsed=flat_elapsed(1000))
+        plain = self.a5({}, elapsed=flat_elapsed(2000))
+        rows = self.board()["rows"]
+        self.assertEqual([r["run_id"] for r in rows], [custom["run_id"], plain["run_id"]])
+        self.assertIn("spark conf", rows[0]["badges"])
+        self.assertNotIn("spark conf", rows[1]["badges"])
+        self.assertTrue(rows[0]["config_label"].endswith(" +conf"))
+        self.assertNotIn("+conf", rows[1]["config_label"])
+        out = run_page_js("board", data=self.page_data(),
+                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        badge = [c for t, c in zip(out["texts"], out["classes"]) if t == "spark conf"]
+        self.assertEqual(badge[:1], ["lb-badge b-warn"])                     # the board row's badge (hero repeats it)
+        self.assertEqual(set(badge), {"lb-badge b-warn"})
+        self.assertIn("4×6 64g +conf", out["texts"])
+        self.assertIn("4×6 64g", out["texts"])
+        page = self.page(custom["run_id"])
+        self.assertIn('<span class="lb-badge">spark conf</span>', page)
+        self.assertIn(" +conf</h3>", page)
+
+    def test_detail_lists_both_maps(self):
+        m = self.a5(self.CONF, self.READBACK)
+        section = self.section(self.page(m["run_id"]))
+        self.assertEqual(self.state(section), "custom — from run.spark_conf: the settings in effect are listed below")
+        self.assertEqual(self.tables(section), [list(self.CONF.items()), list(self.READBACK.items())])
+        self.assertIn("Requested — run.spark_conf", section)
+        self.assertIn("Read back by the session — run.spark_conf_readback", section)
+        self.assertNotIn("not recorded", section)
+
+    def test_absent_and_empty_are_told_apart(self):
+        empty = self.a5({}, {})
+        section = self.section(self.page(empty["run_id"]))
+        self.assertEqual(self.state(section), "default — from run.spark_conf: it is empty, the run kept the default "
+                                              "Spark settings")
+        self.assertEqual(section.count("none ({})"), 2)
+        self.assertNotIn("not recorded", section)
+        self.assertNotIn("<table", section)
+        # absent (not recorded, e.g. a pre-A5 manifest): the state comes from argv, and neither map is recorded
+        for argv, state in ((REAL_ARGV, "default"), (REAL_ARGV[:2] + ["--spark-conf", "spark.a=1"] + REAL_ARGV[2:],
+                                                     "custom")):
+            with self.subTest(state=state):
+                run_id = self.submit(argv=argv)
+                section = self.section(self.page(run_id))
+                self.assertEqual(self.state(section),
+                                 f"{state} — read from argv: this manifest has no run.spark_conf, "
+                                 f"and argv {'has a' if state == 'custom' else 'has no'} --spark-conf option it could read")
+                self.assertEqual(section.count("not recorded"), 2)
+                self.assertNotIn("none ({})", section)
+        # only the readback absent
+        half = self.a5(self.CONF)
+        section = self.section(self.page(half["run_id"]))
+        self.assertEqual(self.tables(section), [list(self.CONF.items())])
+        self.assertEqual(section.count("not recorded"), 1)
+
+    def test_maps_are_cut_and_bounded(self):
+        conf = {f"spark.k{i:03d}": "v" for i in range(150)}
+        conf["spark.k000"] = "x" * 600
+        long_key = "spark." + "k" * 600
+        readback = {long_key: "1"}
+        m = self.a5(conf, readback)
+        page = self.page(m["run_id"])
+        requested, read = self.tables(self.section(page))
+        self.assertEqual(len(requested), 100)
+        self.assertEqual(requested[0], ("spark.k000", "x" * 512 + "…"))
+        self.assertIn('<p class="lb-more">50 more — see raw JSON</p>', page)
+        self.assertEqual(read, [(long_key[:512] + "…", "1")])
+        self.assertNotIn("x" * 513, page)
+        self.assertNotIn(long_key, page)
+        # compare: one row per map, cut like any scalar
+        other = self.a5({})
+        cls, (line, empty) = self.compare_row(m["run_id"], other["run_id"], key="spark_conf (settings)")
+        self.assertEqual((cls, line, empty), ("lb-differs", "spark.k000=" + "x" * 501 + "…", "{}"))
+        cls, (line, empty) = self.compare_row(m["run_id"], other["run_id"], key="spark_conf_readback (settings)")
+        self.assertEqual((cls, line, empty), ("lb-differs", f"{long_key}=1"[:512] + "…", "not recorded"))
+
+    def test_hostile_keys_and_values_stay_escaped(self):
+        conf = {HOSTILE[0]: HOSTILE[1], "spark.x": HOSTILE[2]}
+        m = self.a5(conf, {HOSTILE[1]: HOSTILE[0]})
+        page = self.page(m["run_id"])
+        section = self.section(page)
+        for s in HOSTILE:
+            self.assertNotIn(s, page)
+            self.assertIn(str(markupsafe.escape(s)), section)
+        other = self.a5({})
+        cmp_page = self.c.get(f"{LB}/compare?runs={m['run_id']},{other['run_id']}").get_data(as_text=True)
+        for s in HOSTILE:
+            self.assertNotIn(s, cmp_page)
+        self.assertIn(str(markupsafe.escape(f"{HOSTILE[0]}={HOSTILE[1]}; spark.x={HOSTILE[2]}")), cmp_page)
+
+    def test_compare_shows_the_state_and_the_maps(self):
+        custom = self.a5(self.CONF, self.READBACK)
+        empty = self.a5({}, {})
+        legacy = self.submit(argv=REAL_ARGV)
+        ids = (custom["run_id"], empty["run_id"], legacy)
+        html_ = self.c.get(f"{LB}/compare?runs={','.join(ids)}").get_data(as_text=True)
+        self.assertEqual(re.findall(r"<td><code>(spark_conf[^<]*)</code></td>", html_),
+                         ["spark_conf (state)", "spark_conf.source", "spark_conf (settings)",
+                          "spark_conf_readback (settings)"])
+        self.assertEqual(self.compare_row(*ids, key="spark_conf (state)"),
+                         ("lb-differs", ["custom", "default", "default"]))
+        self.assertEqual(self.compare_row(*ids, key="spark_conf.source"),
+                         ("lb-differs", ["run.spark_conf", "run.spark_conf", "argv (no run.spark_conf)"]))
+        self.assertEqual(self.compare_row(*ids, key="spark_conf (settings)"),
+                         ("lb-differs", ["spark.sql.adaptive.enabled=false; spark.sql.shuffle.partitions=400", "{}",
+                                         "not recorded"]))
+        self.assertEqual(self.compare_row(*ids, key="spark_conf_readback (settings)"),
+                         ("lb-differs", ["spark.sql.adaptive.enabled=false; spark.sql.shuffle.partitions=200", "{}",
+                                         "not recorded"]))
+        # the same map in another key order is the same setting
+        same = self.a5(dict(reversed(self.CONF.items())), self.READBACK)
+        self.assertEqual(self.compare_row(custom["run_id"], same["run_id"], key="spark_conf (settings)")[0], "lb-same")
+
+    def test_compare_differs_on_the_full_maps(self):
+        """The settings rows compare the maps themselves, never their (cut) text: an uploaded "—" or "(more)" is one
+        more setting, and a difference past the display cut still marks the row."""
+        dash, plain = self.a5({"spark.a": "—", "spark.b": "v"}), self.a5({"spark.b": "v"})
+        self.assertEqual(self.compare_row(dash["run_id"], plain["run_id"], key="spark_conf (settings)"),
+                         ("lb-differs", ["spark.a=—; spark.b=v", "spark.b=v"]))
+        more = self.a5({"(more)": "REAL_SETTING", **{f"spark.k{i:03}": "v" for i in range(100)}})
+        cls, (line, empty) = self.compare_row(more["run_id"], self.a5({})["run_id"], key="spark_conf (settings)")
+        self.assertEqual((cls, empty), ("lb-differs", "{}"))
+        self.assertTrue(line.startswith("(more)=REAL_SETTING; spark.k000=v; "), line)
+        long_a, long_b = self.a5({"spark.a": "x" * 600 + "1"}), self.a5({"spark.a": "x" * 600 + "2"})
+        self.assertEqual(self.compare_row(long_a["run_id"], long_b["run_id"], key="spark_conf (settings)"),
+                         ("lb-differs", ["spark.a=" + "x" * 504 + "…"] * 2))
+        # equal maps, both empty, or both absent: the same
+        self.assertEqual(self.compare_row(plain["run_id"], self.a5({"spark.b": "v"})["run_id"],
+                                          key="spark_conf (settings)")[0], "lb-same")
+        self.assertEqual(self.compare_row(self.a5({})["run_id"], self.a5({})["run_id"], key="spark_conf (settings)")[0],
+                         "lb-same")
+        self.assertEqual(self.compare_row(self.submit(), self.submit(), key="spark_conf_readback (settings)")[0],
+                         "lb-same")
+
+    def test_legacy_malformed_settings_render(self):
+        """A row stored before A5 validated the maps (the A4 validator kept them as unknown fields) still renders:
+        state unknown on the run page, compare and filter, never a 500."""
+        store = lb_store.Store(self.data)
+        good = self.a5({})
+        cases = ["spark.a=1", ["spark.a=1"], {"spark.a": 1}, {"spark.a": {"nested": ["x" * 600]}}, None]
+        ids = []
+        for value in cases:
+            m = build_manifest(run_id=rid())
+            m["run"]["spark_conf"] = value
+            m["run"]["spark_conf_readback"] = value
+            cid = aggregate.content_id(m)
+            store._write_raw(cid, aggregate.canonical_manifest_bytes(m))
+            self.assertEqual(store._commit_row(build_envelope(m), cid, aggregate.derive(m, None),
+                                               {"ranked_total": True, "warnings": []}), "created")
+            ids.append(m["run_id"])
+            with self.subTest(value=repr(value)[:40]):
+                section = self.section(self.page(m["run_id"]))
+                self.assertTrue(self.state(section).startswith("unknown — run.spark_conf is not a string → string "
+                                                               "object"), self.state(section))
+                if isinstance(value, dict):
+                    self.assertEqual([len(t) for t in self.tables(section)], [1, 1])
+                else:
+                    self.assertEqual(section.count("not a key/value object — see raw JSON"), 2)
+                self.assertNotIn("x" * 513, section)
+                cmp_page = self.c.get(f"{LB}/compare?runs={good['run_id']},{m['run_id']}")
+                self.assertEqual(cmp_page.status_code, 200)
+                self.assertNotIn("nested", cmp_page.get_data(as_text=True))
+        self.assertEqual([r["run_id"] for r in self.board("?spark_conf=default")["rows"]], [good["run_id"]])
+        self.assertEqual(sorted(r["run_id"] for r in self.c.get("/api/leaderboard/runs?spark_conf=unknown").get_json()),
+                         sorted(ids))
+        # JSON types stay distinct in "differs": a stored true and a stored 1 are different settings
+        typed = []
+        for value in (True, 1):
+            m = build_manifest(run_id=rid())
+            m["run"]["spark_conf"] = m["run"]["spark_conf_readback"] = {"spark.k": value}
+            cid = aggregate.content_id(m)
+            store._write_raw(cid, aggregate.canonical_manifest_bytes(m))
+            store._commit_row(build_envelope(m), cid, aggregate.derive(m, None), {"ranked_total": True, "warnings": []})
+            typed.append(m["run_id"])
+        page = self.c.get(f"{LB}/compare?runs={typed[0]},{typed[1]}").get_data(as_text=True)
+        for key in ("spark_conf (settings)", "spark_conf_readback (settings)"):
+            row = re.search(r'<tr class="([^"]+)">\s*<td><code>' + re.escape(key) + r'</code>', page)
+            self.assertEqual(row.group(1), "lb-differs", key)
+        self.assertIn({"token": facet_token("unknown"), "label": "unknown (spark_conf unreadable)"},
+                      self.board()["facets"]["spark_conf"])
 
 
 if __name__ == "__main__":

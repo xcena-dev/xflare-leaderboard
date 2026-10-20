@@ -20,10 +20,37 @@ _VALUE_OPTIONS = frozenset({
     "--reservation", "--xflare-toml", "--scale-factor", "--codec", "--engines",
     "--results-dir", "--config", "--artifact", "--bundle", "--request",
     "--executors", "--executor-cores", "--offheap", "--shuffle-partitions",
-    "--repeat", "--submission",
+    "--repeat", "--submission", "--xflare-backend",
 })
 _FLAGS = frozenset({"--download-logs", "--record-answers", "--application-per-engine", "--list", "-h", "--help"})
 _QUERY_IDS = frozenset(str(q) for q in range(1, 23))
+
+
+def _options(argv):
+    """Yield actual (option, value) boundaries; stop rather than guess an unknown arity."""
+    if argv and argv[0].rsplit("/", 1)[-1] == "spark-tpch.sh":
+        argv = argv[1:]
+    i = 0
+    while i < len(argv):
+        option = argv[i]
+        if option in _VALUE_OPTIONS:
+            if i + 1 == len(argv):
+                raise ValueError("missing option value")
+            yield option, argv[i + 1]
+            i += 2
+        elif option in _FLAGS or option in _QUERY_IDS:
+            yield option, None
+            i += 1
+        else:
+            raise ValueError("unknown option arity")
+
+
+def has_option(argv: list[str], name: str) -> bool:
+    """Whether argv contains an actual option, excluding consumed values and unparsed tails."""
+    try:
+        return any(option == name for option, _ in _options(argv))
+    except ValueError:
+        return False
 
 
 def _script(run: dict, build: dict, client: dict) -> str | None:
@@ -33,26 +60,20 @@ def _script(run: dict, build: dict, client: dict) -> str | None:
     "$RESERVATION" and nothing starts until it is set. The artifact and bundle
     this run resolved are pinned unless argv already chose them -- left to
     "the current one" they would silently move to a newer build."""
-    argv = list(run["argv"])
-    if argv and argv[0].rsplit("/", 1)[-1] == "spark-tpch.sh":
-        argv = argv[1:]
-    rest, chosen, i = [], set(), 0
-    while i < len(argv):
-        option = argv[i]
-        if option in _VALUE_OPTIONS:
-            if i + 1 == len(argv):
-                return None
+    rest, chosen = [], set()
+    try:
+        options = list(_options(run["argv"]))
+    except ValueError:
+        # Unknown arity could change every boundary that follows. Keep the
+        # stored argv intact, but offer no script rather than guess.
+        return None
+    for option, value in options:
+        if value is not None:
             chosen.add(option)
             rest += [shlex.quote(option), ('"$RESERVATION"' if option == "--reservation"
-                                           else shlex.quote(argv[i + 1]))]
-            i += 2
-            continue
-        if option not in _FLAGS and option not in _QUERY_IDS:
-            # Unknown arity could change every boundary that follows. Keep the
-            # stored argv intact, but offer no script rather than guess.
-            return None
-        rest.append(shlex.quote(option))
-        i += 1
+                                           else shlex.quote(value))]
+        else:
+            rest.append(shlex.quote(option))
     pins = []
     if "--artifact" not in chosen and build.get("artifact_id"):
         pins += ["--artifact", build["artifact_id"]]

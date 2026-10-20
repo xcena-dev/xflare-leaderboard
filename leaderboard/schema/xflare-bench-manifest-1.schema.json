@@ -556,6 +556,20 @@
           ],
           "default": "shared",
           "description": "Optional; absence means shared. Both modes rank on the same boards."
+        },
+        "spark_conf": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional string map of requested Spark settings (last value wins); empty means default, absent means not recorded."
+        },
+        "spark_conf_readback": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional string map of session-reported Spark settings; absent means not recorded."
         }
       }
     },

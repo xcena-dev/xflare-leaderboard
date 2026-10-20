@@ -37,7 +37,7 @@ XFLARE_LEADERBOARD_DATA=/tmp/lb-data python3 app.py --host 127.0.0.1 --port 8894
 ## Payload contract
 
 This section restates data contract v1 (frozen 2026-10-19, shared with the producer `spark-tpch.sh --submission`
-and the submit skill) with amendments A1–A4; this README is the contract's home, and code comments cite it as
+and the submit skill) with amendments A1–A5; this README is the contract's home, and code comments cite it as
 README §1–§4. The schema files give each field's type; the meanings are stated here.
 
 ### §1 Manifest
@@ -71,6 +71,16 @@ A4 (additive; a manifest without these fields is unchanged and means `shared`):
   the last finish (`null` when the last has none), `cleanup` is `ok` only if every application's is, else `failed`
   if any failed, else `unknown`; `artifact_id` / `bundle` the common value when all applications agree, else
   `null`. `status` keeps its meaning.
+
+A5 (additive; absent = unknown, a manifest from before A5):
+- `run.spark_conf`: object `{"<key>": "<value>"}` (string values) of the `spark-tpch.sh --spark-conf KEY=VALUE`
+  settings in effect, the last value of a key winning as the script applies them; `{}` when none.
+- `run.spark_conf_readback`: same shape, what the Spark session reported back for those keys (the script's
+  `--results-dir` JSON); `{}` when none.
+- Either one that is not an object of string values is a 400. Accepted values are bounded only by the body cap;
+  pages cut them like any uploaded string. Producers refuse a `--submission` whose `spark_conf`,
+  `xflare_overrides` or argv carry a secret-looking key (`secret|password|token|credential|access.?key|\.key$`,
+  case-insensitive) rather than publish it; the server does not repeat that check.
 
 ### §2 Envelope
 
@@ -137,11 +147,16 @@ Computed on the server, never taken from the client.
 - Badges never gate: `xN`, `reproducible` (`build.provenance_source=artifact-manifest`, `build.dirty=false`,
   `client.dirty=false`, and a bundle that is not `dev` or one with `gluten.commit` set and `gluten.dirty=false`),
   `dev bundle`, `booking overlap` / `overlap unknown`, `partial`,
-  `offload:<status>` (the evidence status of the completed repeats, whole; `offload:mixed` when they disagree).
+  `offload:<status>` (the evidence status of the completed repeats, whole; `offload:mixed` when they disagree),
+  `spark conf` (A5: the Spark settings state is `custom`).
   Bundle and resources are columns and filters, never separate boards.
 - A4: `shared` and `per-engine` runs rank together on the same boards under the same order and hero rules; the
   application mode is part of the config label, a board column (Mode) and a filter, never a board split, and the
   default filter does not narrow it.
+- A5: every run has a Spark settings state, `custom` when `run.spark_conf` is a non-empty object and `default` when
+  it is `{}`. It never gates (§4 eligibility, order and hero are unchanged) and never splits a board: a `custom` run
+  gets the `spark conf` badge and a ` +conf` marker at the end of its config label, and the filter `spark_conf`
+  narrows to one state (`default` = "default Spark settings only"); the default filter does not narrow it.
 
 Interpretations the contract leaves open (decided here, not contract changes):
 - The ok / elapsed / verify checks of `Q(run, q)` use the repeats with `status=completed`; failed and aborted repeats
@@ -156,6 +171,13 @@ Interpretations the contract leaves open (decided here, not contract changes):
   stay listed but never rank. A shared run's stray `applications` stay uninterpreted, so it ranks as before. An
   identical re-upload of such a run still gets 200 with its original receipt (§3), although today's validator would
   reject the manifest as a new submission; nothing is stored or updated by it.
+- A5 on manifests without `run.spark_conf` (contract: unknown): the state is read from argv, `custom` when argv
+  has an actual `--spark-conf` option and `default` otherwise. argv is read with `spark-tpch.sh`'s option arity
+  (as the reproduce script reads it), so a `--spark-conf` that is another option's value does not count, and
+  reading stops at the first entry it cannot place (unknown option, missing value). The run page and compare say
+  whether the state came from `run.spark_conf` or from argv. A run stored before A5 whose `run.spark_conf` is not an
+  object of string values (the older validator kept unknown fields) gets the state `unknown`: listed, ranked as
+  before, matched by neither `spark_conf=default` nor `custom`.
 
 ## API
 
@@ -172,11 +194,11 @@ reads no storage and still loads.
 | `GET /api/leaderboard/runs` | `sf=100\|1000`, `include_withdrawn=1`, and the board's filters with NO default (absent = any) | 200 `[run summary]`, oldest `finished_at` instant first (then `run_id`); 400 bad sf |
 | `GET /api/leaderboard/runs/<run_id>` | | 200 run summary + `derived`, `meta`, `manifest`; 404 `unknown run_id` |
 | `GET /api/leaderboard/runs/<run_id>/raw` | | 200 the whole stored manifest file (no size cap), `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`; 404 `raw manifest not found` (no row, file missing, symlink or not a regular file); 503 when the file cannot be read |
-| `GET /api/leaderboard/board` | `sf` (default first tab), `metric=total\|q1..q22`, `top=5\|10\|25` (default 10), filters `executors`, `executor_cores`, `offheap`, `shuffle_partitions`, `devices`, `toml`, `bundle`, `application_mode` (`shared\|per-engine`), `device`, `submitter`, `badge` (each also as `<key>_t` = facet token), `from`, `to` (YYYY-MM-DD) | 200 `{sf, tabs, metric, top, filter, filter_tokens, default_filter, facets, facets_truncated, hero, hero_fallback, hero_notice, eligible_count, rows}`; `hero_fallback` is true when `hero` is the tab's fallback run (rows stay filtered, possibly empty) and `hero_notice` is then the line the page shows above it, else null; `hero` adds `per_query` (22 entries from that one run); each row is a run summary plus `rank`, `value {xflare_ms, velox_ms, speedup}` and `repro` (the reproduce script, or null when none is offered); 400 bad sf or metric |
+| `GET /api/leaderboard/board` | `sf` (default first tab), `metric=total\|q1..q22`, `top=5\|10\|25` (default 10), filters `executors`, `executor_cores`, `offheap`, `shuffle_partitions`, `devices`, `toml`, `bundle`, `application_mode` (`shared\|per-engine`), `spark_conf` (`default\|custom`, or `unknown`; §4 A5), `device`, `submitter`, `badge` (each also as `<key>_t` = facet token), `from`, `to` (YYYY-MM-DD) | 200 `{sf, tabs, metric, top, filter, filter_tokens, default_filter, facets, facets_truncated, hero, hero_fallback, hero_notice, eligible_count, rows}`; `hero_fallback` is true when `hero` is the tab's fallback run (rows stay filtered, possibly empty) and `hero_notice` is then the line the page shows above it, else null; `hero` adds `per_query` (22 entries from that one run); each row is a run summary plus `rank`, `value {xflare_ms, velox_ms, speedup}` and `repro` (the reproduce script, or null when none is offered); 400 bad sf or metric |
 | `GET /` | | 302 to `/b/xflare_leaderboard` |
 | `GET /b/xflare_leaderboard` | | page: tabs, hero chart, board |
-| `GET /b/xflare_leaderboard/run/<run_id>` | | page: argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table (plus, for a `per-engine` run, each repeat's applications: engine, cleanup, app_id, artifact, bundle, started/finished, invocation), application mode, raw download, how to reproduce, withdraw |
-| `GET /b/xflare_leaderboard/compare?runs=a,b[,c,d]` | 2–4 distinct run ids | page: per-query deltas vs the first run, parameter diff (including `application_mode`); 400 / 404 |
+| `GET /b/xflare_leaderboard/run/<run_id>` | | page: argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table (plus, for a `per-engine` run, each repeat's applications: engine, cleanup, app_id, artifact, bundle, started/finished, invocation), application mode, Spark settings (the state and where it came from, then `run.spark_conf` and `run.spark_conf_readback` as key → value tables, each "not recorded" when absent, "none ({})" when empty and "not a key/value object" when stored before A5 validated it), raw download, how to reproduce, withdraw |
+| `GET /b/xflare_leaderboard/compare?runs=a,b[,c,d]` | 2–4 distinct run ids | page: per-query deltas vs the first run, parameter diff (including `application_mode` and four Spark settings rows: `spark_conf (state)`, `spark_conf.source`, and `spark_conf (settings)` / `spark_conf_readback (settings)`, each map on one line as "not recorded" (absent), "{}" (empty), "not an object" (stored before A5 validated it) or its sorted `k=v` pairs joined by "; ", cut like any scalar; a settings row differs when the full maps differ); 400 / 404 |
 
 A run summary is `{run_id, content_id, url, sf, finished_at, submitter, total_eligible, repeats, totals, config,
 config_label, build, device_ids, device_count, host, badges, withdrawn, withdrawal}`. It is a display view: every
@@ -185,23 +207,25 @@ holds at most 100 ids (`device_count` is the full count). The detail API's `with
 `manifest` and the raw download are never cut. A `run_id` that is not a lowercase uuid4 is refused before any
 lookup: JSON 404 `unknown run_id` on the API, HTML 404 on the run page, 400 on compare.
 
-Filters: `facets` lists at most 200 options per filter as `{token, label}`, with `facets_truncated` set when any
-list was capped; the label is the value cut like any scalar, the token is `h:<16 hex>` (the first 16 hex digits of
-the value's sha256). Each facet filter takes two parameters on `/board` and `/runs`: `<key>` is a literal compared
-exactly with the full stored value, and `<key>_t` a token, matching a run whose value hashes to it. They never stand
-in for each other; given both, a run must match both, and an unknown token matches nothing. The page's options send
-`<key>_t`. The board echoes the applied literals in `filter` (as sent) and, in `filter_tokens`, the token of every
-applied facet filter, so a shared URL with a full value selects the offered option. On `/board` an absent filter
-takes the configured default (`executors`, `executor_cores`); sent empty (`executors=`) it means "any", which is how
-the page lifts the default. Config filters compare as text with a `null` value spelled `-`; `from`/`to` that are
-not YYYY-MM-DD narrow nothing.
+Filters: `facets` lists at most 200 options per filter as `{token, label}`, with `facets_truncated` set when any list
+was capped; the label is the value cut like any scalar, the token is `h:<16 hex>` (the first 16 hex digits of the
+value's sha256); the `spark_conf` options are labelled by what they select ("default Spark settings only",
+"custom (--spark-conf)", "unknown (spark_conf unreadable)"). Each facet filter takes two parameters on `/board` and
+`/runs`: `<key>` is a literal compared exactly with the full stored value, and `<key>_t` a token, matching a run whose
+value hashes to it. They never stand in for each other; given both, a run must match both, and an unknown token
+matches nothing. The page's options send `<key>_t`. The board echoes the applied literals in `filter` (as sent) and,
+in `filter_tokens`, the token of every applied facet filter, so a shared URL with a full value selects the offered
+option. On `/board` an absent filter takes the configured default (`executors`, `executor_cores`); sent empty
+(`executors=`) it means "any", which is how the page lifts the default. Config filters compare as text with a `null`
+value spelled `-`; `from`/`to` that are not YYYY-MM-DD narrow nothing.
 
 Pages show previews of uploaded data; the raw JSON always has everything. Every uploaded string is cut to 512
-characters plus "…", except the run-level long texts (note, toml input and rendered text, gluten build command),
-which stop at 65,536 characters. Lists (argv, overrides, devices, overlapping bookings, samples, repeats, each repeat's
-applications, ineligible reasons, compare override rows) stop at 100 items with "N more — see raw JSON", and the repeat × query matrix shows
-the first 10 repeats. A duration, or a compare Δ%, past float range prints "out of range", and the charts get `null`
-for it. The toml diff is skipped above 1000 lines or 65,536 characters per side.
+characters plus "…", except the run-level long texts (note, toml input and rendered text, gluten build command), which
+stop at 65,536 characters. Lists (argv, overrides, devices, overlapping bookings, samples, repeats, each repeat's
+applications, ineligible reasons, the run page's Spark settings maps, compare override rows) stop at 100 items with
+"N more — see raw JSON", and the repeat × query matrix shows the first 10 repeats. A duration, or a compare Δ%, past
+float range prints "out of range", and the charts get `null` for it. The toml diff is skipped above 1000 lines or
+65,536 characters per side.
 
 **Reproduce script.** It pastes into a shell from an xflare-analytics checkout: it checks out the run's client
 revision and runs `scripts/spark-tpch.sh` with the run's argv, read with `spark-tpch.sh`'s own option arity. Each
@@ -215,8 +239,8 @@ passes 65,536 characters (a cut command would run something else), or argv canno
 copies it on click (a run without one links to its page). Copying also works on a plain-http origin.
 
 On the board, the Run column shows when each run finished (UTC) and links to its page; the config cell shows only
-the resources (e.g. `4×6 64g`, plus `sp…`/`d…` when set) and its tooltip spells out every config field; the Mode
-column shows the application mode (`shared` or `per-engine`).
+the resources (e.g. `4×6 64g`, plus `sp…`/`d…` when set, and ` +conf` for custom Spark settings) and its tooltip
+spells out every config field; the Mode column shows the application mode (`shared` or `per-engine`).
 
 ## How a CI job would submit (method only)
 

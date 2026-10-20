@@ -221,6 +221,37 @@
     {% else %}<p class="lb-note">none</p>{% endif %}
   </section>
 
+  <section class="lb-panel" id="spark-conf">
+    <h3>Spark settings (--spark-conf)</h3>
+    {% set state, source = d.config.spark_conf, d.spark_conf_source %}
+    <dl class="lb-kv">
+      <dt>State</dt><dd>{{ v(state) }} —
+        {%- if source == 'argv' %} read from argv: this manifest has no run.spark_conf, and argv
+        {{ 'has a' if state == 'custom' else 'has no' }} --spark-conf option it could read
+        {%- elif state == 'unknown' %} run.spark_conf is not a string → string object (stored before A5 validated it); see raw JSON
+        {%- elif state == 'custom' %} from run.spark_conf: the settings in effect are listed below
+        {%- else %} from run.spark_conf: it is empty, the run kept the default Spark settings
+        {%- endif %}</dd>
+    </dl>
+    {% for title, view in [('Requested — run.spark_conf', spark_conf), ('Read back by the session — run.spark_conf_readback', spark_conf_readback)] %}
+    <p class="lb-note">{{ title }}</p>
+    {% if not view.recorded %}<p class="lb-note lb-dim">not recorded</p>
+    {% elif view['items'] is none %}<p class="lb-note">not a key/value object — see raw JSON</p>
+    {% elif not view.count %}<p class="lb-note">none ({})</p>
+    {% else %}
+    <table class="cmp-table lb-table">
+      <thead><tr><th>Key</th><th>Value</th></tr></thead>
+      <tbody>
+      {% for key, value in view['items'] %}
+        <tr><td><code>{{ v(key) }}</code></td><td><code>{{ v(value) }}</code></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if view.count > limit %}<p class="lb-more">{{ view.count - limit }} more — see raw JSON</p>{% endif %}
+    {% endif %}
+    {% endfor %}
+  </section>
+
   <section class="lb-panel">
     {% set toml = run.xflare_toml %}
     <h3>Resource toml — {{ v(toml.name) }}</h3>

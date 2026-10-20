@@ -501,7 +501,7 @@ class Eligibility(unittest.TestCase):
         # a completed repeat is still held to the full rule (ok + verified against answers)
         d = self.derive_m(lambda m: m["repeats"][1]["queries"][4]["engines"]["xflare"].update(status="skipped"))
         self.assertEqual(d["ineligible_reasons"]["q5"], ["xflare skipped in repeat 2"])
-        self.assertEqual(agg.DERIVE_VERSION, 6)  # stored rows pick up A4 mode, eligibility and reproduction
+        self.assertGreaterEqual(agg.DERIVE_VERSION, 6)  # stored rows pick up A4 mode, eligibility and reproduction
 
     def test_badges(self):
         env = mf.build_envelope(mf.build_manifest(bundle_kind="dev"))
@@ -521,6 +521,32 @@ class Eligibility(unittest.TestCase):
 
 class ReproArguments(unittest.TestCase):
     """Option/value boundaries follow spark-tpch.sh, including option-shaped values."""
+
+    def test_complete_producer_option_arities(self):
+        # Pinned from the full case "$1" table in xflare-analytics/scripts/spark-tpch.sh,
+        # inspected at b9d1bdbb7215a815a9d09f48410855c81f774f60.
+        # --application-per-engine is the A4 flag (added on the producer's per-engine branch); it stays
+        # accepted so recorded per-engine manifests parse.
+        values = {
+            "--xflare", "--python", "--launcher", "--timeout", "--spark-conf",
+            "--reservation", "--xflare-toml", "--scale-factor", "--codec", "--engines",
+            "--results-dir", "--config", "--artifact", "--bundle", "--request",
+            "--executors", "--executor-cores", "--offheap", "--shuffle-partitions",
+            "--repeat", "--submission", "--xflare-backend",
+        }
+        flags = {"--download-logs", "--record-answers", "--application-per-engine", "--list", "-h", "--help"}
+        self.assertEqual(repro._VALUE_OPTIONS, values)
+        self.assertEqual(repro._FLAGS, flags)
+        self.assertEqual(repro._QUERY_IDS, {str(q) for q in range(1, 23)})
+        for option in sorted(values):
+            with self.subTest(option=option):
+                self.assertEqual(list(repro._options([option, "--spark-conf", "22"])),
+                                 [(option, "--spark-conf"), ("22", None)])
+                with self.assertRaises(ValueError):
+                    list(repro._options([option]))
+        for flag in sorted(flags):
+            with self.subTest(flag=flag):
+                self.assertEqual(list(repro._options([flag, "22"])), [(flag, None), ("22", None)])
 
     def manifest(self, argv):
         manifest = mf.build_manifest()
@@ -590,7 +616,7 @@ class ReproArguments(unittest.TestCase):
 
     def test_real_option_arities_and_interleaved_query_ids(self):
         # This table is independent of repro's implementation: it mirrors the real shell parser.
-        argv = ["1", "--download-logs", "--record-answers", "--list", "2"]
+        argv = ["1", "--download-logs", "--record-answers", "--application-per-engine", "--list", "2"]
         for option, value in (("--xflare", "key=--reservation"), ("--python", "--reservation"),
                               ("--launcher", "--artifact"), ("--timeout", "10"),
                               ("--spark-conf", "key=--bundle"), ("--xflare-toml", "--bundle"),
@@ -599,7 +625,8 @@ class ReproArguments(unittest.TestCase):
                               ("--config", "--reservation"), ("--request", "request-1"),
                               ("--executors", "4"), ("--executor-cores", "6"),
                               ("--offheap", "64g"), ("--shuffle-partitions", "24"),
-                              ("--repeat", "2"), ("--submission", "--bundle")):
+                              ("--repeat", "2"), ("--submission", "--bundle"),
+                              ("--xflare-backend", "on")):
             argv += [option, value]
         argv += ["22", "--reservation", "4242", "6"]
         for prefix in ([], ["scripts/spark-tpch.sh"], ["/checkout/scripts/spark-tpch.sh"]):
@@ -1223,7 +1250,192 @@ class ApplicationMode(unittest.TestCase):
             self.assertFalse(after["derived"]["total_eligible"])
             self.assertEqual(after["content_id"], agg.content_id(m))
             with sqlite3.connect(store.db_path) as conn:
-                self.assertEqual(conn.execute("SELECT derive_version,total_eligible FROM runs").fetchone(), (6, 0))
+                self.assertEqual(conn.execute("SELECT derive_version,total_eligible FROM runs").fetchone(),
+                                 (agg.DERIVE_VERSION, 0))
+
+
+class SparkConf(unittest.TestCase):
+    def test_factory_maps_are_optional_and_copied(self):
+        legacy = mf.build_manifest()
+        self.assertNotIn("spark_conf", legacy["run"])
+        self.assertNotIn("spark_conf_readback", legacy["run"])
+        settings = {"spark.sql.adaptive.enabled": "false"}
+        m = mf.build_manifest(spark_conf=settings, spark_conf_readback=settings)
+        self.assertEqual(m["run"]["spark_conf"], settings)
+        self.assertEqual(m["run"]["spark_conf_readback"], settings)
+        self.assertIn("spark.sql.adaptive.enabled=false", m["run"]["argv"])
+        settings["extra"] = "later"
+        self.assertNotIn("extra", m["run"]["spark_conf"])
+        self.assertNotIn("extra", m["run"]["spark_conf_readback"])
+
+    def test_validate_both_optional_string_maps_without_new_length_limits(self):
+        for settings in ({}, {"spark.sql.adaptive.enabled": "false"},
+                         {"x" * 10000: "y" * 100000, "spark.password": "plain"}):
+            m = mf.build_manifest(spark_conf=settings, spark_conf_readback=settings)
+            self.assertEqual(schema.validate_manifest(m), ([], []))
+            self.assertEqual(schema.validate_envelope(mf.build_envelope(m)), ([], []))
+        self.assertEqual(schema.validate_manifest(mf.build_manifest()), ([], []))
+
+    def test_reject_malformed_maps_and_bound_messages(self):
+        for field in ("spark_conf", "spark_conf_readback"):
+            for value in (None, [], "x", 1, False, {"key": None}, {"key": 3}, {"key": True},
+                          {"key": []}, {"key": {}}):
+                with self.subTest(field=field, value=value):
+                    m = mf.build_manifest()
+                    m["run"][field] = value
+                    errors, warnings = schema.validate_manifest(m)
+                    self.assertTrue(errors, (field, value))
+                    self.assertTrue(errors[0].startswith("$.run." + field), errors)
+                    self.assertEqual(warnings, [])
+            m = mf.build_manifest()
+            m["run"][field] = {("x" * 10000) + str(i): 0 for i in range(100)}
+            errors, _ = schema.validate_manifest(m)
+            self.assertEqual(len(errors), schema.MAX_MESSAGES + 1)
+            self.assertLess(max(map(len, errors)), 160)
+
+    def test_documented_maps_are_optional_string_objects(self):
+        spec = json.loads((HERE / "schema/xflare-bench-manifest-1.schema.json").read_text())
+        run = spec["properties"]["run"]
+        for field in ("spark_conf", "spark_conf_readback"):
+            self.assertNotIn(field, run["required"])
+            self.assertEqual(run["properties"][field]["type"], "object")
+            self.assertEqual(run["properties"][field]["additionalProperties"], {"type": "string"})
+
+    def test_derived_state_source_badge_marker_and_eligibility(self):
+        baseline = agg.derive(mf.build_manifest(), None)
+        self.assertGreater(agg.DERIVE_VERSION, 6)
+        self.assertIn("spark_conf", agg.CONFIG_KEYS)
+        self.assertEqual(agg.DEFAULT_FILTER, {"executors": 4, "executor_cores": 6})
+        for settings, expected in (({}, "default"), ({"spark.sql.shuffle.partitions": "64"}, "custom")):
+            for mode in (None, "shared", "per-engine"):
+                with self.subTest(settings=settings, mode=mode):
+                    m = mf.build_manifest(spark_conf=settings, spark_conf_readback={}, application_mode=mode)
+                    d = agg.derive(m, None)
+                    self.assertEqual(d["config"]["spark_conf"], expected)
+                    self.assertEqual(d["spark_conf_source"], "field")
+                    self.assertEqual("spark conf" in d["badges"], expected == "custom")
+                    self.assertEqual(d["config_label"].endswith(" +conf"), expected == "custom")
+                    self.assertTrue(agg.matches_filter(d, {"spark_conf": expected}))
+                    self.assertFalse(agg.matches_filter(d, {"spark_conf": "custom" if expected == "default" else "default"}))
+                    for key in ("total_eligible", "eligible_queries", "per_query", "totals", "ineligible_reasons"):
+                        self.assertEqual(d[key], baseline[key], key)
+        self.assertEqual(baseline["config"]["spark_conf"], "default")
+        self.assertEqual(baseline["spark_conf_source"], "argv")
+
+    def test_field_takes_precedence_and_readback_does_not_set_state(self):
+        m = mf.build_manifest(spark_conf={}, spark_conf_readback={"key": "value"})
+        m["run"]["argv"] += ["--spark-conf", "key=value"]
+        self.assertEqual(agg.derive(m, None)["config"]["spark_conf"], "default")
+        m["run"].pop("spark_conf")
+        m["run"]["argv"] = []
+        self.assertEqual(agg.derive(m, None)["config"]["spark_conf"], "default")
+        m["run"]["spark_conf"] = {"key": "value"}
+        self.assertEqual(agg.derive(m, None)["config"]["spark_conf"], "custom")
+
+    def test_legacy_argv_uses_option_boundaries(self):
+        cases = [([], "default"), (["--spark-conf", "k=v"], "custom"),
+                 (["1", "--spark-conf", "k=v", "2"], "custom"),
+                 (["scripts/spark-tpch.sh", "--spark-conf", "k=v"], "custom"),
+                 (["--application-per-engine", "--spark-conf", "k=v"], "custom"),
+                 (["--xflare-backend", "on", "--spark-conf", "k=v"], "custom"),
+                 (["--spark-conf", "k=v", "--xflare-backend", "on"], "custom"),
+                 (["--xflare-backend", "--spark-conf", "1"], "default"),
+                 (["--xflare-backend", "--spark-conf", "--spark-conf", "k=v"], "custom"),
+                 (["--config", "--spark-conf", "1"], "default"),
+                 (["--bundle", "--spark-conf", "--repeat", "3"], "default"),
+                 (["--config", "--spark-conf", "--spark-conf", "k=v"], "custom"),
+                 (["--config", "some --spark-conf k=v"], "default"),
+                 (["--spark-conf", "k=v", "--unknown"], "custom"),
+                 (["--spark-conf"], "default"), (["--unknown", "--spark-conf", "k=v"], "default")]
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                m = mf.build_manifest()
+                m["run"]["argv"] = argv
+                d = agg.derive(m, None)
+                self.assertEqual(d["config"]["spark_conf"], expected)
+                self.assertEqual(d["spark_conf_source"], "argv")
+                self.assertEqual("spark conf" in d["badges"], expected == "custom")
+                self.assertEqual("+conf" in d["config_label"], expected == "custom")
+
+    def test_legacy_spark_conf_before_and_after_every_producer_option(self):
+        for option in sorted(repro._VALUE_OPTIONS - {"--spark-conf"}):
+            cases = [([option, "on", "--spark-conf", "k=v"], "custom"),
+                     (["--spark-conf", "k=v", option, "on"], "custom"),
+                     ([option, "--spark-conf", "1"], "default"),
+                     ([option, "--spark-conf", "--spark-conf", "k=v"], "custom"),
+                     (["--spark-conf", "k=v", option, "--spark-conf"], "custom")]
+            for argv, expected in cases:
+                with self.subTest(argv=argv):
+                    m = mf.build_manifest()
+                    m["run"]["argv"] = argv
+                    d = agg.derive(m, None)
+                    self.assertEqual(d["config"]["spark_conf"], expected)
+                    self.assertEqual("spark conf" in d["badges"], expected == "custom")
+                    self.assertEqual("+conf" in d["config_label"], expected == "custom")
+                    self.assertEqual(agg.matches_filter(d, {"spark_conf": "default"}), expected == "default")
+        for flag in sorted(repro._FLAGS):
+            with self.subTest(flag=flag):
+                self.assertTrue(repro.has_option([flag, "--spark-conf", "k=v"], "--spark-conf"))
+
+    def test_legacy_malformed_field_is_unknown_and_does_not_gate(self):
+        for value in (None, [], "x", 1, False, {"key": 1}, {"key": None}, {"key": []}):
+            with self.subTest(value=value):
+                m = mf.build_manifest()
+                m["run"]["spark_conf"] = value
+                m["run"]["argv"] += ["--spark-conf", "key=value"]
+                d = agg.derive(m, None)
+                self.assertEqual(d["config"]["spark_conf"], "unknown")
+                self.assertEqual(d["spark_conf_source"], "field")
+                self.assertNotIn("spark conf", d["badges"])
+                self.assertNotIn("+conf", d["config_label"])
+                self.assertTrue(d["total_eligible"])
+                for state in ("default", "custom"):
+                    self.assertFalse(agg.matches_filter(d, {"spark_conf": state}))
+
+    def test_custom_and_default_share_rank_and_hero(self):
+        default = row(mf.build_envelope(mf.build_manifest(run_id=mf.fixture_uuid(80), spark_conf={})))
+        custom = row(mf.build_envelope(mf.build_manifest(run_id=mf.fixture_uuid(81),
+                     spark_conf={"k": "v"}, elapsed=const_elapsed(1))))
+        rows = [default, custom]
+        self.assertEqual(agg.rank(rows, "total"), [custom, default])
+        self.assertIs(agg.hero(rows, agg.DEFAULT_FILTER), custom)
+        self.assertIs(agg.hero(rows, {"spark_conf": "default"}), default)
+        self.assertIs(agg.hero(rows, {"spark_conf": "custom"}), custom)
+
+    def test_a4_row_with_malformed_settings_rederives_and_reads_over_http(self):
+        import sqlite3
+        import app
+        for value in (None, [], "x", {"key": False}):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {store_mod.DATA_DIR_ENV: tmp}):
+                m = mf.build_manifest()
+                m["run"]["spark_conf"] = value
+                # A4 accepted this unknown field. Store its exact immutable bytes and
+                # mark the derived cache as the version actually written by A4.
+                store = Store(tmp)
+                _, before = store.put(mf.build_envelope(m))
+                old = copy.deepcopy(before["derived"])
+                old["config"].pop("spark_conf")
+                old.pop("spark_conf_source")
+                old["derive_version"] = 6
+                with sqlite3.connect(store.db_path) as conn:
+                    conn.execute("UPDATE runs SET derived_json=?, derive_version=6", (json.dumps(old),))
+                client = app.create_app(app.load_config(HERE.parent / "config.yaml")).test_client()
+                with mock.patch.object(agg, "derive", wraps=agg.derive) as derive:
+                    response = client.get("/api/leaderboard/runs/" + m["run_id"])
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    self.assertEqual(response.get_json()["config"]["spark_conf"], "unknown")
+                    self.assertEqual(client.get("/api/leaderboard/runs/" + m["run_id"]).status_code, 200)
+                    self.assertEqual(derive.call_count, 1)
+                after = store.get(m["run_id"])
+                self.assertEqual(after["content_id"], before["content_id"])
+                self.assertEqual(after["receipt"], before["receipt"])
+                self.assertEqual(after["derived"]["totals"], before["derived"]["totals"])
+                self.assertTrue(after["derived"]["total_eligible"])
+                self.assertFalse(agg.matches_filter(after["derived"], {"spark_conf": "default"}))
+                self.assertEqual(store.read_raw(m["run_id"]), agg.canonical_manifest_bytes(m))
+                with sqlite3.connect(store.db_path) as conn:
+                    self.assertEqual(conn.execute("SELECT derive_version FROM runs").fetchone()[0], agg.DERIVE_VERSION)
 
 
 class StoreTests(unittest.TestCase):

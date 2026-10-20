@@ -17,12 +17,12 @@ from fractions import Fraction
 from . import repro
 from .schema import _snip, application_mode_state
 
-DERIVE_VERSION = 6  # A4: application mode, per-application eligibility and reproduce flag
+DERIVE_VERSION = 7  # A5: structured Spark settings and legacy argv fallback
 QUERY_IDS = range(1, 23)
 METRICS = ("total",) + tuple(f"q{q}" for q in QUERY_IDS)
 DEFAULT_FILTER = {"executors": 4, "executor_cores": 6}
 CONFIG_KEYS = ("executors", "executor_cores", "offheap", "shuffle_partitions", "devices", "toml", "bundle",
-               "application_mode")
+               "application_mode", "spark_conf")
 OUT_OF_RANGE = "value beyond numeric range"
 
 
@@ -178,6 +178,16 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
     repeats = sorted(manifest["repeats"], key=lambda r: r["index"])
     completed = [r for r in repeats if r["status"] == "completed"]
     application_mode, application_problems = application_mode_state(manifest)
+    if "spark_conf" in run:
+        settings = run["spark_conf"]
+        spark_conf_source = "field"
+        # Pre-A5 validators accepted this as an uninterpreted field. Never let
+        # malformed historical settings break lazy re-derivation or gate ranking.
+        spark_conf = ("custom" if settings else "default") if (
+            isinstance(settings, dict) and all(isinstance(v, str) for v in settings.values())) else "unknown"
+    else:
+        spark_conf_source = "argv"
+        spark_conf = "custom" if repro.has_option(run["argv"], "--spark-conf") else "default"
     common, q_reasons = _query_eligibility(manifest, completed, application_mode, application_problems)
 
     per_query = {}
@@ -216,7 +226,7 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
     config = {"executors": res["executors"], "executor_cores": res["executor_cores"], "offheap": res["offheap"],
               "shuffle_partitions": res["shuffle_partitions"], "devices": res["devices"],
               "toml": run["xflare_toml"]["name"], "bundle": bundle["resolved"],
-              "application_mode": application_mode}
+              "application_mode": application_mode, "spark_conf": spark_conf}
 
     env = (envelope or {}).get("environment") or {}
     badges = [f"x{len(completed)}"]
@@ -235,6 +245,8 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
                       if x["evidence"]["status"] is not None})
     if offload:
         badges.append("offload:" + (offload[0] if len(offload) == 1 else "mixed"))
+    if spark_conf == "custom":
+        badges.append("spark conf")
 
     reasons = {f"q{q}": q_reasons[q] for q in QUERY_IDS if q_reasons[q]}
     if common:
@@ -255,9 +267,11 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
         "per_query": per_query,
         "totals": totals,
         "config": config,
+        "spark_conf_source": spark_conf_source,
         "config_label": (f"{config['executors']}×{config['executor_cores']} · {_dash(config['offheap'])}"
                          f" · sp={_dash(config['shuffle_partitions'])} · dev={_dash(config['devices'])}"
-                         f" · {config['toml']} · {_dash(config['bundle'])} · {config['application_mode']}"),
+                         f" · {config['toml']} · {_dash(config['bundle'])} · {config['application_mode']}"
+                         + (" +conf" if spark_conf == "custom" else "")),
         "build": {"revision": manifest["build"]["revision"], "artifact_id": manifest["build"]["artifact_id"],
                   "bundle_kind": bundle["kind"], "provenance_source": manifest["build"]["provenance_source"],
                   "client_revision": manifest["client"]["revision"]},

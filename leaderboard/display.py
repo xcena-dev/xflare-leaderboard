@@ -25,6 +25,9 @@ FACET_VALUES = 200
 MATRIX_REPEATS = 10
 BUDGET = {"scalar_chars": SCALAR_CHARS, "preview_chars": PREVIEW_CHARS, "preview_items": PREVIEW_ITEMS,
           "facet_values": FACET_VALUES}
+# Facet options whose bare value would not say what choosing it does (README §4, A5).
+FACET_LABELS = {"spark_conf": {"default": "default Spark settings only", "custom": "custom (--spark-conf)",
+                               "unknown": "unknown (spark_conf unreadable)"}}
 
 
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -77,10 +80,10 @@ def facet_token(value: str) -> str:
     return "h:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
-def facet_option(value: str) -> dict:
-    """A selectable facet value: the token selects it, the label (cut for
-    display) names it."""
-    return {"token": facet_token(value), "label": cut(value)}
+def facet_option(value: str, key: str | None = None) -> dict:
+    """A selectable facet value of filter ``key``: the token selects it, the
+    label (FACET_LABELS, else the value cut for display) names it."""
+    return {"token": facet_token(value), "label": FACET_LABELS.get(key, {}).get(value) or cut(value)}
 
 
 def fallback_notice(flt: dict, default: dict) -> str:

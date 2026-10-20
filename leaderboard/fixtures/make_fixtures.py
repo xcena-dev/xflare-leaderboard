@@ -46,7 +46,8 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
                    bundle: str = "xflare-admin-2026.10.1", artifact_id: str = "xflare-build-0001",
                    record_answers: bool = False, elapsed=default_elapsed, queries=QUERIES,
                    engines=("velox", "xflare"), started_at: datetime = T0, seed: str = "",
-                   application_mode: str | None = None) -> dict:
+                   application_mode: str | None = None, spark_conf: dict | None = None,
+                   spark_conf_readback: dict | None = None) -> dict:
     """`elapsed(q, r, engine) -> int` sets every timing; `seed` varies the hashes/revisions between runs."""
     seed = seed or run_id
     toml_in = f"[resource]\nexecutors = {executors}\ncores = {executor_cores}\n"
@@ -91,6 +92,8 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
         argv.append("--record-answers")
     if application_mode == "per-engine":
         argv.append("--application-per-engine")
+    for key, value in (spark_conf or {}).items():
+        argv += ["--spark-conf", f"{key}={value}"]
     argv += [str(q) for q in queries]
     manifest = {
         "schema": "xflare-bench-manifest/1",
@@ -133,6 +136,9 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
     }
     if application_mode is not None:
         manifest["run"]["application_mode"] = application_mode
+    for key, value in (("spark_conf", spark_conf), ("spark_conf_readback", spark_conf_readback)):
+        if value is not None:
+            manifest["run"][key] = copy.deepcopy(value)
     return manifest
 
 
