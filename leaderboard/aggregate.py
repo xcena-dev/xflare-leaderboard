@@ -25,6 +25,7 @@ CONFIG_KEYS = ("executors", "executor_cores", "offheap", "shuffle_partitions", "
                "application_mode", "spark_conf")
 OUT_OF_RANGE = "value beyond numeric range"
 SHARED_REASON = "shared application: engine order affects timings"
+ROLLUP_PREFIX = "queries not eligible: "
 SHARED_BADGE = "shared application"
 
 
@@ -215,7 +216,7 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
 
     total_reasons = []
     if len(eligible) != len(QUERY_IDS):
-        total_reasons.append("queries not eligible: " + ", ".join(str(q) for q in QUERY_IDS if q not in eligible))
+        total_reasons.append(ROLLUP_PREFIX + ", ".join(str(q) for q in QUERY_IDS if q not in eligible))
     total_reasons += [f"repeat {_snip(r['index'])} {r['status']}" for r in repeats if r["status"] != "completed"]
     if run["exit_status"] != "ok":
         total_reasons.append(f"exit_status {run['exit_status']}")

@@ -52,10 +52,11 @@
     </div>
     {% endif %}
     {% if not d.total_eligible %}
-    {# A common cause (A6 shared application, recording mode, ...) is why nothing counts: point at it instead of the
-       per-query roll-up it implies. #}
-    {% set reasons = [] if d.ineligible_reasons.common else (d.ineligible_reasons.total or []) %}
-    <p class="lb-note">Total 순위 대상이 아닙니다{% if d.ineligible_reasons.common %} — 공통 원인(common reasons) 때문입니다{% elif reasons %}:{% endif %}</p>
+    {# A common cause (A6 shared application, recording mode, ...) is why no query counts: point at it instead of the
+       per-query roll-up it implies, and keep the Total-specific causes. #}
+    {% set reasons = d.ineligible_reasons.total or [] %}
+    {% if d.ineligible_reasons.common %}{% set reasons = reasons | reject('lb_rollup') | list %}{% endif %}
+    <p class="lb-note">Total 순위 대상이 아닙니다{% if d.ineligible_reasons.common %} — 공통 원인(common reasons) 때문입니다{% endif %}{% if reasons %}:{% endif %}</p>
     <ul class="lb-reasons">
       {% for r in reasons[:limit] %}<li>{{ v(r) }}</li>{% endfor %}
       {{ more(reasons, limit, 'li') }}
@@ -82,7 +83,7 @@
     <h3>Per-query medians</h3>
     <div class="chart-tools">
       <label><input type="checkbox" id="run-log"> log scale</label>
-      <span class="chart-note">{% if shared_reason %}shared application run: 막대는 순위에 쓰이지 않는 측정값입니다{% else %}eligible 이 아닌 쿼리는 막대가 없습니다{% endif %}</span>
+      <span class="chart-note">{% if shared_reason %}shared application run: 막대는 순위에 쓰이지 않는 측정값입니다; 유효한 측정이 없는 쿼리는 막대가 없습니다{% else %}eligible 이 아닌 쿼리는 막대가 없습니다{% endif %}</span>
     </div>
     <div class="lb-chart"><canvas id="run-chart"></canvas></div>
     {#- Causes shared by every query are listed once here, not on each row. -#}

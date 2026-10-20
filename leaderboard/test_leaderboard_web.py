@@ -1772,6 +1772,20 @@ class TestSharedUnranked(WebCase):
 
     MODES = (None, "shared")                      # absent means shared (A4)
 
+    def test_total_box_keeps_total_causes_beside_a_common_cause(self):
+        """With a common cause the Total box drops only the per-query roll-up, not the Total-specific causes."""
+        m = build_manifest(run_id=rid(), record_answers=True)
+        m["run"]["exit_status"] = "failed"
+        m["repeats"][2]["status"] = "aborted"
+        self.post(build_envelope(m))
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        box = page[page.index("Total 순위 대상이 아닙니다"):]
+        box = box[:box.index("</ul>")]
+        self.assertIn("공통 원인(common reasons) 때문입니다", box)
+        self.assertIn("exit_status failed", box)
+        self.assertIn("repeat 3 aborted", box)
+        self.assertNotIn("queries not eligible", box)
+
     def shared(self, mode=None, **kw):
         kw.setdefault("run_id", rid())
         m = build_manifest(application_mode=mode, **kw)

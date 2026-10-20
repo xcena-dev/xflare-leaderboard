@@ -69,6 +69,12 @@ def _cfg() -> dict:
     return current_app.extensions["leaderboard_cfg"]
 
 
+@bp.app_template_test("lb_rollup")
+def _is_rollup(reason) -> bool:
+    """The Total reason that only restates per-query ineligibility (aggregate's "queries not eligible: …")."""
+    return isinstance(reason, str) and reason.startswith(aggregate.ROLLUP_PREFIX)
+
+
 @bp.app_template_filter("lb_ms")
 def _fmt_ms(x) -> str:
     f = as_float(x)
