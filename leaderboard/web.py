@@ -174,6 +174,15 @@ def _receipt(row: dict) -> dict:
 
 # --- write API ------------------------------------------------------------------
 
+def _identical_stored(manifest, cfg: dict) -> dict | None:
+    """The stored row whose run_id and content_id this manifest matches, if any."""
+    run_id = manifest.get("run_id") if isinstance(manifest, dict) else None
+    if not isinstance(run_id, str) or not UUID4_RE.fullmatch(run_id):
+        return None
+    row = store_for(cfg).get(run_id)
+    return row if row is not None and row["content_id"] == aggregate.content_id(manifest) else None
+
+
 @bp.post("/api/leaderboard/submissions")
 def api_submit():
     cfg = _cfg()
@@ -186,6 +195,11 @@ def api_submit():
         manifest, envelope = doc.get("manifest"), doc
         errors, warnings = validate_envelope(doc)
     if errors:
+        # A run stored before a later amendment tightened validation keeps its §3 identity: an identical retry still
+        # gets the original receipt, and nothing is stored or updated.
+        stored = None if dry_run else _identical_stored(manifest, cfg)
+        if stored is not None:
+            return jsonify(_receipt(stored)), 200
         return _errors(400, *errors, warnings=warnings)
     if dry_run:
         # Nothing below may touch the store: a dry run must not even create
@@ -529,15 +543,17 @@ def run_page(run_id):
     )
 
 
-def _params(manifest: dict, meta: dict) -> dict:
-    """Flat key -> text view of what a run ran with, for the compare diff."""
+def _params(manifest: dict, meta: dict, mode: str) -> dict:
+    """Flat key -> text view of what a run ran with, for the compare diff. ``mode`` is the interpreted
+    application mode from the derived config (a stored value outside the enum shows as "-")."""
     run, build, client = manifest["run"], manifest["build"], manifest["client"]
     res, toml, env = run["resources"], run["xflare_toml"], meta.get("environment") or {}
     bundle, gluten = build.get("bundle") or {}, build.get("gluten") or {}
     devices = env.get("devices") or []
     p = {
         "scale_factor": run["scale_factor"], "codec": run["codec"],
-        "engines": ",".join(run["engines"]), "queries": ",".join(str(q) for q in run["queries"]),
+        "engines": ",".join(run["engines"]), "application_mode": mode,
+        "queries": ",".join(str(q) for q in run["queries"]),
         "repeat_requested": run["repeat_requested"], "record_answers": run["record_answers"],
         **{f"resources.{k}": res.get(k) for k in ("executors", "executor_cores", "offheap",
                                                    "shuffle_partitions", "devices")},
@@ -578,7 +594,8 @@ def compare_page():
         if row is None:
             abort(404)
         runs.append({"row": row, "d": row["derived"], "summary": _run_summary(row),
-                     "params": _params(store.load_manifest(run_id), row["meta"] or {})})
+                     "params": _params(store.load_manifest(run_id), row["meta"] or {},
+                                        row["derived"]["config"]["application_mode"])})
     base = runs[0]["d"]
 
     def delta(v, b):

@@ -32,6 +32,7 @@ import urllib.request
 import uuid
 from unittest import mock
 
+import markupsafe
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +43,7 @@ sys.path.insert(0, os.path.join(HERE, "fixtures"))
 from werkzeug.test import EnvironBuilder, run_wsgi_app                # noqa: E402
 
 import app as lb_app                                                  # noqa: E402
-from leaderboard import repro, store as lb_store                      # noqa: E402
+from leaderboard import aggregate, repro, store as lb_store           # noqa: E402
 from leaderboard.display import facet_token                           # noqa: E402
 from leaderboard.schema import MAX_BODY_BYTES                         # noqa: E402
 from make_fixtures import build_envelope, build_manifest              # noqa: E402
@@ -1529,6 +1530,221 @@ class TestReproAndBoardLabels(WebCase):
         out = run_page_js("board", data=self.page_data(),
                           fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
         self.assertIn("run page", out["texts"])
+
+
+class TestLegacyApplicationMode(WebCase):
+    """Version 5 accepted A4 fields as uninterpreted extensions; read migration re-checks the mode and per-engine
+    applications, and an identical retry keeps its original receipt."""
+
+    def assert_legacy_reads(self, manifest, old, good, reason, mode):
+        import sqlite3
+        store = lb_store.Store(self.data)
+        raw = aggregate.canonical_manifest_bytes(manifest)
+        cid = aggregate.content_id(manifest)
+        old["content_id"] = cid
+        old["derive_version"] = 5
+        old["config"].pop("application_mode")
+        receipt = {"ranked_total": True, "warnings": ["legacy extension"]}
+        store._write_raw(cid, raw)
+        # Construct the persisted row directly, without passing its historical extensions through A4 derive().
+        with mock.patch.object(aggregate, "DERIVE_VERSION", 5):
+            self.assertEqual(store._commit_row(build_envelope(manifest), cid, old, receipt), "created")
+        run_id = manifest["run_id"]
+        for path in ("/api/leaderboard/board", "/api/leaderboard/runs",
+                     f"/api/leaderboard/runs/{run_id}", f"{LB}/run/{run_id}"):
+            with sqlite3.connect(store.db_path) as conn:
+                conn.execute("UPDATE runs SET derive_version=5 WHERE run_id=?", (run_id,))
+            with mock.patch.object(aggregate, "derive", wraps=aggregate.derive) as derive:
+                response = self.c.get(path)
+                self.assertEqual(response.status_code, 200, (path, response.get_data(as_text=True)[:500]))
+                current = store.get(run_id)
+                self.assertEqual(derive.call_count, 1, path)
+            d = current["derived"]
+            self.assertFalse(d["total_eligible"])
+            self.assertEqual(d["eligible_queries"], [])
+            self.assertTrue(all(not q["eligible"] for q in d["per_query"].values()))
+            self.assertIn(reason, " ".join(d["ineligible_reasons"]["common"]))
+            self.assertEqual(d["config"]["application_mode"], mode)
+            self.assertEqual((current["content_id"], current["receipt"]), (cid, receipt))
+            self.assertEqual(store.read_raw(run_id), raw)
+            if path == f"{LB}/run/{run_id}":
+                self.assertIn(reason, response.get_data(as_text=True))
+        listed = self.c.get("/api/leaderboard/runs").get_json()
+        self.assertIn(run_id, [r["run_id"] for r in listed])
+        # §3: an identical retry keeps its original receipt although today's validator rejects the manifest
+        retry = self.c.post(SUBMIT, json=build_envelope(manifest))
+        self.assertEqual(retry.status_code, 200, retry.get_data(as_text=True)[:300])
+        self.assertEqual(retry.get_json(),
+                         {"run_id": run_id, "content_id": cid, "url": f"{LB}/run/{run_id}", **receipt})
+        changed = json.loads(json.dumps(manifest))
+        changed["run"]["codec"] = "zstd" if changed["run"]["codec"] != "zstd" else "snappy"
+        self.assertEqual(self.c.post(SUBMIT, json=build_envelope(changed)).status_code, 400)  # not identical: validated
+        detail = self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()
+        self.assertEqual(detail["manifest"], manifest)
+        self.assertIn(reason, json.dumps(detail))
+        for query in ("", "?metric=q1"):
+            board = self.board(query)
+            self.assertEqual([r["run_id"] for r in board["rows"]], [good])
+            self.assertEqual(board["hero"]["run_id"], good)
+        # the compare view shows the interpreted mode, never the stored raw value
+        page = self.c.get(f"{LB}/compare?runs={good},{run_id}").get_data(as_text=True)
+        row = re.search(r'<td><code>application_mode</code></td>(.*?)</tr>', page, re.S).group(1)
+        self.assertEqual(re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)[-1].strip(), html.escape(mode))
+
+    def test_non_enum_historical_modes_are_ineligible_and_display_a_dash(self):
+        good = self.submit(repeats=1)
+        for mode in ("per_engine", "", None, 1, True, [], {"x": 1}):
+            with self.subTest(mode=mode):
+                m = build_manifest(run_id=rid(), repeats=1)
+                old = aggregate.derive(m, None)
+                m["run"]["application_mode"] = mode
+                self.assert_legacy_reads(m, old, good, "application_mode not understood:", "-")
+
+    def test_missing_and_malformed_historical_applications_are_ineligible(self):
+        good = self.submit(repeats=1)
+        cases = [("missing", None)]
+        cases += [("applications", value) for value in (None, {}, {"engine": "velox"}, "apps", 1, True, [])]
+        cases += [("element", value) for value in (None, [], "app", 1, True, {}, {"engine": "velox"})]
+        fields = ("engine", "invocation", "app_id", "artifact_id", "bundle", "started_at", "finished_at", "cleanup")
+        cases += [("missing-field", key) for key in fields]
+        cases += [("bad-field", key) for key in fields]
+        for kind, value in cases:
+            with self.subTest(kind=kind, value=value):
+                m = build_manifest(run_id=rid(), repeats=1)
+                old = aggregate.derive(m, None)
+                m["run"]["application_mode"] = "per-engine"
+                if kind == "applications":
+                    m["repeats"][0]["applications"] = value
+                elif kind == "element":
+                    m["repeats"][0]["applications"] = [value]
+                elif kind in ("missing-field", "bad-field"):
+                    apps = build_manifest(application_mode="per-engine", repeats=1)["repeats"][0]["applications"]
+                    m["repeats"][0]["applications"] = apps
+                    if kind == "missing-field":
+                        del apps[0][value]
+                    else:
+                        apps[0][value] = {}
+                self.assert_legacy_reads(m, old, good, "applications missing or malformed in repeat 1", "per-engine")
+
+
+class TestApplicationMode(WebCase):
+    """A4: the application mode is a board column, a filter with its facet and a compare parameter, never a board
+    split; a per-engine run's page lists every repeat's applications, a shared run's page has no such list."""
+
+    def per_engine(self, **kw):
+        kw.setdefault("run_id", rid())
+        return build_manifest(application_mode="per-engine", **kw)
+
+    def test_mode_column_filter_and_facet(self):
+        shared = self.submit(elapsed=flat_elapsed(1000))
+        per_engine = self.per_engine(elapsed=flat_elapsed(2000))
+        self.post(build_envelope(per_engine))
+        b = self.board()
+        self.assertEqual([r["config"]["application_mode"] for r in b["rows"]], ["shared", "per-engine"])
+        self.assertEqual(b["facets"]["application_mode"],
+                         [{"token": facet_token(x), "label": x} for x in ("per-engine", "shared")])
+        for value, run_id in (("shared", shared), ("per-engine", per_engine["run_id"])):
+            for query in (f"?application_mode={value}", f"?application_mode_t={facet_token(value)}"):
+                self.assertEqual([r["run_id"] for r in self.board(query)["rows"]], [run_id], query)
+                self.assertEqual([r["run_id"] for r in self.c.get("/api/leaderboard/runs" + query).get_json()],
+                                 [run_id], query)
+        page = self.c.get(LB).get_data(as_text=True)
+        self.assertIn('data-key="application_mode"', page)
+        self.assertIn("<th>Mode</th>", page)
+        fetch = self.c.get("/api/leaderboard/board").get_data(as_text=True)
+        out = run_page_js("board", data=self.page_data(), fetch=fetch, slots=["application_mode"])
+        # one Mode cell per row, plus one filter option per mode
+        self.assertEqual((out["texts"].count("shared"), out["texts"].count("per-engine")), (2, 2))
+        self.assertIn(facet_token("per-engine"), out["values"])
+
+    def test_mixed_modes_rank_on_one_board(self):
+        """Both modes rank together by the usual order; the hero is the fastest of either mode."""
+        slow = self.submit(elapsed=flat_elapsed(3000))
+        fast = self.per_engine(elapsed=flat_elapsed(1000))
+        mid = self.per_engine(elapsed=flat_elapsed(2000))
+        for m in (fast, mid):
+            self.post(build_envelope(m))
+        quickest_shared = self.submit(elapsed=flat_elapsed(1500))
+        b = self.board()
+        self.assertEqual([(r["run_id"], r["config"]["application_mode"]) for r in b["rows"]],
+                         [(fast["run_id"], "per-engine"), (quickest_shared, "shared"),
+                          (mid["run_id"], "per-engine"), (slow, "shared")])
+        self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["eligible_count"]), (fast["run_id"], False, 4))
+        self.assertEqual(self.board("?metric=q5")["rows"][0]["run_id"], fast["run_id"])
+        only_shared = self.board("?application_mode=shared")
+        self.assertEqual((only_shared["hero"]["run_id"], [r["run_id"] for r in only_shared["rows"]]),
+                         (quickest_shared, [quickest_shared, slow]))
+
+    def test_per_engine_run_detail_lists_applications(self):
+        m = self.per_engine(repeats=2)
+        m["repeats"][0]["applications"][1]["invocation"] = "x" * 600         # the cut applies here too
+        self.post(build_envelope(m))
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        self.assertRegex(page, r"<dt>Application mode</dt><dd>per-engine — ")
+        self.assertIn("per-engine</h3>", page)                                # the config label in the header
+        table = re.search(r'<table class="cmp-table lb-table" id="applications">(.*?)</table>', page, re.S).group(1)
+        rows = re.findall(r"<tr>\s*<td>(\d+)</td><td>(\w+)</td><td>(\w+)</td><td>([^<]*)</td>", table)
+        self.assertEqual(rows, [(str(rep["index"]), a["engine"], a["cleanup"], a["app_id"])
+                                for rep in m["repeats"] for a in rep["applications"]])
+        self.assertEqual([r[1] for r in rows], ["velox", "xflare", "velox", "xflare"])
+        for rep in m["repeats"]:
+            for a in rep["applications"]:
+                for key in ("started_at", "finished_at", "artifact_id", "bundle"):
+                    self.assertIn(f"<td>{a[key]}</td>", table)
+        self.assertIn(m["repeats"][1]["applications"][1]["invocation"], table)
+        self.assertIn("x" * 512 + "…", table)
+        self.assertNotIn("x" * 513, page)
+
+    def test_aborted_per_engine_repeat_without_applications(self):
+        m = self.per_engine(repeats=2)
+        rep = m["repeats"][1]
+        rep.update(status="aborted", applications=[], finished_at=None, queries=[])
+        self.post(build_envelope(m))
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        table = re.search(r'id="applications">(.*?)</table>', page, re.S).group(1)
+        self.assertRegex(table, r'<tr><td>2</td><td class="lb-dim" colspan="8">no application</td></tr>')
+
+    def test_shared_run_detail_unchanged(self):
+        run_id = self.submit(repeats=2)
+        page = self.c.get(f"{LB}/run/{run_id}").get_data(as_text=True)
+        self.assertRegex(page, r"<dt>Application mode</dt><dd>shared — ")
+        self.assertNotIn('id="applications"', page)
+        self.assertNotIn("Applications, per repeat", page)
+        manifest = self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()["manifest"]
+        self.assertNotIn("application_mode", manifest["run"])                 # absent means shared
+        for rep in manifest["repeats"]:
+            self.assertIn(f"<td>{rep['app_id']}</td>", page)                  # the repeat table as before
+
+    def test_hostile_application_fields_stay_escaped(self):
+        m = self.per_engine()
+        for rep in m["repeats"]:
+            first, second = rep["applications"]
+            first["app_id"] = rep["app_id"] = HOSTILE[0]
+            second["app_id"], second["invocation"] = HOSTILE[1], HOSTILE[2]
+            for a in (first, second):
+                a["artifact_id"], a["bundle"] = HOSTILE[2], HOSTILE[0]
+            rep["artifact_id"], rep["bundle"] = HOSTILE[2], HOSTILE[0]
+        m["build"]["artifact_id"] = HOSTILE[2]
+        self.post(build_envelope(m))
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        table = re.search(r'id="applications">(.*?)</table>', page, re.S).group(1)
+        for s in HOSTILE:
+            self.assertNotIn(s, page)
+            self.assertIn(str(markupsafe.escape(s)), table)
+        other = self.submit()
+        cmp_page = self.c.get(f"{LB}/compare?runs={m['run_id']},{other}").get_data(as_text=True)
+        for s in HOSTILE:
+            self.assertNotIn(s, cmp_page)
+
+    def test_compare_shows_the_mode(self):
+        shared = self.submit()
+        m = self.per_engine()
+        self.post(build_envelope(m))
+        html = self.c.get(f"{LB}/compare?runs={shared},{m['run_id']}").get_data(as_text=True)
+        row = re.search(r'<tr class="(lb-differs|lb-same)">\s*<td><code>application_mode</code></td>(.*?)</tr>',
+                        html, re.S)
+        self.assertEqual(row.group(1), "lb-differs")
+        self.assertEqual(re.findall(r"<td[^>]*>([^<]*)</td>", row.group(2)), ["shared", "per-engine"])
 
 
 if __name__ == "__main__":

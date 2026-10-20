@@ -133,8 +133,9 @@ class _V:
                 getattr(self, kind).append(f"... {n} more {kind}")
         return self.errors, self.warnings
 
-    def obj(self, v, path, required, nullable=False) -> dict | None:
-        """Object with exactly the `required` keys (extra keys warn). Returns it only when it is a dict."""
+    def obj(self, v, path, required, nullable=False, optional=()) -> dict | None:
+        """Object with the `required` keys and optionally the `optional` ones (any other key warns).
+        Returns it only when it is a dict."""
         if v is None and nullable:
             return None
         if not isinstance(v, dict):
@@ -144,12 +145,12 @@ class _V:
             if k not in v:
                 self.err(f"{path}.{k}", "missing")
         for k in v:
-            if k not in required:
+            if k not in required and k not in optional:
                 self.warn(f"{path}.{_snip(k)}", "unknown property (kept, not interpreted)")
         return v
 
-    def sub(self, d, k, path, required, nullable=False) -> dict | None:
-        return self.obj(d[k], f"{path}.{k}", required, nullable) if k in d else None
+    def sub(self, d, k, path, required, nullable=False, optional=()) -> dict | None:
+        return self.obj(d[k], f"{path}.{k}", required, nullable, optional) if k in d else None
 
     def str_(self, d, k, path, nullable=False, pattern=None, enum=None, what=None):
         if k not in d:
@@ -250,9 +251,10 @@ def _manifest(v: _V, m, path):
     requested = set()
     r = v.sub(m, "run", path, ("argv", "scale_factor", "codec", "engines", "queries", "repeat_requested",
                                "record_answers", "answers", "resources", "xflare_toml", "xflare_overrides", "dataset",
-                               "started_at", "finished_at", "exit_status"))
+                               "started_at", "finished_at", "exit_status"), optional=("application_mode",))
     if r is not None:
         p = f"{path}.run"
+        v.str_(r, "application_mode", p, enum=("shared", "per-engine"))
         for i, s in enumerate(v.list_(r, "argv", p)):
             if not isinstance(s, str):
                 v.err(f"{p}.argv[{i}]", f"expected string, got {_type_name(s)}")
@@ -319,7 +321,7 @@ def _manifest(v: _V, m, path):
     for i, rep in enumerate(v.list_(m, "repeats", path)):
         pr = f"{path}.repeats[{i}]"
         rep = v.obj(rep, pr, ("index", "invocation", "app_id", "artifact_id", "bundle", "started_at", "finished_at",
-                              "status", "cleanup", "queries"))
+                              "status", "cleanup", "queries"), optional=("applications",))
         if rep is None:
             continue
         idx = v.int_(rep, "index", pr, minimum=1, maximum=n_req)
@@ -335,6 +337,10 @@ def _manifest(v: _V, m, path):
         v.time(rep, "finished_at", pr, nullable=True)
         v.str_(rep, "status", pr, enum=("completed", "failed", "aborted"))
         v.str_(rep, "cleanup", pr, enum=("ok", "failed", "unknown"))
+        if r is not None and r.get("application_mode", "shared") == "per-engine":
+            _applications(v, rep, pr, r)
+        elif r is not None and r.get("application_mode", "shared") == "shared" and "applications" in rep:
+            v.err(f"{pr}.applications", "must be absent in shared application mode")
         seen_q = set()
         for j, q in enumerate(v.list_(rep, "queries", pr)):
             pq = f"{pr}.queries[{j}]"
@@ -362,6 +368,76 @@ def _manifest(v: _V, m, path):
                 v.str_(ev, "status", f"{pq}.evidence", nullable=True)
                 if "detail" in ev and ev["detail"] is not None and not isinstance(ev["detail"], dict):
                     v.err(f"{pq}.evidence.detail", f"expected object or null, got {_type_name(ev['detail'])}")
+
+
+def _applications(v: _V, rep: dict, path: str, run: dict):
+    p = f"{path}.applications"
+    if "applications" not in rep:
+        v.err(p, "required in per-engine application mode")
+        return
+    applications = v.list_(rep, "applications", path)
+    if not applications:
+        if isinstance(rep["applications"], list) and rep.get("status") != "aborted":
+            v.err(p, "may be empty only for an aborted repeat")
+        return
+    before = len(v.errors) + v.dropped["errors"]
+    engines = run.get("engines")
+    positions = {e: i for i, e in enumerate(engines) if isinstance(e, str)} if isinstance(engines, list) else {}
+    seen, last = set(), -1
+    fields = ("engine", "invocation", "app_id", "artifact_id", "bundle", "started_at", "finished_at", "cleanup")
+    for i, application in enumerate(applications):
+        pa = f"{p}[{i}]"
+        app = v.obj(application, pa, fields)
+        if app is None:
+            continue
+        engine = v.str_(app, "engine", pa, enum=ENGINES)
+        if engine in ENGINES:
+            if engine not in positions:
+                v.err(f"{pa}.engine", f"{engine} not in run.engines")
+            elif engine in seen:
+                v.err(f"{pa}.engine", f"duplicate engine {engine} in one repeat")
+            else:
+                pos = positions[engine]
+                if pos < last:
+                    v.err(f"{pa}.engine", "applications must follow run.engines order")
+                last = pos
+                seen.add(engine)
+        v.str_(app, "invocation", pa)
+        for key in ("app_id", "artifact_id", "bundle"):
+            v.str_(app, key, pa, nullable=True)
+        v.time(app, "started_at", pa)
+        v.time(app, "finished_at", pa, nullable=True)
+        v.str_(app, "cleanup", pa, enum=("ok", "failed", "unknown"))
+    if len(v.errors) + v.dropped["errors"] != before:
+        return
+    expected = {key: applications[0][key] for key in ("invocation", "app_id", "started_at")}
+    expected["finished_at"] = applications[-1]["finished_at"]
+    cleanups = [app["cleanup"] for app in applications]
+    expected["cleanup"] = "ok" if all(c == "ok" for c in cleanups) else "failed" if "failed" in cleanups else "unknown"
+    for key in ("artifact_id", "bundle"):
+        values = [app[key] for app in applications]
+        expected[key] = values[0] if all(value == values[0] for value in values) else None
+    for key, value in expected.items():
+        if key in rep and rep[key] != value:
+            v.err(f"{path}.{key}", "must equal the value derived from applications")
+
+
+def application_mode_state(manifest: dict) -> tuple[str, list[str]]:
+    """Interpret A4 on read as well as on ingestion: older validators kept these fields unchecked.
+
+    Reuse the application rules before derivation indexes any application field. Never change the raw manifest.
+    """
+    run = manifest["run"]
+    mode = run.get("application_mode", "shared")
+    if mode not in ("shared", "per-engine"):
+        return "-", [f"application_mode not understood: {_snip(mode)}"]
+    if mode == "per-engine":
+        for rep in manifest["repeats"]:
+            v = _V()
+            _applications(v, rep, "$.repeats", run)
+            if v.errors:
+                return mode, [f"applications missing or malformed in repeat {_snip(rep['index'])}"]
+    return mode, []
 
 
 def _engine_result(v: _V, res, path):

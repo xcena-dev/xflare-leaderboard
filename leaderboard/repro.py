@@ -22,7 +22,7 @@ _VALUE_OPTIONS = frozenset({
     "--executors", "--executor-cores", "--offheap", "--shuffle-partitions",
     "--repeat", "--submission",
 })
-_FLAGS = frozenset({"--download-logs", "--record-answers", "--list", "-h", "--help"})
+_FLAGS = frozenset({"--download-logs", "--record-answers", "--application-per-engine", "--list", "-h", "--help"})
 _QUERY_IDS = frozenset(str(q) for q in range(1, 23))
 
 

@@ -45,7 +45,8 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
                    offheap: str = "64g", repeats: int = 3, bundle_kind: str = "admin",
                    bundle: str = "xflare-admin-2026.10.1", artifact_id: str = "xflare-build-0001",
                    record_answers: bool = False, elapsed=default_elapsed, queries=QUERIES,
-                   engines=("velox", "xflare"), started_at: datetime = T0, seed: str = "") -> dict:
+                   engines=("velox", "xflare"), started_at: datetime = T0, seed: str = "",
+                   application_mode: str | None = None) -> dict:
     """`elapsed(q, r, engine) -> int` sets every timing; `seed` varies the hashes/revisions between runs."""
     seed = seed or run_id
     toml_in = f"[resource]\nexecutors = {executors}\ncores = {executor_cores}\n"
@@ -66,6 +67,21 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
             "artifact_id": artifact_id, "bundle": bundle, "started_at": ts(t), "finished_at": ts(end),
             "status": "completed", "cleanup": "ok", "queries": qs,
         })
+        if application_mode == "per-engine":
+            applications = []
+            for pos, engine in enumerate(engines):
+                app_start = t + (end - t) * pos / len(engines)
+                app_end = t + (end - t) * (pos + 1) / len(engines)
+                applications.append({
+                    "engine": engine, "invocation": f"spark-submit --app tpch-{sf}-r{r}-{engine}",
+                    "app_id": f"app-{_hex(seed + str(r) + engine, 8)}", "artifact_id": artifact_id,
+                    "bundle": bundle, "started_at": ts(app_start), "finished_at": ts(app_end), "cleanup": "ok",
+                })
+            reps[-1]["applications"] = applications
+            if applications:
+                for key in ("invocation", "app_id", "started_at"):
+                    reps[-1][key] = applications[0][key]
+                reps[-1]["finished_at"] = applications[-1]["finished_at"]
         t = end + timedelta(minutes=1)
     argv = ["--reservation", "4242", "--xflare-toml", "scripts/config/Resource.mu.d1.toml.in",
             "--scale-factor", sf, "--engines", ",".join(engines), "--repeat", str(repeats),
@@ -73,8 +89,10 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
             "--offheap", offheap, "--submission", "out.json"]
     if record_answers:
         argv.append("--record-answers")
+    if application_mode == "per-engine":
+        argv.append("--application-per-engine")
     argv += [str(q) for q in queries]
-    return {
+    manifest = {
         "schema": "xflare-bench-manifest/1",
         "run_id": run_id,
         "created_at": ts(started_at),
@@ -113,6 +131,9 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
         },
         "repeats": reps,
     }
+    if application_mode is not None:
+        manifest["run"]["application_mode"] = application_mode
+    return manifest
 
 
 def build_envelope(manifest: dict, **overrides) -> dict:
@@ -167,6 +188,8 @@ def render_all() -> dict[str, bytes]:
     valid = build_envelope(build_manifest())
     out = {
         "valid-envelope.json": dump(valid),
+        "valid-per-engine-envelope.json": dump(build_envelope(build_manifest(
+            run_id=fixture_uuid(6), application_mode="per-engine"))),
         "valid-manifest.json": dump(build_manifest(run_id=fixture_uuid(5))),
         "velox-mismatch.json": dump(velox_mismatch_envelope()),
         "partial.json": dump(partial_envelope()),

@@ -6,6 +6,7 @@
 {%- set limit, chars = lb_budget.preview_items, lb_budget.preview_chars -%}
 {%- set run = m.run -%}
 {%- set env = meta.environment or {} -%}
+{%- set per_engine = d.config.application_mode == 'per-engine' -%}
 <!doctype html>
 <html lang="ko">
 <head>
@@ -61,6 +62,7 @@
       <dt>Run</dt><dd>{{ v(run.started_at) }} → {{ v(run.finished_at) }} · exit {{ v(run.exit_status) }}</dd>
       <dt>Repeats</dt><dd>{{ d.repeats_completed }} completed / {{ v(run.repeat_requested) }} requested · record_answers {{ run.record_answers }}</dd>
       <dt>Engines</dt><dd>{{ run.engines | join(', ') }} · codec {{ v(run.codec) }}</dd>
+      <dt>Application mode</dt><dd>{{ v(d.config.application_mode) }}{% if per_engine %} — a fresh Spark application per engine in every repeat{% elif d.config.application_mode == 'shared' %} — all engines in one Spark application per repeat{% endif %}</dd>
       <dt>Answers</dt><dd>{{ v((run.answers or {}).path) }} · sha256 {{ v((run.answers or {}).sha256) }}</dd>
       <dt>Dataset</dt><dd>{{ v((run.dataset or {}).uri) }} · marker {{ v((run.dataset or {}).marker) }}</dd>
     </dl>
@@ -128,6 +130,34 @@
       </table>
     </div>
     {{ more(repeats, limit) }}
+    {% if per_engine %}
+    <p class="lb-note">Applications, per repeat in run order. The repeat's App / Invocation are the first application's,
+      Started its first start, Finished its last finish; Cleanup, Artifact and Bundle summarise them.</p>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table" id="applications">
+        <thead><tr>
+          <th>#</th><th>Engine</th><th>Cleanup</th><th>App</th><th>Artifact</th><th>Bundle</th>
+          <th>Started</th><th>Finished</th><th>Invocation</th>
+        </tr></thead>
+        <tbody>
+        {% for r in repeats[:limit] %}
+          {% set apps = r.applications if r.applications is defined and r.applications is sequence and r.applications is not string and r.applications is not mapping else [] %}
+          {% for a in apps[:limit] if a is mapping %}
+          <tr>
+            <td>{{ v(r.index) }}</td><td>{{ v(a.engine) }}</td><td>{{ v(a.cleanup) }}</td><td>{{ v(a.app_id) }}</td>
+            <td>{{ v(a.artifact_id) }}</td><td>{{ v(a.bundle) }}</td><td>{{ v(a.started_at) }}</td>
+            <td>{{ v(a.finished_at) }}</td><td class="lb-wrap-cell"><code>{{ v(a.invocation) }}</code></td>
+          </tr>
+          {% else %}
+          <tr><td>{{ v(r.index) }}</td><td class="lb-dim" colspan="8">no application</td></tr>
+          {% endfor %}
+          {% if apps | length > limit %}<tr><td>{{ v(r.index) }}</td><td colspan="8">{{ more(apps, limit, 'span') }}</td></tr>{% endif %}
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {{ more(repeats, limit) }}
+    {% endif %}
     <div class="cmp-scroll">
       <table class="cmp-table lb-table lb-matrix">
         <thead><tr>

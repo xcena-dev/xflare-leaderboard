@@ -37,7 +37,7 @@ XFLARE_LEADERBOARD_DATA=/tmp/lb-data python3 app.py --host 127.0.0.1 --port 8894
 ## Payload contract
 
 This section restates data contract v1 (frozen 2026-10-19, shared with the producer `spark-tpch.sh --submission`
-and the submit skill) with amendments A1–A3; this README is the contract's home, and code comments cite it as
+and the submit skill) with amendments A1–A4; this README is the contract's home, and code comments cite it as
 README §1–§4. The schema files give each field's type; the meanings are stated here.
 
 ### §1 Manifest
@@ -57,6 +57,20 @@ Field meanings the types do not carry:
   engine/logging transformation, `rendered_text` / `rendered_sha256` what the run read (`null` when not recorded).
 - `run.xflare_overrides`: the requested parameters, in the order they take effect.
 - `repeats[].artifact_id` / `bundle`: as resolved for that repeat's own application.
+
+A4 (additive; a manifest without these fields is unchanged and means `shared`):
+- `run.application_mode`: `shared` (absent = shared): each repeat is one Spark application that runs the engines
+  one after another; `per-engine` (`spark-tpch.sh --application-per-engine`): each repeat starts a fresh
+  application per engine, in `run.engines` order, so no engine inherits the other's warmed JVM/executors.
+- `repeats[].applications[]`: only in `per-engine` mode, where it is required (empty only for an `aborted`
+  repeat); a `shared` manifest that has it is a 400. Each element is `{engine (velox|xflare), invocation, app_id,
+  artifact_id, bundle, started_at, finished_at, cleanup (ok|failed|unknown)}`; engines are a subset of
+  `run.engines`, in its order, without duplicates in one repeat.
+- In `per-engine` mode the repeat-level fields are derived from a non-empty `applications[]` and must agree with it
+  (else a 400): `invocation` / `app_id` are the first application's, `started_at` the first start, `finished_at`
+  the last finish (`null` when the last has none), `cleanup` is `ok` only if every application's is, else `failed`
+  if any failed, else `unknown`; `artifact_id` / `bundle` the common value when all applications agree, else
+  `null`. `status` keeps its meaning.
 
 ### §2 Envelope
 
@@ -94,8 +108,13 @@ Computed on the server, never taken from the client.
   the medians, but a wrong answer it recorded for `q` (an engine `status` other than ok/skipped, or a
   `verify.status` other than ok/null) still disqualifies `q` for that run, with a reason such as
   `xflare error in aborted repeat 3` on the run page. A failed/aborted repeat that never reached `q` adds nothing.
+- A4, in `per-engine` mode: every completed repeat must have an application for every engine in `run.engines`
+  (else no query counts: `applications missing <engine> in completed repeat N`), and `artifact_id` and `bundle`
+  must each be one value across all applications of all completed repeats (`null` counts as a value), on top of the
+  repeat-level check above (`artifact differs across applications of completed repeats`, likewise `bundle`).
 - Reasons (`derived.ineligible_reasons`): causes shared by every query (recording mode, incomplete repeat list, no
-  completed repeat, artifact or bundle differing across repeats) are listed once under `common`; `qN` lists only
+  completed repeat, artifact or bundle differing across repeats, and the A4 application checks) are listed once under
+  `common`; `qN` lists only
   what is specific to that query, and `total` the Total-specific causes. A reason never embeds an unbounded value
   (a huge repeat index is shortened). The dry-run response lists at most 50 reasons per key, then `... N more`; the
   stored run keeps them all.
@@ -120,6 +139,9 @@ Computed on the server, never taken from the client.
   `dev bundle`, `booking overlap` / `overlap unknown`, `partial`,
   `offload:<status>` (the evidence status of the completed repeats, whole; `offload:mixed` when they disagree).
   Bundle and resources are columns and filters, never separate boards.
+- A4: `shared` and `per-engine` runs rank together on the same boards under the same order and hero rules; the
+  application mode is part of the config label, a board column (Mode) and a filter, never a board split, and the
+  default filter does not narrow it.
 
 Interpretations the contract leaves open (decided here, not contract changes):
 - The ok / elapsed / verify checks of `Q(run, q)` use the repeats with `status=completed`; failed and aborted repeats
@@ -129,6 +151,11 @@ Interpretations the contract leaves open (decided here, not contract changes):
   resolved one); `null` counts as a value.
 - `finished_at` ordering compares parsed UTC instants exact to the nanosecond (all 9 accepted fraction digits),
   not strings.
+- A4 on runs stored before it: a mode outside the enum shows as `-` (`application_mode not understood: …`), and a
+  per-engine run whose applications break the A4 rules gets `applications missing or malformed in repeat N`; both
+  stay listed but never rank. A shared run's stray `applications` stay uninterpreted, so it ranks as before. An
+  identical re-upload of such a run still gets 200 with its original receipt (§3), although today's validator would
+  reject the manifest as a new submission; nothing is stored or updated by it.
 
 ## API
 
@@ -145,11 +172,11 @@ reads no storage and still loads.
 | `GET /api/leaderboard/runs` | `sf=100\|1000`, `include_withdrawn=1`, and the board's filters with NO default (absent = any) | 200 `[run summary]`, oldest `finished_at` instant first (then `run_id`); 400 bad sf |
 | `GET /api/leaderboard/runs/<run_id>` | | 200 run summary + `derived`, `meta`, `manifest`; 404 `unknown run_id` |
 | `GET /api/leaderboard/runs/<run_id>/raw` | | 200 the whole stored manifest file (no size cap), `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`; 404 `raw manifest not found` (no row, file missing, symlink or not a regular file); 503 when the file cannot be read |
-| `GET /api/leaderboard/board` | `sf` (default first tab), `metric=total\|q1..q22`, `top=5\|10\|25` (default 10), filters `executors`, `executor_cores`, `offheap`, `shuffle_partitions`, `devices`, `toml`, `bundle`, `device`, `submitter`, `badge` (each also as `<key>_t` = facet token), `from`, `to` (YYYY-MM-DD) | 200 `{sf, tabs, metric, top, filter, filter_tokens, default_filter, facets, facets_truncated, hero, hero_fallback, hero_notice, eligible_count, rows}`; `hero_fallback` is true when `hero` is the tab's fallback run (rows stay filtered, possibly empty) and `hero_notice` is then the line the page shows above it, else null; `hero` adds `per_query` (22 entries from that one run); each row is a run summary plus `rank`, `value {xflare_ms, velox_ms, speedup}` and `repro` (the reproduce script, or null when none is offered); 400 bad sf or metric |
+| `GET /api/leaderboard/board` | `sf` (default first tab), `metric=total\|q1..q22`, `top=5\|10\|25` (default 10), filters `executors`, `executor_cores`, `offheap`, `shuffle_partitions`, `devices`, `toml`, `bundle`, `application_mode` (`shared\|per-engine`), `device`, `submitter`, `badge` (each also as `<key>_t` = facet token), `from`, `to` (YYYY-MM-DD) | 200 `{sf, tabs, metric, top, filter, filter_tokens, default_filter, facets, facets_truncated, hero, hero_fallback, hero_notice, eligible_count, rows}`; `hero_fallback` is true when `hero` is the tab's fallback run (rows stay filtered, possibly empty) and `hero_notice` is then the line the page shows above it, else null; `hero` adds `per_query` (22 entries from that one run); each row is a run summary plus `rank`, `value {xflare_ms, velox_ms, speedup}` and `repro` (the reproduce script, or null when none is offered); 400 bad sf or metric |
 | `GET /` | | 302 to `/b/xflare_leaderboard` |
 | `GET /b/xflare_leaderboard` | | page: tabs, hero chart, board |
-| `GET /b/xflare_leaderboard/run/<run_id>` | | page: argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table, raw download, how to reproduce, withdraw |
-| `GET /b/xflare_leaderboard/compare?runs=a,b[,c,d]` | 2–4 distinct run ids | page: per-query deltas vs the first run, parameter diff; 400 / 404 |
+| `GET /b/xflare_leaderboard/run/<run_id>` | | page: argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table (plus, for a `per-engine` run, each repeat's applications: engine, cleanup, app_id, artifact, bundle, started/finished, invocation), application mode, raw download, how to reproduce, withdraw |
+| `GET /b/xflare_leaderboard/compare?runs=a,b[,c,d]` | 2–4 distinct run ids | page: per-query deltas vs the first run, parameter diff (including `application_mode`); 400 / 404 |
 
 A run summary is `{run_id, content_id, url, sf, finished_at, submitter, total_eligible, repeats, totals, config,
 config_label, build, device_ids, device_count, host, badges, withdrawn, withdrawal}`. It is a display view: every
@@ -171,8 +198,8 @@ not YYYY-MM-DD narrow nothing.
 
 Pages show previews of uploaded data; the raw JSON always has everything. Every uploaded string is cut to 512
 characters plus "…", except the run-level long texts (note, toml input and rendered text, gluten build command),
-which stop at 65,536 characters. Lists (argv, overrides, devices, overlapping bookings, samples, repeats, ineligible
-reasons, compare override rows) stop at 100 items with "N more — see raw JSON", and the repeat × query matrix shows
+which stop at 65,536 characters. Lists (argv, overrides, devices, overlapping bookings, samples, repeats, each repeat's
+applications, ineligible reasons, compare override rows) stop at 100 items with "N more — see raw JSON", and the repeat × query matrix shows
 the first 10 repeats. A duration, or a compare Δ%, past float range prints "out of range", and the charts get `null`
 for it. The toml diff is skipped above 1000 lines or 65,536 characters per side.
 
@@ -188,7 +215,8 @@ passes 65,536 characters (a cut command would run something else), or argv canno
 copies it on click (a run without one links to its page). Copying also works on a plain-http origin.
 
 On the board, the Run column shows when each run finished (UTC) and links to its page; the config cell shows only
-the resources (e.g. `4×6 64g`, plus `sp…`/`d…` when set) and its tooltip spells out every config field.
+the resources (e.g. `4×6 64g`, plus `sp…`/`d…` when set) and its tooltip spells out every config field; the Mode
+column shows the application mode (`shared` or `per-engine`).
 
 ## How a CI job would submit (method only)
 

@@ -53,7 +53,8 @@
   function configText(c) {
     return c ? Object.entries(c).map(([k, v]) => `${k}: ${v ?? '—'}`).join('\n') : '';
   }
-  // The board's config cell: resources only (toml and bundle live in the tooltip and the filters).
+  // The board's config cell: resources only (toml and bundle live in the tooltip and the filters, the
+  // application mode in its own column).
   function compactConfig(c) {
     const parts = [`${c.executors}×${c.executor_cores}`];
     if (c.offheap != null) parts.push(c.offheap);
@@ -278,7 +279,7 @@
       if (!data.rows.length) {
         const tr = tbody.insertRow();
         const td = tr.insertCell();
-        td.colSpan = 12;
+        td.colSpan = 13;
         td.className = 'lb-empty';
         td.textContent = '이 필터에 순위에 오를 run 이 없습니다.';
         return;
@@ -296,6 +297,7 @@
         for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
                                           [fmtX(r.value.speedup), 'num'], [`x${r.repeats}`, 'num'],
                                           [compactConfig(r.config), null, configText(r.config)],
+                                          [r.config.application_mode ?? '—', null],
                                           [fmtDevices(r), null],
                                           [r.submitter ?? '—', null]]) {
           const td = tr.insertCell();

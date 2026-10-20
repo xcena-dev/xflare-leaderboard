@@ -501,7 +501,7 @@ class Eligibility(unittest.TestCase):
         # a completed repeat is still held to the full rule (ok + verified against answers)
         d = self.derive_m(lambda m: m["repeats"][1]["queries"][4]["engines"]["xflare"].update(status="skipped"))
         self.assertEqual(d["ineligible_reasons"]["q5"], ["xflare skipped in repeat 2"])
-        self.assertEqual(agg.DERIVE_VERSION, 5)  # stored rows re-derive their reproduction script
+        self.assertEqual(agg.DERIVE_VERSION, 6)  # stored rows pick up A4 mode, eligibility and reproduction
 
     def test_badges(self):
         env = mf.build_envelope(mf.build_manifest(bundle_kind="dev"))
@@ -944,7 +944,7 @@ class Aggregation(unittest.TestCase):
         json.dumps(d, allow_nan=False)
         self.assertEqual(d["content_id"], agg.content_id(env["manifest"]))
         self.assertEqual(d["config_label"],
-                         "4×6 · 64g · sp=- · dev=- · Resource.mu.d1.toml.in · xflare-admin-2026.10.1")
+                         "4×6 · 64g · sp=- · dev=- · Resource.mu.d1.toml.in · xflare-admin-2026.10.1 · shared")
         self.assertEqual((d["sf"], d["repeats_requested"], d["repeats_completed"], d["submitter"], d["device_ids"]),
                          ("100", 3, 3, "bench@example.com", ["0"]))
 
@@ -952,6 +952,278 @@ class Aggregation(unittest.TestCase):
         m = {"b": [1, {"é": "<x>"}], "a": None}
         self.assertEqual(agg.canonical_manifest_bytes(m), '{"a":null,"b":[1,{"é":"<x>"}]}'.encode())
         self.assertEqual(agg.content_id(m), hashlib.sha256('{"a":null,"b":[1,{"é":"<x>"}]}'.encode()).hexdigest())
+
+
+class ApplicationMode(unittest.TestCase):
+    def manifest(self, **kw):
+        return mf.build_manifest(application_mode="per-engine", **kw)
+
+    def assert_valid(self, manifest):
+        self.assertEqual(schema.validate_manifest(manifest), ([], []))
+
+    def assert_rejects(self, manifest, message):
+        errors, _ = schema.validate_manifest(manifest)
+        self.assertTrue(any(message in e for e in errors), errors)
+
+    def test_fixture_and_builder_preserve_engine_order_and_derived_fields(self):
+        self.assertEqual(schema.validate_envelope(load("valid-per-engine-envelope.json")), ([], []))
+        for engines in (("velox", "xflare"), ("xflare", "velox"), ("xflare",)):
+            m = self.manifest(engines=engines)
+            self.assert_valid(m)
+            for rep in m["repeats"]:
+                apps = rep["applications"]
+                self.assertEqual([a["engine"] for a in apps], list(engines))
+                for key in ("invocation", "app_id", "started_at"):
+                    self.assertEqual(rep[key], apps[0][key])
+                self.assertEqual(rep["finished_at"], apps[-1]["finished_at"])
+
+    def test_optional_mode_and_shared_rejects_applications_even_when_empty(self):
+        m = mf.build_manifest()
+        before = agg.content_id(m)
+        self.assert_valid(m)
+        self.assertEqual(agg.derive(m, None)["config"]["application_mode"], "shared")
+        self.assertEqual(agg.content_id(m), before)
+        m["run"]["application_mode"] = "shared"
+        self.assert_valid(m)
+        for mode in (None, "shared"):
+            for apps in ([], [{}], None):
+                with self.subTest(mode=mode, apps=apps):
+                    m = mf.build_manifest(application_mode=mode)
+                    m["repeats"][0]["applications"] = apps
+                    self.assert_rejects(m, "must be absent in shared")
+
+    def test_mode_enum_and_type(self):
+        for mode in ("separate", "", None, 1, True, [], {}):
+            with self.subTest(mode=mode):
+                m = mf.build_manifest()
+                m["run"]["application_mode"] = mode
+                self.assert_rejects(m, "$.run.application_mode")
+
+    def test_invalid_mode_does_not_report_shared_application_errors(self):
+        for mode in ("per_engine", None, 1, True, [], {}):
+            with self.subTest(mode=mode):
+                m = self.manifest()
+                m["run"]["application_mode"] = mode
+                errors, _ = schema.validate_manifest(m)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertTrue(errors[0].startswith("$.run.application_mode:"), errors)
+
+    def test_historical_malformed_applications_in_unfinished_repeats_disqualify_the_run(self):
+        for status in ("failed", "aborted"):
+            with self.subTest(status=status):
+                m = self.manifest()
+                m["repeats"][1].update(status=status, applications=[None])
+                d = agg.derive(m, None)
+                self.assertEqual(d["eligible_queries"], [])
+                self.assertIn("applications missing or malformed in repeat 2", d["ineligible_reasons"]["common"])
+
+    def test_applications_required_array_and_empty_only_if_aborted(self):
+        m = self.manifest()
+        m["repeats"][0].pop("applications")
+        self.assert_rejects(m, "applications: required")
+        for bad in (None, {}, "applications", 1):
+            m = self.manifest()
+            m["repeats"][0]["applications"] = bad
+            self.assert_rejects(m, "applications: expected array")
+        for status in ("completed", "failed", "aborted"):
+            m = self.manifest()
+            m["repeats"][0].update(status=status, applications=[])
+            if status == "aborted":
+                self.assert_valid(m)
+            else:
+                self.assert_rejects(m, "may be empty only for an aborted repeat")
+
+    def test_application_shape_required_fields_types_enums_and_times(self):
+        for bad in (None, [], "app", 1):
+            m = self.manifest()
+            m["repeats"][0]["applications"][0] = bad
+            self.assert_rejects(m, "applications[0]: expected object")
+        fields = ("engine", "invocation", "app_id", "artifact_id", "bundle", "started_at", "finished_at", "cleanup")
+        for key in fields:
+            m = self.manifest()
+            del m["repeats"][0]["applications"][0][key]
+            self.assert_rejects(m, f"applications[0].{key}: missing")
+            m = self.manifest()
+            m["repeats"][0]["applications"][0][key] = {}
+            self.assert_rejects(m, f"applications[0].{key}: expected string")
+        for key, bad in (("engine", "spark"), ("cleanup", "maybe"), ("invocation", None),
+                         ("started_at", None), ("started_at", "2026-02-30T00:00:00Z"),
+                         ("finished_at", "2026-10-01T00:00:00+00:00")):
+            m = self.manifest()
+            m["repeats"][0]["applications"][0][key] = bad
+            self.assert_rejects(m, f"applications[0].{key}:")
+
+    def test_application_engine_subset_duplicates_and_order(self):
+        m = self.manifest()
+        m["run"]["engines"] = ["velox"]
+        self.assert_rejects(m, "xflare not in run.engines")
+        m = self.manifest()
+        m["repeats"][0]["applications"][1]["engine"] = "velox"
+        self.assert_rejects(m, "duplicate engine velox")
+        m = self.manifest()
+        m["repeats"][0]["applications"].reverse()
+        self.assert_rejects(m, "applications must follow run.engines order")
+
+    def test_derived_field_inconsistency_rejected_individually(self):
+        for key, value in (("invocation", "wrong"), ("app_id", None), ("started_at", "2026-10-01T01:00:00Z"),
+                           ("finished_at", None), ("cleanup", "failed"), ("artifact_id", None), ("bundle", None)):
+            with self.subTest(key=key):
+                m = self.manifest()
+                m["repeats"][0][key] = value
+                self.assert_rejects(m, f"repeats[0].{key}: must equal the value derived from applications")
+
+    def test_derived_cleanup_precedence_and_nullable_last_finish(self):
+        for cleanups, expected in ((("ok", "ok"), "ok"), (("ok", "unknown"), "unknown"),
+                                   (("unknown", "ok"), "unknown"), (("failed", "unknown"), "failed"),
+                                   (("unknown", "failed"), "failed")):
+            m = self.manifest()
+            rep = m["repeats"][0]
+            for app, cleanup in zip(rep["applications"], cleanups):
+                app["cleanup"] = cleanup
+            rep["cleanup"] = expected
+            rep["applications"][-1]["finished_at"] = rep["finished_at"] = None
+            self.assert_valid(m)
+            rep["cleanup"] = "unknown" if expected == "failed" else "failed"
+            self.assert_rejects(m, "repeats[0].cleanup: must equal")
+        m = self.manifest()
+        rep = m["repeats"][0]
+        rep["applications"][0]["finished_at"] = None
+        self.assert_valid(m)  # first finish does not replace the last finish
+
+    def test_nullable_identifiers_and_artifact_bundle_common_value(self):
+        for key in ("app_id", "artifact_id", "bundle"):
+            m = self.manifest()
+            rep = m["repeats"][0]
+            rep[key] = None
+            for app in rep["applications"]:
+                app[key] = None
+            self.assert_valid(m)
+        for key in ("artifact_id", "bundle"):
+            for other in (None, "different"):
+                m = self.manifest()
+                rep = m["repeats"][0]
+                rep["applications"][1][key] = other
+                self.assert_rejects(m, f"repeats[0].{key}: must equal")
+                rep[key] = None
+                self.assert_valid(m)
+
+    def test_unknown_application_properties_warn_and_diagnostics_are_capped(self):
+        m = self.manifest()
+        app = m["repeats"][0]["applications"][0]
+        app["future"] = "kept"
+        self.assertEqual(schema.validate_manifest(m),
+                         ([], ["$.repeats[0].applications[0].'future': unknown property (kept, not interpreted)"]))
+        app["engine"] = "x" * 10000
+        errors, _ = schema.validate_manifest(m)
+        self.assertLess(len(errors[0]), 200)
+        m["repeats"][0]["applications"] = [dict(app)] * 200
+        errors, warnings = schema.validate_manifest(m)
+        self.assertEqual(len(errors), schema.MAX_MESSAGES + 1)
+        self.assertEqual(len(warnings), schema.MAX_MESSAGES + 1)
+        self.assertTrue(errors[-1].endswith("more errors"))
+        self.assertTrue(warnings[-1].endswith("more warnings"))
+
+    def test_missing_application_is_ineligible_rather_than_invalid(self):
+        m = self.manifest()
+        rep = m["repeats"][0]
+        rep["applications"].pop()
+        rep["finished_at"] = rep["applications"][0]["finished_at"]
+        self.assert_valid(m)
+        d = agg.derive(m, None)
+        self.assertFalse(d["total_eligible"])
+        self.assertEqual(d["eligible_queries"], [])
+        self.assertIn("applications missing xflare in completed repeat 1", d["ineligible_reasons"]["common"])
+
+    def test_application_artifact_and_bundle_equality_includes_null(self):
+        for key, label in (("artifact_id", "artifact"), ("bundle", "bundle")):
+            for value in (None, "different"):
+                m = self.manifest()
+                # Every repeat has the same derived null, so the existing repeat-level check cannot catch this.
+                for rep in m["repeats"]:
+                    rep["applications"][1][key] = value
+                    rep[key] = None
+                self.assert_valid(m)
+                d = agg.derive(m, None)
+                self.assertEqual(d["eligible_queries"], [])
+                self.assertIn(f"{label} differs across applications of completed repeats",
+                              d["ineligible_reasons"]["common"])
+        m = self.manifest()
+        for rep in m["repeats"]:
+            for key in ("artifact_id", "bundle"):
+                rep[key] = None
+                for app in rep["applications"]:
+                    app[key] = None
+        self.assert_valid(m)
+        self.assertTrue(agg.derive(m, None)["total_eligible"])
+
+    def test_application_equality_spans_completed_repeats_only(self):
+        for key, label in (("artifact_id", "artifact"), ("bundle", "bundle")):
+            m = self.manifest()
+            rep = m["repeats"][1]
+            rep[key] = "different"
+            for app in rep["applications"]:
+                app[key] = "different"
+            self.assert_valid(m)
+            self.assertIn(f"{label} differs across applications of completed repeats",
+                          agg.derive(m, None)["ineligible_reasons"]["common"])
+            rep["status"] = "failed"
+            rep["applications"].pop()
+            rep["finished_at"] = rep["applications"][-1]["finished_at"]
+            self.assert_valid(m)
+            self.assertEqual(agg.derive(m, None)["eligible_queries"], list(range(1, 23)))
+
+    def test_modes_rank_together_and_filter_without_changing_medians_or_default(self):
+        shared = row(mf.build_envelope(mf.build_manifest(elapsed=const_elapsed(10))))
+        per_engine = row(mf.build_envelope(self.manifest(run_id=mf.fixture_uuid(6), elapsed=const_elapsed(5))))
+        self.assertEqual(agg.rank([shared, per_engine], "total"), [per_engine, shared])
+        self.assertEqual(agg.hero([shared, per_engine], agg.DEFAULT_FILTER), per_engine)
+        self.assertEqual(agg.DEFAULT_FILTER, {"executors": 4, "executor_cores": 6})
+        self.assertIn("application_mode", agg.CONFIG_KEYS)
+        for item, mode in ((shared, "shared"), (per_engine, "per-engine")):
+            d = item["derived"]
+            self.assertEqual(d["config"]["application_mode"], mode)
+            self.assertTrue(d["config_label"].endswith(" · " + mode))
+            self.assertTrue(agg.matches_filter(d, {"application_mode": mode}))
+            self.assertFalse(agg.matches_filter(d, {"application_mode": "other"}))
+        m = self.manifest()
+        old = mf.build_manifest()
+        for key in ("per_query", "totals", "total_eligible"):
+            self.assertEqual(agg.derive(m, None)[key], agg.derive(old, None)[key])
+
+    def test_reproduce_preserves_zero_argument_flag_and_following_options(self):
+        m = self.manifest()
+        m["run"]["argv"] = ["--application-per-engine", "--engines", "xflare,velox", "1", "--repeat", "3"]
+        result = repro.script(m)
+        self.assertIsNone(result["omitted"])
+        args = shlex.split(result["command"].splitlines()[-1])
+        start = args.index("--application-per-engine")
+        self.assertEqual(args[start:], m["run"]["argv"])
+
+    def test_stored_version_five_rederives_mode_and_application_rules_once(self):
+        import sqlite3
+        m = self.manifest()
+        for rep in m["repeats"]:
+            rep["applications"][1]["artifact_id"] = "other"
+            rep["artifact_id"] = None
+        env = mf.build_envelope(m)
+        self.assert_valid(m)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            _, before = store.put(env)
+            old = copy.deepcopy(before["derived"])
+            old["config"].pop("application_mode")
+            old["total_eligible"] = True
+            with sqlite3.connect(store.db_path) as conn:
+                conn.execute("UPDATE runs SET derived_json=?, derive_version=5, total_eligible=1", (json.dumps(old),))
+            with mock.patch.object(agg, "derive", wraps=agg.derive) as derive:
+                after = store.get(m["run_id"])
+                self.assertEqual(after, before)
+                self.assertEqual(store.get(m["run_id"]), after)
+                self.assertEqual(derive.call_count, 1)
+            self.assertFalse(after["derived"]["total_eligible"])
+            self.assertEqual(after["content_id"], agg.content_id(m))
+            with sqlite3.connect(store.db_path) as conn:
+                self.assertEqual(conn.execute("SELECT derive_version,total_eligible FROM runs").fetchone(), (6, 0))
 
 
 class StoreTests(unittest.TestCase):

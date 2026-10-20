@@ -1,6 +1,8 @@
 """content_id, eligibility, medians, ordering and hero selection (README §3-§4). Pure: no I/O.
 
-Inputs are validated manifests/envelopes (schema.py); nothing here re-checks types. derive() never raises for them:
+Inputs are validated manifests/envelopes (schema.py), including stored rows accepted by older validators.
+The A4 mode and per-engine applications are checked again (schema.application_mode_state) because older
+validators kept them uninterpreted; a shared run's applications stay uninterpreted. derive() never raises for them:
 integers are unbounded, so arithmetic is exact where Python can be (odd-N medians, integer sums), a speedup that is
 not representable as a float is null, and an even-N median or a total beyond float range makes that query/the total
 ineligible ("value beyond numeric range").
@@ -13,13 +15,14 @@ from datetime import datetime
 from fractions import Fraction
 
 from . import repro
-from .schema import _snip
+from .schema import _snip, application_mode_state
 
-DERIVE_VERSION = 5  # the reproduce script follows spark-tpch.sh option arity
+DERIVE_VERSION = 6  # A4: application mode, per-application eligibility and reproduce flag
 QUERY_IDS = range(1, 23)
 METRICS = ("total",) + tuple(f"q{q}" for q in QUERY_IDS)
 DEFAULT_FILTER = {"executors": 4, "executor_cores": 6}
-CONFIG_KEYS = ("executors", "executor_cores", "offheap", "shuffle_partitions", "devices", "toml", "bundle")
+CONFIG_KEYS = ("executors", "executor_cores", "offheap", "shuffle_partitions", "devices", "toml", "bundle",
+               "application_mode")
 OUT_OF_RANGE = "value beyond numeric range"
 
 
@@ -95,11 +98,12 @@ def _unfinished_problems(entry: dict, repeat: dict) -> list[str]:
     return out
 
 
-def _query_eligibility(manifest: dict, completed: list[dict]) -> tuple[list[str], dict[int, list[str]]]:
+def _query_eligibility(manifest: dict, completed: list[dict], application_mode: str,
+                       application_problems: list[str]) -> tuple[list[str], dict[int, list[str]]]:
     """Common and query-specific reasons Q fails. Completed repeats must be fully ok; failed/aborted ones must
     not have recorded a wrong answer for q. A query is eligible only when both reason lists are empty."""
     run = manifest["run"]
-    common = []
+    common = list(application_problems)
     if run["record_answers"]:
         common.append("recording mode (record_answers=true)")
     # Length first: repeat_requested is unbounded, so never materialise a range of it.
@@ -112,6 +116,16 @@ def _query_eligibility(manifest: dict, completed: list[dict]) -> tuple[list[str]
         common.append("artifact differs across repeats")
     if len({r["bundle"] for r in completed}) > 1:
         common.append("bundle differs across repeats")
+    if application_mode == "per-engine" and not application_problems:
+        for rep in completed:
+            present = {app["engine"] for app in rep["applications"]}
+            missing = [engine for engine in run["engines"] if engine not in present]
+            if missing:
+                common.append(f"applications missing {', '.join(missing)} in completed repeat {_snip(rep['index'])}")
+        applications = [app for rep in completed for app in rep["applications"]]
+        for key, label in (("artifact_id", "artifact"), ("bundle", "bundle")):
+            if len({app[key] for app in applications}) > 1:
+                common.append(f"{label} differs across applications of completed repeats")
 
     unfinished = sorted((r for r in manifest["repeats"] if r["status"] != "completed"), key=lambda r: r["index"])
     out = {}
@@ -163,7 +177,8 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
     run = manifest["run"]
     repeats = sorted(manifest["repeats"], key=lambda r: r["index"])
     completed = [r for r in repeats if r["status"] == "completed"]
-    common, q_reasons = _query_eligibility(manifest, completed)
+    application_mode, application_problems = application_mode_state(manifest)
+    common, q_reasons = _query_eligibility(manifest, completed, application_mode, application_problems)
 
     per_query = {}
     for q in QUERY_IDS:
@@ -200,7 +215,8 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
     bundle = manifest["build"]["bundle"]
     config = {"executors": res["executors"], "executor_cores": res["executor_cores"], "offheap": res["offheap"],
               "shuffle_partitions": res["shuffle_partitions"], "devices": res["devices"],
-              "toml": run["xflare_toml"]["name"], "bundle": bundle["resolved"]}
+              "toml": run["xflare_toml"]["name"], "bundle": bundle["resolved"],
+              "application_mode": application_mode}
 
     env = (envelope or {}).get("environment") or {}
     badges = [f"x{len(completed)}"]
@@ -241,7 +257,7 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
         "config": config,
         "config_label": (f"{config['executors']}×{config['executor_cores']} · {_dash(config['offheap'])}"
                          f" · sp={_dash(config['shuffle_partitions'])} · dev={_dash(config['devices'])}"
-                         f" · {config['toml']} · {_dash(config['bundle'])}"),
+                         f" · {config['toml']} · {_dash(config['bundle'])} · {config['application_mode']}"),
         "build": {"revision": manifest["build"]["revision"], "artifact_id": manifest["build"]["artifact_id"],
                   "bundle_kind": bundle["kind"], "provenance_source": manifest["build"]["provenance_source"],
                   "client_revision": manifest["client"]["revision"]},

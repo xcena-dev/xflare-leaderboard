@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "xflare-bench-manifest-1.schema.json",
   "title": "xflare-bench-manifest/1",
-  "description": "README §1 manifest, written by spark-tpch.sh --submission. Documentation for producers: the service's stdlib validator (leaderboard/schema.py) is authoritative. Rules this schema cannot express: repeats[].index must be unique and <= run.repeat_requested; query ids unique within one repeat; times must be real calendar dates; integers must not be written as 1.0; the whole document nests at most 64 objects/arrays deep; unknown properties inside the manifest are accepted with a warning (kept, not interpreted, and part of content_id). Times are RFC 3339 UTC with a trailing Z.",
+  "description": "README §1 manifest, written by spark-tpch.sh --submission. Documentation for producers: the service's stdlib validator (leaderboard/schema.py) is authoritative. Rules this schema cannot express: repeats[].index must be unique and <= run.repeat_requested; query ids unique within one repeat; times must be real calendar dates; integers must not be written as 1.0; the whole document nests at most 64 objects/arrays deep; unknown properties inside the manifest are accepted with a warning (kept, not interpreted, and part of content_id). Times are RFC 3339 UTC with a trailing Z. Amendment A4: run.application_mode defaults to shared when absent; per-engine repeats require applications in run.engines order, with unique engines drawn from run.engines. Nonempty applications derive the repeat invocation/app_id/started_at from the first application, finished_at from the last (including null), cleanup as all ok / any failed / otherwise unknown, and artifact_id/bundle as the common value or null. Derived-field inconsistencies are rejected. Every completed repeat must have every requested engine, and artifact/bundle equality spans the applications of all completed repeats for eligibility (not validation).",
   "$defs": {
     "time": {
       "type": "string",
@@ -90,6 +90,68 @@
           "type": [
             "string",
             "null"
+          ]
+        }
+      }
+    },
+    "application": {
+      "type": "object",
+      "required": [
+        "engine",
+        "invocation",
+        "app_id",
+        "artifact_id",
+        "bundle",
+        "started_at",
+        "finished_at",
+        "cleanup"
+      ],
+      "properties": {
+        "engine": {
+          "enum": [
+            "velox",
+            "xflare"
+          ]
+        },
+        "invocation": {
+          "type": "string"
+        },
+        "app_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bundle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "$ref": "#/$defs/time"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanup": {
+          "enum": [
+            "ok",
+            "failed",
+            "unknown"
           ]
         }
       }
@@ -486,6 +548,14 @@
             "ok",
             "failed"
           ]
+        },
+        "application_mode": {
+          "enum": [
+            "shared",
+            "per-engine"
+          ],
+          "default": "shared",
+          "description": "Optional; absence means shared. Both modes rank on the same boards."
         }
       }
     },
@@ -608,9 +678,78 @@
                 }
               }
             }
+          },
+          "applications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/application"
+            },
+            "description": "Required only in per-engine mode; absent in shared mode. Empty only for aborted repeats. Engines are unique, a subset of run.engines, and follow its order. Unknown application properties are accepted with warnings."
           }
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "run": {
+            "properties": {
+              "application_mode": {
+                "const": "per-engine"
+              }
+            },
+            "required": [
+              "application_mode"
+            ]
+          }
+        },
+        "required": [
+          "run"
+        ]
+      },
+      "then": {
+        "properties": {
+          "repeats": {
+            "items": {
+              "required": [
+                "applications"
+              ],
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "aborted"
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              },
+              "else": {
+                "properties": {
+                  "applications": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "repeats": {
+            "items": {
+              "not": {
+                "required": [
+                  "applications"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
