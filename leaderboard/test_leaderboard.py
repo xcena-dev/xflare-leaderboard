@@ -525,6 +525,13 @@ class Eligibility(unittest.TestCase):
         m["build"]["provenance_source"] = "local-checkout"
         m["repeats"][0]["queries"][0]["evidence"]["status"] = "fallback"
         self.assertEqual(agg.derive(m, None)["badges"], ["x3", "overlap unknown", "offload:mixed"])
+        m = mf.build_manifest()
+        m["repeats"][0]["queries"][0]["evidence"]["status"] = "partial"
+        m["repeats"][1]["queries"][1]["evidence"]["status"] = "offloaded_except_skipped"
+        self.assertEqual(agg.derive(m, None)["badges"], ["x3", "reproducible", "overlap unknown", "offload:offloaded"])
+        m["repeats"][2]["queries"][2]["evidence"]["status"] = "declined"
+        self.assertIn("offload:mixed", agg.derive(m, None)["badges"])
+        self.assertGreater(agg.DERIVE_VERSION, 8)  # stored rows pick up the offload badge rule
 
 
 class ReproArguments(unittest.TestCase):

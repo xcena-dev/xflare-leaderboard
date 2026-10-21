@@ -173,6 +173,8 @@ Computed on the server, never taken from the client.
   narrows to one state (`default` = "default Spark settings only"); the default filter does not narrow it.
 
 Interpretations the contract leaves open (decided here, not contract changes):
+- The `offload:<status>` badge reads the evidence statuses `partial` and `offloaded_except_skipped` as `offloaded`:
+  it tells runs apart by executor core, not by the operators or tasks a query left on velox.
 - The ok / elapsed / verify checks of `Q(run, q)` use the repeats with `status=completed`; failed and aborted repeats
   only contribute wrong answers (above). Q needs at least one completed repeat and the listed repeat indices to be
   exactly `1..repeat_requested`; `q` must appear in every completed repeat.

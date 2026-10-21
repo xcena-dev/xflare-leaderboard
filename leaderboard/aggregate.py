@@ -17,7 +17,7 @@ from fractions import Fraction
 from . import repro
 from .schema import _snip, application_mode_state
 
-DERIVE_VERSION = 8  # A6: only per-engine applications may rank
+DERIVE_VERSION = 9  # offload badge: partial and offloaded_except_skipped read as offloaded
 QUERY_IDS = range(1, 23)
 METRICS = ("total",) + tuple(f"q{q}" for q in QUERY_IDS)
 DEFAULT_FILTER = {"executors": 4, "executor_cores": 6}
@@ -27,6 +27,9 @@ OUT_OF_RANGE = "value beyond numeric range"
 SHARED_REASON = "shared application: engine order affects timings"
 ROLLUP_PREFIX = "queries not eligible: "
 SHARED_BADGE = "shared application"
+# Evidence statuses the offload badge reads as offloaded. partial and offloaded_except_skipped left some operators or
+# tasks on velox, but the badge tells runs apart by executor core (README §4).
+XFLARE_CORE_STATUSES = frozenset({"offloaded", "offloaded_except_skipped", "partial"})
 
 
 def canonical_manifest_bytes(manifest: dict) -> bytes:
@@ -255,8 +258,9 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
         badges.append("overlap unknown")
     if not total_eligible and eligible:
         badges.append("partial")
-    offload = sorted({x["evidence"]["status"] for r in completed for x in r["queries"]
-                      if x["evidence"]["status"] is not None})
+    offload = sorted({"offloaded" if status in XFLARE_CORE_STATUSES else status
+                      for status in (x["evidence"]["status"] for r in completed for x in r["queries"])
+                      if status is not None})
     if offload:
         badges.append("offload:" + (offload[0] if len(offload) == 1 else "mixed"))
     if spark_conf == "custom":
