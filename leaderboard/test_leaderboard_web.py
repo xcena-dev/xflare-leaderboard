@@ -5,8 +5,9 @@ Run: python3 leaderboard/test_leaderboard_web.py
 Covers the HTTP side: the service starting from config.yaml, "/" → board, the data dir env override, 8 MiB cap
 (413, also for chunked bodies), receipts and 409 over HTTP, dry run writes nothing, withdraw, the raw route,
 hostile strings staying inert on every page, storage down → 503 on the storage routes only, SF tabs + default
-filter + hero from one run, two concurrent POSTs, the reproduce script, and the display budgets (cut scalars,
-capped lists and facets, diff budget) that keep any accepted upload's pages small.
+filter + hero from one run, two concurrent POSTs, the reproduce script, the display budgets (cut scalars,
+capped lists and facets, diff budget) that keep any accepted upload's pages small, and the static hashes and the
+board's script header that keep a board page from rendering an answer meant for another script.
 The page-script checks run leaderboard.js under node with a minimal DOM stub, and the reproduce-script checks run
 it in bash; without node or bash they fail, naming the missing runtime (XFLARE_LEADERBOARD_SKIP_NODE_TESTS=1 skips the
 page-script checks instead, for the auto-updater's self-check).
@@ -730,7 +731,8 @@ Object.defineProperty(globalThis, 'navigator',
 global.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
 global.location = { search: '', pathname: '/b/xflare_leaderboard' };
 global.history = { replaceState() {} };
-global.fetch = async () => ({ ok: true, status: 200, json: async () => JSON.parse(cfg.fetch) });
+global.fetch = async () => ({ ok: true, status: 200, json: async () => JSON.parse(cfg.fetch),
+                               headers: { get: k => (cfg.headers || {})[k.toLowerCase()] || null } });
 vm.runInThisContext(fs.readFileSync(cfg.js, 'utf8'));
 setTimeout(async () => {
   const gate = [];
@@ -769,11 +771,16 @@ def page_script_node() -> str:
 
 
 def run_page_js(page: str, ids=None, data=None, fetch=None, slots=None, click=None, click_class=None,
-                secure=False, check=0) -> dict:
+                secure=False, check=0, headers=None) -> dict:
     node = page_script_node()
     cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "page": page, "ids": ids,
            "data": data or {}, "fetch": fetch, "slots": slots, "click": click,
            "clickClass": click_class, "secure": secure, "check": check}
+    if headers is None:
+        # The answer names the page's own script, as the service that rendered the page does.
+        script = json.loads((data or {}).get("lb-page-data") or "{}").get("script")
+        headers = {"X-Leaderboard-Script": script} if script else {}
+    cfg["headers"] = {k.lower(): v for k, v in headers.items()}
     out = subprocess.run([node, "-e", _JS_HARNESS], input=json.dumps(cfg), capture_output=True, text=True,
                          timeout=30)
     if out.returncode:
@@ -1113,8 +1120,10 @@ class TestWrongAnswersShown(WebCase):
 
 
 # Drives the board script step by step against a DOM stub and a Chart stub. Every fetch stays pending until a step
-# answers it ({"answer": i, "with": key} resolves the i-th request with responses[key]); {"click": text} clicks the
-# button with that text; {"toggle": id} flips a checkbox. Prints what the page ended up showing.
+# answers it ({"answer": i, "with": key} resolves the i-th request with responses[key], with meta[key]'s status and
+# headers, else 200 and the default headers, or rejects it when meta[key] has "reject"); {"click": text} clicks the
+# button with that text; {"fire": id} clicks that element; {"toggle": id} flips a checkbox. Prints what the page ended
+# up showing.
 _BOARD_HARNESS = r"""
 const fs = require('fs'), vm = require('vm');
 const cfg = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -1146,7 +1155,7 @@ global.document = {
 };
 global.location = { search: '', pathname: '/b/xflare_leaderboard' };
 global.history = { replaceState(a, b, u) { lastUrl = u; } };
-global.fetch = url => new Promise(res => pending.push({ url, res }));
+global.fetch = url => new Promise((res, rej) => pending.push({ url, res, rej }));
 global.Chart = class {
   constructor(canvas, conf) { this.options = conf.options; this.destroyed = false; charts.push(this); }
   update() { if (this.destroyed) problems.push('update on a destroyed chart'); }
@@ -1159,9 +1168,15 @@ const tick = () => new Promise(r => setTimeout(r, 5));
     await tick();
     if (step.answer !== undefined) {
       const text = cfg.responses[step.with];
-      pending[step.answer].res({ ok: true, status: 200, json: async () => JSON.parse(text) });
+      const meta = cfg.meta[step.with] || {};
+      const status = meta.status || 200, headers = meta.headers || cfg.headers;
+      if (meta.reject) pending[step.answer].rej(new TypeError('Failed to fetch'));
+      else pending[step.answer].res({ ok: status < 300, status, json: async () => JSON.parse(text),
+                                 headers: { get: k => headers[k.toLowerCase()] || null } });
     } else if (step.click) {
       all.filter(e => e.tagName === 'button' && e.textContent === step.click).pop().fire('click');
+    } else if (step.fire) {
+      byId[step.fire].fire('click');
     } else if (step.toggle) {
       const e = byId[step.toggle];
       e.checked = !e.checked;
@@ -1170,9 +1185,13 @@ const tick = () => new Promise(r => setTimeout(r, 5));
   }
   await tick(); await tick();
   const tabs = byId['lb-sf-tabs'].children;
+  const links = e => [e.href, ...e.children.flatMap(links)].filter(Boolean);
   console.log(JSON.stringify({
     lastUrl, activeTab: (tabs.find(b => b.className.includes('active')) || {}).textContent,
-    heroLink: byId['hero-link'].href, logListeners: (byId['hero-log'].on.change || []).length,
+    heroLink: byId['hero-link'].href, heroEmptyHidden: byId['hero-empty'].hidden,
+    status: byId['lb-status'].textContent, statusHidden: byId['lb-status'].hidden,
+    boardLinks: links(byId['#lb-board tbody']),
+    logListeners: (byId['hero-log'].on.change || []).length,
     charts: charts.map(c => ({ destroyed: c.destroyed, y: c.options.scales.y.type })), problems,
     requests: pending.map(p => p.url) }));
 })();
@@ -1180,12 +1199,16 @@ const tick = () => new Promise(r => setTimeout(r, 5));
 
 
 class TestBoardScript(WebCase):
-    """The board page script under controlled timing: stale answers never win, one log toggle drives the chart."""
+    """The board page script under controlled timing: stale answers never win, an answer for another script never
+    renders, one log toggle drives the chart."""
 
-    def drive(self, steps, responses):
+    def drive(self, steps, responses, meta=None):
+        """Answers name the page's own script unless meta[key] gives other headers (names in lower case)."""
         node = page_script_node()
-        cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "data": self.page_data(), "steps": steps,
-               "responses": responses}
+        data = self.page_data()
+        cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "data": data, "steps": steps,
+               "responses": responses, "meta": meta or {},
+               "headers": {"x-leaderboard-script": json.loads(data["lb-page-data"])["script"]}}
         out = subprocess.run([node, "-e", _BOARD_HARNESS], input=json.dumps(cfg), capture_output=True, text=True,
                              timeout=30)
         if out.returncode:
@@ -1215,6 +1238,123 @@ class TestBoardScript(WebCase):
         self.assertEqual(out["logListeners"], 1)
         self.assertEqual(out["problems"], [])
         self.assertEqual(out["charts"][-1], {"destroyed": False, "y": "logarithmic"})
+
+    def test_answer_for_another_script_keeps_the_board(self):
+        """SF-100 shown, then SF-1000 clicked (or refresh) and answered by a service with another script, whatever the
+        status or body, or by a 2xx from a service older than the check: the SF-100 hero stays and the page asks for
+        a reload. The next answer that names this script renders as usual."""
+        hundred, thousand, responses = self.two_tabs()
+        responses["html"] = "<!doctype html><title>500 Internal Server Error</title>"
+        other = {"x-leaderboard-script": "0" * 12}
+        meta = {"200": {"headers": other}, "400": {"status": 400, "headers": other},
+                "503": {"status": 503, "headers": other}, "html": {"status": 500, "headers": other},
+                "no header": {"headers": {}}}
+        responses.update({"200": responses["1000"], "400": '{"errors": ["metric: total or q1..q22"]}',
+                          "503": '{"errors": ["leaderboard storage unavailable"]}', "no header": responses["1000"]})
+        reload = "서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요."
+        shown = self.drive([{"answer": 0, "with": "100"}], responses)["boardLinks"]
+        self.assertIn(f"{LB}/run/{hundred}", shown)
+        for key in ("200", "400", "503", "html", "no header"):
+            for action in ({"click": "SF-1000 · snappy"}, {"fire": "lb-refresh"}):
+                with self.subTest(answer=key, action=action):
+                    out = self.drive([{"answer": 0, "with": "100"}, action, {"answer": 1, "with": key}],
+                                     responses, meta)
+                    self.assertTrue(out["heroLink"].endswith(hundred), out)
+                    self.assertTrue(out["heroEmptyHidden"], out)
+                    self.assertEqual(out["boardLinks"], shown)
+                    self.assertEqual((out["status"], out["statusHidden"]), (reload, False))
+                    self.assertEqual(out["charts"][-1]["destroyed"], False)
+        out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-1000 · snappy"}, {"answer": 1, "with": "200"},
+                          {"click": "SF-1000 · snappy"}, {"answer": 2, "with": "1000"}], responses, meta)
+        self.assertTrue(out["heroLink"].endswith(thousand), out)
+        self.assertTrue(out["statusHidden"], out)
+
+    def test_answers_from_this_script_keep_their_own_paths(self):
+        """The check stands only in front of answers for another script: a failed fetch keeps the board and says so,
+        and an error that names this script, or a non-2xx without the header, clears the hero and board and shows its
+        errors."""
+        hundred, _, responses = self.two_tabs()
+        responses.update({"down": "", "400": '{"errors": ["metric: total or q1..q22"]}',
+                          "503": '{"errors": ["leaderboard storage unavailable"]}'})
+        meta = {"down": {"reject": True}, "400": {"status": 400}, "503": {"status": 503, "headers": {}}}
+        shown = self.drive([{"answer": 0, "with": "100"}], responses)["boardLinks"]
+        out = self.drive([{"answer": 0, "with": "100"}, {"fire": "lb-refresh"}, {"answer": 1, "with": "down"}],
+                         responses, meta)
+        self.assertEqual((out["status"], out["boardLinks"]), ("board 를 불러오지 못했습니다.", shown))
+        self.assertTrue(out["heroLink"].endswith(hundred), out)
+        for key, error in (("400", "metric: total or q1..q22"), ("503", "leaderboard storage unavailable")):
+            with self.subTest(answer=key):
+                out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-1000 · snappy"},
+                                  {"answer": 1, "with": key}], responses, meta)
+                self.assertEqual(out["status"], error)
+                self.assertFalse(out["heroEmptyHidden"], out)
+                self.assertNotIn(f"{LB}/run/{hundred}", out["boardLinks"])
+
+
+class TestOneDeploy(WebCase):
+    """Static URLs carry the hash taken at start, and every board answer names the board script by it: a board page
+    with another script asks for a reload (TestBoardScript drives the open-page paths)."""
+
+    def test_static_urls_carry_the_file_hash(self):
+        m = self.submit()
+        other = self.submit()
+        for url in (LB, f"{LB}/run/{m}", f"{LB}/compare?runs={m},{other}"):
+            page = self.c.get(url).get_data(as_text=True)
+            refs = re.findall(r'(?:href|src)="(/static/[^"]*)"', page)
+            self.assertEqual(sorted(r.split("?")[0] for r in refs),
+                             ["/static/leaderboard.css", "/static/leaderboard.js", "/static/style.css"], url)
+            for ref in refs:
+                path, _, query = ref.partition("?")
+                with open(os.path.join(ROOT, path.lstrip("/")), "rb") as f:
+                    self.assertEqual(query, "v=" + hashlib.sha256(f.read()).hexdigest()[:12], ref)
+                with self.c.get(html.unescape(ref)) as served:
+                    self.assertEqual(served.status_code, 200, ref)
+
+    def test_board_names_its_script(self):
+        script = json.loads(self.page_data()["lb-page-data"])["script"]
+        with open(os.path.join(ROOT, "static", "leaderboard.js"), "rb") as f:
+            self.assertEqual(script, hashlib.sha256(f.read()).hexdigest()[:12])
+        for query, status in (("", 200), ("?metric=q23", 400)):
+            r = self.c.get("/api/leaderboard/board" + query)
+            self.assertEqual(r.status_code, status)
+            self.assertEqual(r.headers["X-Leaderboard-Script"], script, query)
+        self.assertNotIn("X-Leaderboard-Script", self.c.get("/api/leaderboard/runs").headers)
+        moved = self.data + ".moved"
+        os.rename(self.data, moved)
+        try:
+            r = self.c.get("/api/leaderboard/board")
+        finally:
+            os.rename(moved, self.data)
+        self.assertEqual((r.status_code, r.headers["X-Leaderboard-Script"]), (503, script))
+
+    def test_hashed_once_at_start(self):
+        """A static file that goes missing after the start (a checkout being rewritten) changes no answer; one
+        missing at the start stops the start."""
+        script = json.loads(self.page_data()["lb-page-data"])["script"]
+        empty = tempfile.mkdtemp(prefix="lb-static-")
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        self.app.static_folder = empty
+        r = self.c.get("/api/leaderboard/board")
+        self.assertEqual((r.status_code, r.headers["X-Leaderboard-Script"]), (200, script))
+        self.assertIn(f"/static/leaderboard.js?v={script}", self.c.get(LB).get_data(as_text=True))
+        with mock.patch.object(lb_app, "HERE", lb_app.Path(empty)), self.assertRaises(FileNotFoundError):
+            lb_app.create_app(config(self.data))
+
+    def test_stale_page_asks_for_reload(self):
+        hero = self.submit()
+        r = self.c.get("/api/leaderboard/board")
+        board, header = r.get_data(as_text=True), {"X-Leaderboard-Script": r.headers["X-Leaderboard-Script"]}
+        fresh = run_page_js("board", data=self.page_data(), fetch=board, headers=header)
+        self.assertTrue(fresh["hidden"]["lb-status"])
+        self.assertIn("SF-100 · snappy", fresh["texts"])
+        self.assertIn(f"{LB}/run/{hero}", fresh["hrefs"])
+        stale = json.loads(self.page_data()["lb-page-data"])
+        stale["script"] = "0" * 12
+        out = run_page_js("board", data={"lb-page-data": json.dumps(stale)}, fetch=board, headers=header)
+        self.assertEqual(out["text"]["lb-status"], "서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요.")
+        self.assertFalse(out["hidden"]["lb-status"])
+        self.assertNotIn("SF-100 · snappy", out["texts"])
+        self.assertNotIn(f"{LB}/run/{hero}", out["hrefs"])
 
 
 class TestDisplayRound(WebCase):

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <title>{{ benchmark.title }}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='leaderboard.css') }}">
+  <link rel="stylesheet" href="{{ lb_static('style.css') }}">
+  <link rel="stylesheet" href="{{ lb_static('leaderboard.css') }}">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body data-page="board">
@@ -101,7 +101,7 @@
   </section>
 </main>
 
-<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars, "badge_class": lb_badge_classes} | tojson }}</script>
-<script src="{{ url_for('static', filename='leaderboard.js') }}"></script>
+<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars, "badge_class": lb_badge_classes, "script": lb_script_version()} | tojson }}</script>
+<script src="{{ lb_static('leaderboard.js') }}"></script>
 </body>
 </html>
