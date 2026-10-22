@@ -19,7 +19,7 @@
 <main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
   <p class="lb-desc">{{ benchmark.description or '' }}</p>
 
-  <nav class="lb-tabs" id="lb-sf-tabs" aria-label="Scale factor"></nav>
+  <nav class="lb-tabs" id="lb-sf-tabs" aria-label="Scale factor and codec"></nav>
   <p class="lb-status" id="lb-status" hidden></p>
 
   <section class="lb-panel lb-hero" aria-labelledby="hero-title">
@@ -55,6 +55,7 @@
     <span class="lb-filter-slot" data-key="toml" data-label="toml"></span>
     <span class="lb-filter-slot" data-key="bundle" data-label="bundle"></span>
     <span class="lb-filter-slot" data-key="application_mode" data-label="mode"></span>
+    <span class="lb-filter-slot" data-key="engines" data-label="engines"></span>
     <span class="lb-filter-slot" data-key="spark_conf" data-label="spark conf"></span>
     <span class="lb-filter-slot" data-key="device" data-label="device"></span>
     <span class="lb-filter-slot" data-key="submitter" data-label="submitter"></span>
@@ -83,7 +84,7 @@
         <thead>
           <tr>
             <th class="num">#</th><th>Run (finished, UTC)</th><th class="num">Xflare</th><th class="num">Velox</th>
-            <th class="num">Speedup</th><th class="num">Repeats</th><th>Config</th><th>Mode</th><th>Device</th>
+            <th class="num">Speedup</th><th class="num">Repeats</th><th>Config</th><th>Mode</th><th>Engines</th><th>Device</th>
             <th>Submitter</th><th>Badges</th><th>Repro</th><th>Compare</th>
           </tr>
         </thead>

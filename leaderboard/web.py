@@ -21,11 +21,11 @@ from fractions import Fraction
 from flask import Blueprint, Response, abort, current_app, jsonify, redirect, render_template, request, url_for
 
 from . import aggregate, repro
-from .display import (BADGE_CLASS, BENCH_ID, BUDGET, FACET_VALUES, MATRIX_REPEATS, PREVIEW_CHARS, PREVIEW_ITEMS,
-                      SCALAR_CHARS, as_float, badge_class, cut, default_filter, facet_option, facet_token,
-                      fallback_notice, norm_date, tabs)
-from .schema import (MANIFEST_SCHEMA, MAX_BODY_BYTES, UUID4_RE, BadJSON, parse_json_strict,
-                     validate_envelope, validate_manifest)
+from .display import (BADGE_CLASS, BENCH_ID, BUDGET, DEFAULT_CODEC, EFFECTIVE_ITEMS, FACET_VALUES, MATRIX_REPEATS,
+                      PREVIEW_CHARS, PREVIEW_ITEMS, SCALAR_CHARS, as_float, badge_class, cut, default_filter,
+                      facet_option, facet_token, fallback_notice, norm_date, tab_note, tabs)
+from .schema import (APPLICATION_SETTINGS, MANIFEST_SCHEMA, MAX_BODY_BYTES, SCALE_FACTOR_RE, UUID4_RE, BadJSON,
+                     parse_json_strict, validate_envelope, validate_manifest)
 from .store import StorageUnavailable, store_for
 
 TOP_CHOICES = (5, 10, 25)
@@ -226,6 +226,7 @@ def api_submit():
             "content_id": derived["content_id"],
             "url": _url(manifest["run_id"]),
             "ranked_total": bool(derived["total_eligible"]),
+            "tab_note": tab_note(cfg, *aggregate.tab_of(derived)),
             "warnings": warnings,
             "badges": derived["badges"],
             "ineligible_reasons": {k: _capped(v) for k, v in derived["ineligible_reasons"].items()},
@@ -293,11 +294,23 @@ def _withdrawal(row: dict, limit: int | None = SCALAR_CHARS) -> dict | None:
     return {"at": row["withdrawn_at"], "actor": show(row["withdrawn_by"]), "reason": show(row["withdrawn_reason"])}
 
 
-def _sf(cfg: dict, fallback: str | None):
-    sf = request.args.get("sf") or fallback
-    if sf is not None and sf not in tabs(cfg):
-        raise _BadBody("sf: one of " + ", ".join(tabs(cfg)))
-    return sf
+def _sf_param() -> str | None:
+    """The ``sf`` filter of the run list: any decimal scale factor (one with no runs lists nothing)."""
+    sf = request.args.get("sf")
+    if sf and not SCALE_FACTOR_RE.fullmatch(sf):
+        raise _BadBody("sf: a decimal scale factor")
+    return sf or None
+
+
+def _select_tab(tab_list: list[dict]) -> dict:
+    """The tab the board request names: ``sf`` (default the first tab) and ``codec`` (default snappy)."""
+    sf = request.args.get("sf")
+    codec = request.args.get("codec") or (DEFAULT_CODEC if sf else tab_list[0]["codec"])
+    sf = sf or tab_list[0]["sf"]
+    for tab in tab_list:
+        if (tab["sf"], tab["codec"]) == (sf, codec):
+            return tab
+    raise _BadBody("sf, codec: one of " + ", ".join(_capped([t["label"] for t in tab_list], PREVIEW_ITEMS)))
 
 
 def _filter(defaults: dict) -> dict:
@@ -354,7 +367,7 @@ def api_runs():
     """Every run of a tab (or all tabs), filtered like the board but with no
     default filter: an absent parameter means any."""
     cfg = _cfg()
-    rows = store_for(cfg).list_runs(sf=_sf(cfg, None),
+    rows = store_for(cfg).list_runs(sf=_sf_param(),
                                     include_withdrawn=request.args.get("include_withdrawn") == "1")
     return jsonify([_run_summary(r) for r in _filtered(rows, _filter({}), _tokens())])
 
@@ -406,7 +419,9 @@ def _hero(row: dict | None) -> dict | None:
 @bp.get("/api/leaderboard/board")
 def api_board():
     cfg = _cfg()
-    sf = _sf(cfg, tabs(cfg)[0])
+    all_rows = store_for(cfg).list_runs()
+    tab_list = tabs(cfg, [r["derived"] for r in all_rows])
+    tab = _select_tab(tab_list)
     metric = request.args.get("metric") or "total"
     if metric not in aggregate.METRICS:
         return _errors(400, "metric: total or q1..q22")
@@ -417,7 +432,10 @@ def api_board():
     if top not in TOP_CHOICES:
         top = 10
     flt, tokens = _filter(default_filter(cfg)), _tokens()
-    rows = store_for(cfg).list_runs(sf=sf)
+    # The tab consumes the codec: it is not a filter of the board.
+    for params in (flt, tokens):
+        params.pop("codec", None)
+    rows = [r for r in all_rows if aggregate.tab_of(r["derived"]) == (tab["sf"], tab["codec"])]
     chosen = _filtered(rows, flt, tokens)
     ranked = aggregate.rank(chosen, metric)
     facets, facets_truncated = _facets(_facet_values(rows))
@@ -432,8 +450,9 @@ def api_board():
     # an empty board does not hide them. list_runs left out the withdrawn ones.
     shared = [r for r in chosen if r["derived"]["config"]["application_mode"] == "shared"]
     return jsonify({
-        "sf": sf,
-        "tabs": tabs(cfg),
+        "sf": tab["sf"],
+        "codec": tab["codec"],
+        "tabs": tab_list,
         "metric": metric,
         "top": top,
         "filter": flt,
@@ -523,9 +542,9 @@ def _repro(manifest: dict, stored: dict) -> dict:
             "notes": notes}
 
 
-def _settings(run: dict, field: str) -> dict:
+def _settings(run: dict, field: str, limit: int = PREVIEW_ITEMS) -> dict:
     """``run[field]`` (A5 ``spark_conf`` / ``spark_conf_readback``) as the run page lists it: ``recorded`` is False
-    when the field is absent (a manifest from before A5), ``items`` holds the first PREVIEW_ITEMS (key, value) pairs
+    when the field is absent (a manifest from before A5), ``items`` holds the first ``limit`` (key, value) pairs
     and ``count`` all of them; ``items`` is None for a stored value that is not an object (accepted before A5
     validated it)."""
     if field not in run:
@@ -533,7 +552,42 @@ def _settings(run: dict, field: str) -> dict:
     value = run[field]
     if not isinstance(value, dict):
         return {"recorded": True, "items": None, "count": 0}
-    return {"recorded": True, "items": list(itertools.islice(value.items(), PREVIEW_ITEMS)), "count": len(value)}
+    return {"recorded": True, "items": list(itertools.islice(value.items(), limit)), "count": len(value)}
+
+
+def _effective_maps(manifest: dict) -> dict[str, dict]:
+    """A7: ``{"<field> (<engine>)": map}``, each engine's recorded ``spark_conf_effective`` / ``xflare_parameters_effective``
+    from its first application that has one, completed repeats first. Values that are not objects are skipped."""
+    repeats = sorted(manifest["repeats"], key=lambda r: (r["status"] != "completed", r["index"]))
+    applications = [app for rep in repeats if isinstance(rep.get("applications"), list)
+                    for app in rep["applications"] if isinstance(app, dict)]
+    maps = {}
+    for field in APPLICATION_SETTINGS:
+        for engine in manifest["run"]["engines"]:
+            found = next((app[field] for app in applications
+                          if app.get("engine") == engine and isinstance(app.get(field), dict)), None)
+            if found is not None:
+                maps[f"{field} ({engine})"] = found
+    return maps
+
+
+def _map_diff_rows(maps: list[dict[str, dict]]) -> list[dict]:
+    """Compare rows, one per setting whose value differs among the runs that recorded that map. A map is one long
+    cell otherwise, and the cell cut would hide the key that differs."""
+    rows = []
+    for label in dict.fromkeys(label for run_maps in maps for label in run_maps):
+        recorded = [run_maps[label] for run_maps in maps if label in run_maps]
+        if len(recorded) < 2:
+            continue
+        keys = sorted({key for m in recorded for key in m})
+        differing = [k for k in keys if len({_cmp_key(m.get(k, _ABSENT)) for m in recorded}) > 1]
+        for key in differing[:PREVIEW_ITEMS]:
+            values = [str(run_maps[label].get(key, "—")) if label in run_maps else "—" for run_maps in maps]
+            rows.append({"key": f"{label} · {key}", "values": values, "differs": True})
+        if len(differing) > PREVIEW_ITEMS:
+            rows.append({"key": f"{label} · (more)", "differs": True,
+                         "values": [f"{len(differing) - PREVIEW_ITEMS} more — see raw JSON"] * len(maps)})
+    return rows
 
 
 def _repeat_matrix(repeats: list[dict]) -> list[dict]:
@@ -581,6 +635,8 @@ def run_page(run_id):
         repro=_repro(manifest, d["repro"]),
         spark_conf=_settings(manifest["run"], "spark_conf"),
         spark_conf_readback=_settings(manifest["run"], "spark_conf_readback"),
+        effective=[(label, _settings({label: m}, label, EFFECTIVE_ITEMS))
+                   for label, m in _effective_maps(manifest).items()],
     )
 
 
@@ -609,7 +665,7 @@ def _settings_cell(run: dict, field: str) -> tuple:
     return "; ".join(f"{k}={'[…]' if isinstance(x, (dict, list)) else x}" for k, x in sorted(value.items())), value
 
 
-def _params(manifest: dict, meta: dict, derived: dict) -> dict:
+def _params(manifest: dict, meta: dict, derived: dict, maps: dict[str, dict]) -> dict:
     """Flat key -> (text, full value) view of what a run ran with, for the compare diff; the full value is the
     text except for the Spark settings maps (``_settings_cell``). The application mode and the Spark settings state
     are the interpreted ones from ``derived`` (a stored mode outside the enum shows as "-")."""
@@ -623,6 +679,7 @@ def _params(manifest: dict, meta: dict, derived: dict) -> dict:
         "spark_conf (state)": derived["config"]["spark_conf"],
         "spark_conf.source": {"field": "run.spark_conf", "argv": "argv (no run.spark_conf)"}.get(derived["spark_conf_source"]),
         **{f"{field} (settings)": _settings_cell(run, field) for field in ("spark_conf", "spark_conf_readback")},
+        **{f"{label} (keys)": f"{len(m)} keys" for label, m in maps.items()},
         "queries": ",".join(str(q) for q in run["queries"]),
         "repeat_requested": run["repeat_requested"], "record_answers": run["record_answers"],
         **{f"resources.{k}": res.get(k) for k in ("executors", "executor_cores", "offheap",
@@ -664,8 +721,10 @@ def compare_page():
         row = store.get(run_id)
         if row is None:
             abort(404)
-        runs.append({"row": row, "d": row["derived"], "summary": _run_summary(row),
-                     "params": _params(store.load_manifest(run_id), row["meta"] or {}, row["derived"])})
+        manifest = store.load_manifest(run_id)
+        maps = _effective_maps(manifest)
+        runs.append({"row": row, "d": row["derived"], "summary": _run_summary(row), "maps": maps,
+                     "params": _params(manifest, row["meta"] or {}, row["derived"], maps)})
     base = runs[0]["d"]
 
     def delta(v, b):
@@ -693,6 +752,7 @@ def compare_page():
         # Compared in full; the template's v() cuts the texts for display.
         params.append({"key": k, "values": [t for t, _ in cells],
                        "differs": len({_cmp_key(full) for _, full in cells}) > 1})
+    params += _map_diff_rows([r["maps"] for r in runs])
     return render_template(
         "leaderboard_compare.html",
         benchmark=cfg, runs=runs, queries=queries, totals=totals,

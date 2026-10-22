@@ -153,6 +153,20 @@
             "failed",
             "unknown"
           ]
+        },
+        "spark_conf_effective": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional string map of the session's effective Spark settings at the start of this application (amendment A7); absent means not recorded."
+        },
+        "xflare_parameters_effective": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional string map of the engine's effective parameters, printed by its first admitted query (amendment A7); absent means not recorded."
         }
       }
     }

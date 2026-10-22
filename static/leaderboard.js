@@ -144,8 +144,9 @@
     const FILTER_KEYS = FACET_KEYS.flatMap(k => [k, `${k}_t`]).concat(['from', 'to']);
     const state = {
       // Empty until the first answer: the server picks the first tab and
-      // sends the tab list (config.yaml's leaderboard.tabs, one source for page and API).
+      // sends the tab list ({sf, codec, label}: the pinned config.yaml tabs, then the stored runs' own).
       sf: params.get('sf') || '',
+      codec: params.get('codec') || '',
       tabs: [],
       metric: params.get('metric') || 'total',
       top: params.get('top') || '10',
@@ -172,8 +173,9 @@
     function renderTabs() {
       const sfHost = document.getElementById('lb-sf-tabs');
       sfHost.replaceChildren();
-      for (const sf of state.tabs) {
-        tabButton(sfHost, `SF-${sf}`, sf === state.sf, () => { state.sf = sf; load(); });
+      for (const t of state.tabs) {
+        tabButton(sfHost, `SF-${t.label}`, t.sf === state.sf && t.codec === state.codec,
+                  () => { state.sf = t.sf; state.codec = t.codec; load(); });
       }
       const mHost = document.getElementById('lb-metric-tabs');
       mHost.replaceChildren();
@@ -186,6 +188,7 @@
     function query() {
       const q = new URLSearchParams({ metric: state.metric, top: state.top });
       if (state.sf) q.set('sf', state.sf);
+      if (state.codec) q.set('codec', state.codec);
       for (const [k, v] of Object.entries(state.filter)) q.set(k, v);
       return q;
     }
@@ -303,7 +306,7 @@
       if (!data.rows.length) {
         const tr = tbody.insertRow();
         const td = tr.insertCell();
-        td.colSpan = 13;
+        td.colSpan = 14;
         td.className = 'lb-empty';
         td.textContent = '이 필터에 순위에 오를 run 이 없습니다.' +
           (data.shared_count ? ' shared application run 은 순위에 오르지 않습니다 — 아래 목록을 보세요.' : '');
@@ -323,6 +326,7 @@
                                           [fmtX(r.value.speedup), 'num'], [`x${r.repeats}`, 'num'],
                                           [compactConfig(r.config), null, configText(r.config)],
                                           [r.config.application_mode ?? '—', null],
+                                          [(r.config.engines ?? '—').replace(',', ', '), null],
                                           [fmtDevices(r), null],
                                           [r.submitter ?? '—', null]]) {
           const td = tr.insertCell();
@@ -392,8 +396,8 @@
       }
       if (mine !== generation) return;
       if (!resp.ok) {
-        // An unknown ?sf= from a shared link: forget it so the tabs come back.
-        if (resp.status === 400 && state.sf && !state.tabs.length) { state.sf = ''; load(); return; }
+        // An unknown ?sf= / ?codec= from a shared link: forget them so the tabs come back.
+        if (resp.status === 400 && state.sf && !state.tabs.length) { state.sf = ''; state.codec = ''; load(); return; }
         showStatus((data.errors || []).join('; ') || `HTTP ${resp.status}`);
         renderHero(null);
         renderBoard({ metric: state.metric, eligible_count: 0, top: state.top, rows: [] });
@@ -401,6 +405,7 @@
       }
       showStatus('');
       state.sf = data.sf;
+      state.codec = data.codec;
       state.tabs = data.tabs;
       renderTabs();
       renderFilters(data);
