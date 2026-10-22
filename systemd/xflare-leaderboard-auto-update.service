@@ -1,0 +1,16 @@
+[Unit]
+Description=Deploy origin/main to the xflare leaderboard after a self-check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sw-devops
+# A oneshot has no start timeout by default; a hung self-check would hold every later tick.
+TimeoutStartSec=15min
+# The self-check runs a new commit's tests: keep their accidental opens off the live data and the shared /tmp. This
+# is not a boundary against hostile code (sw-devops keeps its other access, and a deployed commit runs as sw-devops
+# anyway). The restart goes through sudo to PID 1, so the service itself is not confined by this.
+InaccessiblePaths=-/home/sw-devops/data/xflare_leaderboard
+PrivateTmp=yes
+ExecStart=/home/sw-devops/xflare-leaderboard/systemd/xflare-leaderboard-auto-update.sh
