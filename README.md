@@ -14,7 +14,7 @@ A small Flask service that ranks hand-run `spark-tpch.sh` batches people upload.
 | `leaderboard/store.py` | SQLite (WAL) + raw manifest files |
 | `leaderboard/web.py` | Blueprint: API and pages |
 | `leaderboard/display.py` | display budgets (cut lengths, list and facet sizes) and the helpers that apply them |
-| `leaderboard/backup.py`, `systemd/` | the service unit; an optional daily NAS backup and its restore (not installed on server 60) |
+| `leaderboard/backup.py`, `systemd/` | the service unit; the auto-updater (Deploy runbook); an optional daily NAS backup and its restore (the backup is not installed on server 60) |
 | `leaderboard/fixtures/` | contract fixtures; `make_fixtures.py` regenerates them |
 | `templates/`, `static/` | the board, run and compare pages |
 
@@ -30,9 +30,20 @@ XFLARE_LEADERBOARD_DATA=/tmp/lb-data python3 app.py --host 127.0.0.1 --port 8894
 - Settings come from `config.yaml`, or the file named by `XFLARE_LEADERBOARD_CONFIG` or `--config`.
   `--host` / `--port` override `server.bind` / `server.port` (default `0.0.0.0:8894`).
 - Data dir: `XFLARE_LEADERBOARD_DATA` > `leaderboard.storage.data_dir`. The service never creates it (see Storage).
-- Tests: `python3 leaderboard/test_leaderboard.py` (runs `test_leaderboard_web.py` and `test_leaderboard_backup.py`
-  too; each also runs on its own). The page-script tests need `node`, the reproduce-script tests `bash`; without
-  them those tests fail, naming the missing runtime.
+- Tests: `python3 leaderboard/test_leaderboard.py` (runs `test_leaderboard_web.py`, `test_leaderboard_backup.py` and
+  `test_leaderboard_auto_update.py` too; each also runs on its own). The page-script tests need `node` ≥ 14, the
+  reproduce-script tests `bash`, the auto-updater tests `bash` and `git`; without them those tests fail, naming the
+  missing runtime. `XFLARE_LEADERBOARD_SKIP_NODE_TESTS=1` skips the page-script tests instead; only the auto-updater's
+  self-check sets it.
+
+**Before every merge to main, run the page-script tests by hand.** Nothing else runs them: there is no CI, and the
+server's auto-updater skips them (server 60's node is 12) and deploys what passes the rest. A page-script regression
+merged without this run goes live unattended. As a non-root user, on a machine with node ≥ 14:
+```
+node --version                                                              # v14 or later
+env -u XFLARE_LEADERBOARD_SKIP_NODE_TESTS -u XFLARE_LEADERBOARD_CONFIG python3 leaderboard/test_leaderboard.py
+```
+It must end in a plain `OK`. `skipped=` in that line means some tests did not run: never set the skip variable here.
 
 ## Payload contract
 
@@ -373,11 +384,13 @@ backup, in order; any failure exits 1 with one line on stderr and leaves no comp
 restore verifies the generation first (`BACKUP.json` present, DB sha256 matches, `integrity_check`, every raw hash)
 and writes nothing if any check fails. It then copies `raw/` and, last, the DB, so an interrupted restore never
 leaves a dir the service would open as a partial leaderboard (without the DB it would start an empty one). The
-target must be empty or absent. To restore the live data: stop the service, restore into a new dir, move the old dir
-aside, move the new one into place, start the service.
+target must be empty or absent. To restore the live data: stop the auto-update timer and let a running tick end
+(Deploy runbook: Automatic updates), stop the service, restore into a new dir, move the old dir aside, move the new
+one into place, start the service, start the timer.
 
-The units are in `systemd/`: `xflare-leaderboard.service` (the service) and, for the optional backup,
-`xflare-leaderboard-backup.{service,timer}` (daily 03:30 host time + up to 10 min jitter, `Persistent=true`, oneshot).
+The service and backup units are in `systemd/`: `xflare-leaderboard.service` (the service) and, for the optional
+backup, `xflare-leaderboard-backup.{service,timer}` (daily 03:30 host time + up to 10 min jitter, `Persistent=true`,
+oneshot).
 All run as `sw-devops` with `/usr/bin/python3` from `/home/sw-devops/xflare-leaderboard`.
 
 ## Deploy runbook (server 60, done by a person)
@@ -389,7 +402,9 @@ The service runs on its own port next to anything else on the host and shares no
 Server 60 as checked at the first deploy (2026-10-20): Ubuntu 22.04.5; `/usr/bin/python3` 3.10.12 with Flask 2.3.3,
 Werkzeug 3.1.3, PyYAML 6.0.1 and SQLite 3.37.2; port 8894 free; ufw inactive and `INPUT ACCEPT` (no firewall
 change needed); `/home` is local ext4. Re-run step 0 before a fresh install on another host; if port 8894 or the
-checkout path must differ there, change `server.port` in `config.yaml` or the paths in `systemd/` before step 4.
+checkout path must differ there, change `server.port` in `config.yaml` or the paths in `systemd/` before step 4, and
+leave that host's automatic updates off (step 7): the updater stops on a checkout with local edits or commits, and a
+change committed to main reaches every host that follows main (`test_config_yaml` also pins the port).
 
 0. Pre-checks (read-only):
    ```
@@ -456,24 +471,88 @@ checkout path must differ there, change `server.port` in `config.yaml` or the pa
    (Syntax as the jail tooling documents it; confirm with `jail egress-policy --help`.) Check from inside the jail:
    `curl -sS -o /dev/null -w '%{http_code}\n' http://192.168.97.60:8894/` prints `302`; `000` means no HTTP answer
    — egress still closed, or the service down — and curl's error line says which.
+7. Turn on automatic updates (below).
 
-**Upgrade.** Record the running SHA, pull, restart, and run step 5's status loop and dry run (its `/runs` and
-raw-file counts apply to a fresh install only):
+**Automatic updates.** `xflare-leaderboard-auto-update.timer` runs
+[`systemd/xflare-leaderboard-auto-update.sh`](systemd/xflare-leaderboard-auto-update.sh) as `sw-devops` 2 min after
+boot and then every 10 min (+ up to 60 s jitter). A tick:
+1. Leaves a checkout off branch `main` alone (exit 0): that is a version pinned by hand (see Upgrade). Stops (exit 1)
+   on a tracked edit or an untracked file in the checkout (files `.gitignore` covers, such as `*.pyc`, are not
+   checked).
+2. Fetches `origin/main`. When the checkout is on it and it is recorded as deployed (the ref
+   `refs/auto-update/deployed` in the checkout), prints `already on <sha>` and exits. Stops (exit 1) when the checkout
+   holds a commit `origin/main` lacks.
+3. Runs `leaderboard/test_leaderboard.py` with `/usr/bin/python3` on a `git archive` of `origin/main` in a temp dir,
+   with `XFLARE_LEADERBOARD_DATA` pointed at a scratch dir and the page-script tests skipped: server 60's node is 12,
+   and the page script runs in browsers, not on the server. They must be run by hand before every merge (Run
+   locally). About 80 s on server 60. A failure prints the log's tail and leaves the checkout and the
+   service as they are; the next tick tries again.
+4. Checks the checkout again (a pin made meanwhile holds), fast-forwards it, runs
+   `sudo -n /usr/bin/systemctl restart xflare-leaderboard`, and gives
+   `http://127.0.0.1:<server.port>/api/leaderboard/board` 30 s to answer 2xx. Only then is the commit recorded as
+   deployed. A failed restart or no answer fails the tick, and the next tick restarts again; nothing is rolled back.
+   That probe stands in for step 5: the board API is the route that reads the live data, and the self-check ran the
+   others.
+
+The unit gives a tick 15 min, hides the data dir from it (`InaccessiblePaths=`) and gives it its own `/tmp`. That keeps
+a test's accidental opens off the live data; it is no boundary against hostile code, which main is trusted not to hold:
+a deployed commit runs as `sw-devops` anyway. A settings change is a commit to `config.yaml` like any other. A restart
+drops requests in flight (the client sees a connection error and resends the same envelope). The updater does not
+install systemd units, Python packages or node, and does not back up the data: a commit that changes a unit file or
+`requirements.txt` still needs those steps by hand (a change to the script itself takes effect on the next tick).
+
+Install, once. On an existing install, first pull the checkout (Upgrade) so it has these files. `sw-devops` must be able
+to run that restart through `sudo -n`; on server 60 it already has passwordless sudo. On a host where it has not, add a
+rule for that one command first:
+```
+t=$(mktemp) && printf '%s\n' 'sw-devops ALL=(root) NOPASSWD: /usr/bin/systemctl restart xflare-leaderboard' >"$t" &&
+  sudo visudo -cf "$t" && sudo install -m 440 -o root -g root "$t" /etc/sudoers.d/xflare-leaderboard-auto-update; rm -f "$t"
+```
+Then:
+```
+sudo -u sw-devops sudo -n -l /usr/bin/systemctl restart xflare-leaderboard   # prints the command back = allowed
+sudo cp /home/sw-devops/xflare-leaderboard/systemd/xflare-leaderboard-auto-update.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now xflare-leaderboard-auto-update.timer
+journalctl -u xflare-leaderboard-auto-update -f     # first tick: "deploying …", then "restarted on <sha>"; Ctrl-C
+systemctl list-timers xflare-leaderboard-auto-update.timer
+```
+Nothing is recorded as deployed yet, so the first tick, which starts right away, runs the whole path on the current
+main, one restart included. Between ticks the updater's service is `inactive`, or `failed` after a failed tick until
+a later one succeeds; the journal says why.
+
+Before a change by hand (a pin, a restore, a rollback), stop the timer and let a running tick end, and start the timer
+again afterwards:
+```
+sudo systemctl stop xflare-leaderboard-auto-update.timer
+systemctl is-active xflare-leaderboard-auto-update.service     # wait while "activating" (about 2 min, 15 at most)
+sudo systemctl start xflare-leaderboard-auto-update.timer      # when done
+```
+
+**Upgrade.** With the timer on, a merge to main reaches the server within about 15 min and this is not needed (an
+upgrade by hand then gets checked and restarted once more by the next tick). Without it: record the running SHA, pull,
+restart, and run step 5's status loop and dry run (its `/runs` and raw-file counts apply to a fresh install only):
 ```
 sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard rev-parse HEAD      # keep it: the version to go back to
 sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard pull --ff-only
 sudo systemctl restart xflare-leaderboard
 ```
-To go back a version: `sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard checkout <recorded SHA>` and
-`sudo systemctl restart xflare-leaderboard`. That leaves the checkout on a detached HEAD, so the next upgrade runs
-`sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard checkout main` after recording the SHA and before the
-pull (record first: the SHA to keep is the one running, not main's).
+To go back a version: `sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard checkout <recorded SHA>`,
+`sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard update-ref -d refs/auto-update/deployed` (the
+auto-updater's deploy record; harmless without it) and `sudo systemctl restart xflare-leaderboard`. That leaves the
+checkout on a detached HEAD, so the next upgrade runs
+`sudo -u sw-devops git -C /home/sw-devops/xflare-leaderboard checkout main` after recording the SHA and before the pull
+(record first: the SHA to keep is the one running, not main's). With the timer on, stop it first (above); the detached
+checkout then pins the version, ticks leave it alone, and the timer can run again. To unpin, `checkout main`: with the
+record gone, the next tick restarts the service on main.
 
-**Rollback.** `sudo systemctl disable --now xflare-leaderboard` (and `xflare-leaderboard-backup.timer` if the
-backup was turned on). Nothing else on the host depends on the service. Leave `/home/sw-devops/data/xflare_leaderboard`
-in place so a re-deploy picks it up. To remove it entirely, also delete `/etc/systemd/system/xflare-leaderboard.service`
-and any `xflare-leaderboard-backup.{service,timer}` there (then `sudo systemctl daemon-reload`), the checkout, the
-data dir, and the deploy key (GitHub Deploy keys, the `Host github-xflare-leaderboard` block, the key files).
+**Rollback.** `sudo systemctl disable --now xflare-leaderboard-auto-update.timer`, wait until
+`xflare-leaderboard-auto-update.service` is no longer `activating` (above), then
+`sudo systemctl disable --now xflare-leaderboard` (and `xflare-leaderboard-backup.timer` if the backup was turned on).
+Nothing else on the host depends on the service. Leave `/home/sw-devops/data/xflare_leaderboard` in place so a re-deploy
+picks it up. To remove it entirely, also delete `/etc/systemd/system/xflare-leaderboard.service`,
+`xflare-leaderboard-auto-update.{service,timer}` and any `xflare-leaderboard-backup.{service,timer}` there (then
+`sudo systemctl daemon-reload`), `/etc/sudoers.d/xflare-leaderboard-auto-update` if it was added, the checkout, the data
+dir, and the deploy key (GitHub Deploy keys, the `Host github-xflare-leaderboard` block, the key files).
 
 **Turning the backup on later** (create the NAS destination once, as `sw-devops`, while the share is mounted). If
 `findmnt` reports a different TARGET than `/mnt/sw_nas_ext`, edit `--mount` in the installed unit before enabling it:

@@ -8,7 +8,8 @@ hostile strings staying inert on every page, storage down → 503 on the storage
 filter + hero from one run, two concurrent POSTs, the reproduce script, and the display budgets (cut scalars,
 capped lists and facets, diff budget) that keep any accepted upload's pages small.
 The page-script checks run leaderboard.js under node with a minimal DOM stub, and the reproduce-script checks run
-it in bash; without node or bash they fail, naming the missing runtime.
+it in bash; without node or bash they fail, naming the missing runtime (XFLARE_LEADERBOARD_SKIP_NODE_TESTS=1 skips the
+page-script checks instead, for the auto-updater's self-check).
 """
 from __future__ import annotations
 
@@ -751,11 +752,25 @@ setTimeout(async () => {
 """
 
 
-def run_page_js(page: str, ids=None, data=None, fetch=None, slots=None, click=None, click_class=None,
-                secure=False, check=0) -> dict:
+SKIP_NODE_ENV = "XFLARE_LEADERBOARD_SKIP_NODE_TESTS"
+
+
+def page_script_node() -> str:
+    """node for the page-script tests; missing node fails them. The auto-updater's self-check sets SKIP_NODE_ENV=1 to
+    skip them instead: the page script runs in browsers, so the server's node (12 on Ubuntu 22.04, too old for `??`)
+    says nothing about it. They must pass on a machine with node >= 14 before a merge (README: Automatic updates).
+    A test that also checks the server keeps its page-script part in a subTest, so those checks still run."""
+    if os.environ.get(SKIP_NODE_ENV) == "1":
+        raise unittest.SkipTest(f"{SKIP_NODE_ENV}=1")
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node not installed: the page-script tests need it (README: Run locally)")
+    return node
+
+
+def run_page_js(page: str, ids=None, data=None, fetch=None, slots=None, click=None, click_class=None,
+                secure=False, check=0) -> dict:
+    node = page_script_node()
     cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "page": page, "ids": ids,
            "data": data or {}, "fetch": fetch, "slots": slots, "click": click,
            "clickClass": click_class, "secure": secure, "check": check}
@@ -1062,15 +1077,17 @@ class TestHeroFallback(WebCase):
         page_data = self.page_data()
         board = self.c.get("/api/leaderboard/board").get_data(as_text=True)
         label = json.loads(board)["hero"]["config_label"]
-        out = run_page_js("board", data=page_data, fetch=board)
-        self.assertEqual(out["text"]["hero-notice"], "no 4×6 result yet")
-        self.assertEqual(out["text"]["hero-config"], label)
-        other = self.c.get("/api/leaderboard/board?executors=8").get_data(as_text=True)
-        self.assertEqual(run_page_js("board", data=page_data, fetch=other)["text"]["hero-notice"],
-                         "no result for this filter yet")
+        with self.subTest("page script"):
+            out = run_page_js("board", data=page_data, fetch=board)
+            self.assertEqual(out["text"]["hero-notice"], "no 4×6 result yet")
+            self.assertEqual(out["text"]["hero-config"], label)
+            other = self.c.get("/api/leaderboard/board?executors=8").get_data(as_text=True)
+            self.assertEqual(run_page_js("board", data=page_data, fetch=other)["text"]["hero-notice"],
+                             "no result for this filter yet")
         self.submit(elapsed=flat_elapsed(5000))
         normal = self.c.get("/api/leaderboard/board").get_data(as_text=True)
-        self.assertEqual(run_page_js("board", data=page_data, fetch=normal)["text"]["hero-notice"], "")
+        with self.subTest("page script"):
+            self.assertEqual(run_page_js("board", data=page_data, fetch=normal)["text"]["hero-notice"], "")
         html = self.c.get(LB).get_data(as_text=True)
         self.assertLess(html.index('id="hero-notice"'), html.index('id="hero-body"'))
 
@@ -1166,9 +1183,7 @@ class TestBoardScript(WebCase):
     """The board page script under controlled timing: stale answers never win, one log toggle drives the chart."""
 
     def drive(self, steps, responses):
-        node = shutil.which("node")
-        if node is None:
-            raise AssertionError("node not installed: the page-script tests need it (README: Run locally)")
+        node = page_script_node()
         cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "data": self.page_data(), "steps": steps,
                "responses": responses}
         out = subprocess.run([node, "-e", _BOARD_HARNESS], input=json.dumps(cfg), capture_output=True, text=True,
@@ -1526,18 +1541,20 @@ class TestReproAndBoardLabels(WebCase):
         m, page = self.run_with_argv(self.ARGV)
         row = self.board()["rows"][0]
         self.assertEqual(row["repro"], self.script_of(page))          # the board offers the run page's script
-        out = run_page_js("board", data=self.page_data(), click_class="lb-copy",
-                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
-        self.assertEqual((out["execs"], out["clipboard"]), (["copy"], []))
-        self.assertIn("copied", out["texts"])
-        self.assertIn(row["repro"], out["titles"])
+        with self.subTest("page script"):
+            out = run_page_js("board", data=self.page_data(), click_class="lb-copy",
+                              fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+            self.assertEqual((out["execs"], out["clipboard"]), (["copy"], []))
+            self.assertIn("copied", out["texts"])
+            self.assertIn(row["repro"], out["titles"])
         # a script past the budget is not offered; the cell points at the run page
         self.run_with_argv(["--download-logs"] * (repro.MAX_ARGS + 1), elapsed=flat_elapsed(500))
         long_row = self.board()["rows"][0]
         self.assertIsNone(long_row["repro"])
-        out = run_page_js("board", data=self.page_data(),
-                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
-        self.assertIn("run page", out["texts"])
+        with self.subTest("page script"):
+            out = run_page_js("board", data=self.page_data(),
+                              fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+            self.assertIn("run page", out["texts"])
 
 
 class TestLegacyApplicationMode(WebCase):
@@ -1924,35 +1941,38 @@ class TestSharedUnranked(WebCase):
         data = self.page_data()
         self.assertEqual(json.loads(data["lb-page-data"])["badge_class"][aggregate.SHARED_BADGE], "b-warn")
 
-        out = run_page_js("board", data=data, fetch=json.dumps(b))
-        self.assertFalse(out["hidden"]["hero-empty"])
-        self.assertTrue(out["hidden"]["hero-body"])
-        self.assertTrue(out["hidden"]["hero-link"])
-        self.assertTrue(out["hidden"]["hero-notice"])
-        self.assertFalse(out["hidden"]["lb-shared"])
-        self.assertTrue(out["text"]["lb-board-note"].startswith("Total: 0 eligible run(s) under the filter"))
-        self.assertIn("shared application run 2개는 이 필터에 해당하지만 순위에 오르지 않습니다",
-                      out["text"]["lb-shared-note"])
-        self.assertIn("이 필터에 순위에 오를 run 이 없습니다. shared application run 은 순위에 오르지 않습니다 — "
-                      "아래 목록을 보세요.", out["texts"])
-        for run_id in ids:
-            self.assertIn(f"{LB}/run/{run_id}", out["hrefs"])
+        with self.subTest("page script"):
+            out = run_page_js("board", data=data, fetch=json.dumps(b))
+            self.assertFalse(out["hidden"]["hero-empty"])
+            self.assertTrue(out["hidden"]["hero-body"])
+            self.assertTrue(out["hidden"]["hero-link"])
+            self.assertTrue(out["hidden"]["hero-notice"])
+            self.assertFalse(out["hidden"]["lb-shared"])
+            self.assertTrue(out["text"]["lb-board-note"].startswith("Total: 0 eligible run(s) under the filter"))
+            self.assertIn("shared application run 2개는 이 필터에 해당하지만 순위에 오르지 않습니다",
+                          out["text"]["lb-shared-note"])
+            self.assertIn("이 필터에 순위에 오를 run 이 없습니다. shared application run 은 순위에 오르지 않습니다 — "
+                          "아래 목록을 보세요.", out["texts"])
+            for run_id in ids:
+                self.assertIn(f"{LB}/run/{run_id}", out["hrefs"])
 
         empty = self.board("?sf=1000")
         self.assertEqual((empty["hero"], empty["rows"], empty["shared_count"], empty["shared_runs"]),
                          (None, [], 0, []))
-        out = run_page_js("board", data=data, fetch=json.dumps(empty))
-        self.assertFalse(out["hidden"]["hero-empty"])
-        self.assertTrue(out["hidden"]["lb-shared"])
-        self.assertIn("이 필터에 순위에 오를 run 이 없습니다.", out["texts"])
+        with self.subTest("page script"):
+            out = run_page_js("board", data=data, fetch=json.dumps(empty))
+            self.assertFalse(out["hidden"]["hero-empty"])
+            self.assertTrue(out["hidden"]["lb-shared"])
+            self.assertIn("이 필터에 순위에 오를 run 이 없습니다.", out["texts"])
 
         # a shared list past `top` names the first `top` and says how many there are
         for _ in range(5):
             self.post(build_envelope(self.shared()))
         b = self.board("?top=5")
         self.assertEqual((b["shared_count"], len(b["shared_runs"])), (7, 5))
-        out = run_page_js("board", data=data, fetch=json.dumps(b))
-        self.assertIn("처음 5개:", out["text"]["lb-shared-note"])
+        with self.subTest("page script"):
+            out = run_page_js("board", data=data, fetch=json.dumps(b))
+            self.assertIn("처음 5개:", out["text"]["lb-shared-note"])
 
         for path in (f"{LB}", f"{LB}/run/{ids[0]}", f"{LB}/compare?runs={ids[0]},{ids[1]}"):
             self.assertEqual(self.c.get(path).status_code, 200, path)
@@ -2072,13 +2092,14 @@ class TestSparkConf(WebCase):
         self.assertNotIn("spark conf", rows[1]["badges"])
         self.assertTrue(rows[0]["config_label"].endswith(" +conf"))
         self.assertNotIn("+conf", rows[1]["config_label"])
-        out = run_page_js("board", data=self.page_data(),
-                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
-        badge = [c for t, c in zip(out["texts"], out["classes"]) if t == "spark conf"]
-        self.assertEqual(badge[:1], ["lb-badge b-warn"])                     # the board row's badge (hero repeats it)
-        self.assertEqual(set(badge), {"lb-badge b-warn"})
-        self.assertIn("4×6 64g +conf", out["texts"])
-        self.assertIn("4×6 64g", out["texts"])
+        with self.subTest("page script"):
+            out = run_page_js("board", data=self.page_data(),
+                              fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+            badge = [c for t, c in zip(out["texts"], out["classes"]) if t == "spark conf"]
+            self.assertEqual(badge[:1], ["lb-badge b-warn"])                 # the board row's badge (hero repeats it)
+            self.assertEqual(set(badge), {"lb-badge b-warn"})
+            self.assertIn("4×6 64g +conf", out["texts"])
+            self.assertIn("4×6 64g", out["texts"])
         page = self.page(custom["run_id"])
         self.assertIn('<span class="lb-badge b-warn">spark conf</span>', page)   # the run page colours it alike
         self.assertIn(" +conf</h3>", page)
@@ -2296,9 +2317,10 @@ class TestTabs(WebCase):
         self.assertEqual([r["run_id"] for r in self.board("?engines=xflare")["rows"]], [alone])
         self.assertEqual([o["label"] for o in b["facets"]["engines"]], ["velox,xflare", "xflare"])
         self.assertIn("<th>Engines</th>", self.c.get(LB).get_data(as_text=True))
-        out = run_page_js("board", data=self.page_data(), fetch=json.dumps(b))
-        self.assertIn("velox, xflare", out["texts"])
-        self.assertIn("xflare", out["texts"])
+        with self.subTest("page script"):
+            out = run_page_js("board", data=self.page_data(), fetch=json.dumps(b))
+            self.assertIn("velox, xflare", out["texts"])
+            self.assertIn("xflare", out["texts"])
         self.assertEqual(b["rows"][1]["value"]["velox_ms"], None)
 
     def test_dry_run_says_which_runs_create_their_tab(self):

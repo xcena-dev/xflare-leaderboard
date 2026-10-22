@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Leaderboard tests (stdlib unittest). Run: python3 leaderboard/test_leaderboard.py
 
-The single runner: it also loads test_leaderboard_web.py and test_leaderboard_backup.py (both required).
+The single runner: it also loads test_leaderboard_web.py, test_leaderboard_backup.py and
+test_leaderboard_auto_update.py (all required).
 Covers validator accept/reject, eligibility, medians/ordering/hero, and Store identity, withdraw and crash safety.
 """
 from __future__ import annotations
@@ -64,8 +65,8 @@ class Fixtures(unittest.TestCase):
             self.assertEqual((FIX / name).read_bytes(), data, f"{name} stale: rerun make_fixtures.py")
 
 
-    def test_runner_requires_both_suites(self):
-        """A missing web/backup suite fails the single runner instead of being skipped."""
+    def test_runner_requires_every_suite(self):
+        """A missing web/backup/auto-update suite fails the single runner instead of being skipped."""
         with mock.patch.dict(globals(), {"SUITES": ("test_leaderboard_missing",)}):
             with self.assertRaises(FileNotFoundError):
                 load_tests(unittest.TestLoader(), unittest.TestSuite(), None)
@@ -2170,11 +2171,12 @@ class StoreTests(unittest.TestCase):
         self.assertEqual((r["meta"]["note"], r["derived"]["submitter"]), (hostile, hostile))
 
 
-SUITES = ("test_leaderboard_web", "test_leaderboard_backup")
+SUITES = ("test_leaderboard_web", "test_leaderboard_backup", "test_leaderboard_auto_update")
 
 
 def load_tests(loader, tests, pattern):
-    """Single runner: the web and backup suites are part of it; a missing one is an import error, not a skip."""
+    """Single runner: the web, backup and auto-update suites are part of it; a missing one is an import error, not a
+    skip."""
     for name in SUITES:
         spec = importlib.util.spec_from_file_location(name, HERE / f"{name}.py")
         mod = importlib.util.module_from_spec(spec)
