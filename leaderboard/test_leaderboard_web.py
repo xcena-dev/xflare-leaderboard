@@ -195,7 +195,7 @@ class TestService(WebCase):
         self.assertIn('data-page="board"', page)
         self.assertIn("<h1>XFLARE TPC-H Leaderboard</h1>", page)
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/leaderboard/board", timeout=10) as r:
-            self.assertEqual(json.load(r)["tabs"], ["100", "1000"])
+            self.assertEqual([t["label"] for t in json.load(r)["tabs"]], ["100 · snappy", "1000 · snappy"])
         self.assertIn(lb_store.DB_NAME, os.listdir(self.data))          # the file's data dir
 
     def test_app_py_flags_override_the_server_block(self):
@@ -481,8 +481,9 @@ class TestBoard(WebCase):
         self.submit(elapsed=flat_elapsed(50), record_answers=True)       # never ranks
 
         b = self.board()
-        self.assertEqual(b["tabs"], ["100", "1000"])
-        self.assertEqual(b["sf"], "100")
+        self.assertEqual(b["tabs"], [{"sf": "100", "codec": "snappy", "label": "100 · snappy"},
+                                     {"sf": "1000", "codec": "snappy", "label": "1000 · snappy"}])
+        self.assertEqual((b["sf"], b["codec"]), ("100", "snappy"))
         self.assertEqual(b["filter"], {"executors": "4", "executor_cores": "6"})
         self.assertEqual([r["run_id"] for r in b["rows"]], [hero, slower])
         self.assertEqual(b["hero"]["run_id"], hero)
@@ -1084,7 +1085,7 @@ class TestWrongAnswersShown(WebCase):
         q5 = next(q for q in rep["queries"] if q["id"] == 5)
         q5["engines"]["xflare"].update(status="error", elapsed_ms=None, error="boom")
         q7 = next(q for q in rep["queries"] if q["id"] == 7)
-        q7["engines"]["velox"]["verify"] = {"against": "answers", "status": "mismatch", "detail": "row 1"}
+        q7["engines"]["xflare"]["verify"] = {"against": "answers", "status": "mismatch", "detail": "row 1"}
         self.post(build_envelope(m))
         reasons = self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()["derived"]["ineligible_reasons"]
         self.assertTrue(any("failed repeat 3" in r for r in reasons["q5"]), reasons)
@@ -1185,17 +1186,17 @@ class TestBoardScript(WebCase):
     def test_stale_answer_does_not_win(self):
         """SF-1000 then SF-100 clicked; SF-100's answer arrives first, SF-1000's last: the page stays on SF-100."""
         hundred, _, responses = self.two_tabs()
-        out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-1000"}, {"click": "SF-100"},
+        out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-1000 · snappy"}, {"click": "SF-100 · snappy"},
                           {"answer": 2, "with": "100"}, {"answer": 1, "with": "1000"}], responses)
         self.assertIn("sf=1000", out["requests"][1])
-        self.assertEqual(out["activeTab"], "SF-100")
+        self.assertEqual(out["activeTab"], "SF-100 · snappy")
         self.assertTrue(out["heroLink"].endswith(hundred), out)
         self.assertIn("sf=100", out["lastUrl"])
 
     def test_one_log_toggle_listener(self):
         _, _, responses = self.two_tabs()
-        out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-100"}, {"answer": 1, "with": "100"},
-                          {"click": "SF-100"}, {"answer": 2, "with": "100"}, {"toggle": "hero-log"}], responses)
+        out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-100 · snappy"}, {"answer": 1, "with": "100"},
+                          {"click": "SF-100 · snappy"}, {"answer": 2, "with": "100"}, {"toggle": "hero-log"}], responses)
         self.assertEqual(out["logListeners"], 1)
         self.assertEqual(out["problems"], [])
         self.assertEqual(out["charts"][-1], {"destroyed": False, "y": "logarithmic"})
@@ -1341,7 +1342,9 @@ class TestApiContract(WebCase):
         self.assertEqual(got("?executors=1"), {one})
         self.assertEqual(got("?executors=4&executor_cores=6"), {four})
         self.assertEqual(got("?from=2099-01-01"), set())
-        self.assertEqual(self.c.get("/api/leaderboard/runs?sf=7").status_code, 400)
+        self.assertEqual(self.c.get("/api/leaderboard/runs?sf=7").get_json(), [], "an SF with no runs lists nothing")
+        for bad in ("abc", "1e3", "-1"):
+            self.assertEqual(self.c.get(f"/api/leaderboard/runs?sf={bad}").status_code, 400, bad)
 
 
 class TestCompare(WebCase):
@@ -1699,7 +1702,7 @@ class TestApplicationMode(WebCase):
         self.post(build_envelope(m))
         page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
         self.assertRegex(page, r"<dt>Application mode</dt><dd>per-engine — ")
-        self.assertIn("per-engine</h3>", page)                                # the config label in the header
+        self.assertIn(" · per-engine · velox,xflare · snappy</h3>", page)     # the config label in the header
         table = re.search(r'<table class="cmp-table lb-table" id="applications">(.*?)</table>', page, re.S).group(1)
         rows = re.findall(r"<tr>\s*<td>(\d+)</td><td>(\w+)</td><td>(\w+)</td><td>([^<]*)</td>", table)
         self.assertEqual(rows, [(str(rep["index"]), a["engine"], a["cleanup"], a["app_id"])
@@ -1916,7 +1919,7 @@ class TestSharedUnranked(WebCase):
         self.assertCountEqual([r["run_id"] for r in b["shared_runs"]], ids)
         for r in b["shared_runs"]:
             self.assertEqual(r["url"], f"{LB}/run/{r['run_id']}")
-            self.assertTrue(r["config_label"].endswith("· shared"))
+            self.assertTrue(r["config_label"].endswith("· shared · velox,xflare · snappy"))
         self.assertEqual(len(self.board("?top=5")["shared_runs"]), 2)
         data = self.page_data()
         self.assertEqual(json.loads(data["lb-page-data"])["badge_class"][aggregate.SHARED_BADGE], "b-warn")
@@ -2239,6 +2242,146 @@ class TestSparkConf(WebCase):
             self.assertEqual(row.group(1), "lb-differs", key)
         self.assertIn({"token": facet_token("unknown"), "label": "unknown (spark_conf unreadable)"},
                       self.board()["facets"]["spark_conf"])
+
+
+class TestTabs(WebCase):
+    """A7: a tab is (scale factor, codec): the configured SFs with snappy are pinned, every other pair comes from the
+    stored runs; hero, default filter and the fallback apply per tab."""
+
+    def labels(self, query=""):
+        return [t["label"] for t in self.board(query)["tabs"]]
+
+    def test_tab_order_is_pinned_then_numeric(self):
+        self.assertEqual(self.labels(), ["100 · snappy", "1000 · snappy"])
+        for sf, codec in (("3000", "snappy"), ("1000", "zstd"), ("2.5", "snappy"), ("1000", "uncompressed"),
+                          ("1", "snappy"), ("1.0", "snappy"), ("01", "snappy"), ("9" * 5000, "snappy")):
+            self.submit(sf=sf, codec=codec)
+        got = self.labels()
+        self.assertEqual(got[:2], ["100 · snappy", "1000 · snappy"])
+        self.assertEqual(got[2:-1], ["01 · snappy", "1 · snappy", "1.0 · snappy", "2.5 · snappy", "1000 · zstd",
+                                     "1000 · uncompressed", "3000 · snappy"])
+        self.assertEqual(len(got[-1]), 513 + len(" · snappy"))                       # cut like any scalar, then "…"
+        self.assertEqual(self.board("?sf=3000")["hero"]["sf"], "3000")
+
+    def test_board_selects_a_tab_by_sf_and_codec(self):
+        snappy = self.submit(sf="1000", elapsed=flat_elapsed(9000))
+        zstd = self.submit(sf="1000", codec="zstd", elapsed=flat_elapsed(7000))
+        sf100 = self.submit(sf="100")
+        default = self.board()
+        self.assertEqual((default["sf"], default["codec"], default["hero"]["run_id"]), ("100", "snappy", sf100))
+        for query, want in (("?sf=1000", snappy), ("?sf=1000&codec=snappy", snappy), ("?sf=1000&codec=zstd", zstd)):
+            b = self.board(query)
+            self.assertEqual([r["run_id"] for r in b["rows"]], [want], query)
+            self.assertEqual((b["hero"]["run_id"], b["hero_fallback"]), (want, False), query)
+            self.assertNotIn("codec", b["filter"])
+            self.assertNotIn("codec", b["filter_tokens"])
+        self.assertEqual([r["run_id"] for r in self.c.get("/api/leaderboard/runs?codec=zstd").get_json()], [zstd])
+        for bad in ("?sf=1000&codec=uncompressed", "?sf=7", "?codec=zstd"):
+            r = self.c.get("/api/leaderboard/board" + bad)
+            self.assertEqual(r.status_code, 400, bad)
+            self.assertIn("one of 100 · snappy, 1000 · snappy, 1000 · zstd", r.get_json()["errors"][0])
+
+    def test_a_tab_without_a_default_shape_run_falls_back_within_the_tab(self):
+        other_shape = self.submit(sf="1000", codec="zstd", executors=1)
+        self.submit(sf="1000", executors=2)                     # another tab's run is never a candidate
+        b = self.board("?sf=1000&codec=zstd")
+        self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["rows"]), (other_shape, True, []))
+
+    def test_engines_is_a_filter_and_a_column(self):
+        both = self.submit(elapsed=flat_elapsed(1000))
+        alone = self.submit(elapsed=flat_elapsed(2000), engines=("xflare",))
+        b = self.board()
+        self.assertEqual([(r["run_id"], r["config"]["engines"]) for r in b["rows"]],
+                         [(both, "velox,xflare"), (alone, "xflare")])
+        self.assertEqual([r["run_id"] for r in self.board("?engines=xflare")["rows"]], [alone])
+        self.assertEqual([o["label"] for o in b["facets"]["engines"]], ["velox,xflare", "xflare"])
+        self.assertIn("<th>Engines</th>", self.c.get(LB).get_data(as_text=True))
+        out = run_page_js("board", data=self.page_data(), fetch=json.dumps(b))
+        self.assertIn("velox, xflare", out["texts"])
+        self.assertIn("xflare", out["texts"])
+        self.assertEqual(b["rows"][1]["value"]["velox_ms"], None)
+
+    def test_dry_run_says_which_runs_create_their_tab(self):
+        for sf, codec, note in (("100", "snappy", None), ("1000", "snappy", None),
+                                ("3000", "snappy", "SF 3000 · snappy is not a pinned tab: the first run stored at "
+                                                   "it creates its tab"),
+                                ("100", "zstd", "SF 100 · zstd is not a pinned tab: the first run stored at it "
+                                                "creates its tab")):
+            out = self.post(build_manifest(run_id=rid(), sf=sf, codec=codec), "?dry_run=1", status=200)
+            self.assertEqual(out["tab_note"], note, (sf, codec))
+        self.assertEqual(os.listdir(self.data), [])
+
+
+class TestEffectiveSettings(WebCase):
+    """A7: the recorded maps are on the run page and in the compare diff, key by key."""
+
+    @staticmethod
+    def with_maps(spark, xflare=None, **kw):
+        m = build_manifest(run_id=rid(), **kw)
+        for rep in m["repeats"]:
+            for app in rep["applications"]:
+                app["spark_conf_effective"] = dict(spark)
+                if app["engine"] == "xflare" and xflare is not None:
+                    app["xflare_parameters_effective"] = dict(xflare)
+        return m
+
+    def test_run_page_lists_the_maps(self):
+        many = {f"spark.sql.k{i:03d}": str(i) for i in range(300)}
+        m = self.with_maps({"spark.gluten.sql.columnar.maxBatchSize": "20480", **many},
+                           {"driver.merge_launch_groups": "true", "driver.launch_parallelism": ""})
+        self.post(build_envelope(m))
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        section = re.search(r'<section class="lb-panel" id="effective-settings">(.*?)</section>', page, re.S).group(1)
+        for want in ("spark_conf_effective (velox)", "spark_conf_effective (xflare)",
+                     "xflare_parameters_effective (xflare)", "spark.gluten.sql.columnar.maxBatchSize",
+                     "<code>20480</code>", "driver.merge_launch_groups", "spark.sql.k299"):
+            self.assertIn(want, section)
+        self.assertNotIn("xflare_parameters_effective (velox)", section)
+        legacy = self.submit()
+        self.assertIn("not recorded", re.search(r'id="effective-settings">(.*?)</section>',
+                                                self.c.get(f"{LB}/run/{legacy}").get_data(as_text=True), re.S).group(1))
+
+    def test_compare_lists_only_the_keys_that_differ(self):
+        base = {"spark.sql.shuffle.partitions": "200", "spark.sql.adaptive.enabled": "true",
+                "spark.executor.cores": "6"}
+        a = self.with_maps(base, {"driver.merge_launch_groups": "true"})
+        b = self.with_maps({**base, "spark.sql.shuffle.partitions": "400", "spark.sql.cbo.enabled": "true"},
+                           {"driver.merge_launch_groups": "false"})
+        for m in (a, b):
+            self.post(build_envelope(m))
+        page = self.c.get(f"{LB}/compare?runs={a['run_id']},{b['run_id']}").get_data(as_text=True)
+        rows = {key: (cls, re.findall(r"<td[^>]*>([^<]*)</td>", cells)) for cls, key, cells in re.findall(
+            r'<tr class="(lb-differs|lb-same)">\s*<td><code>(.*?)</code></td>(.*?)</tr>', page, re.S)}
+        self.assertEqual(rows["spark_conf_effective (xflare) · spark.sql.shuffle.partitions"],
+                         ("lb-differs", ["200", "400"]))
+        self.assertEqual(rows["spark_conf_effective (xflare) · spark.sql.cbo.enabled"], ("lb-differs", ["—", "true"]))
+        self.assertEqual(rows["xflare_parameters_effective (xflare) · driver.merge_launch_groups"],
+                         ("lb-differs", ["true", "false"]))
+        self.assertNotIn("spark_conf_effective (xflare) · spark.sql.adaptive.enabled", rows)
+        self.assertEqual(rows["spark_conf_effective (xflare) (keys)"][1], ["3 keys", "4 keys"])
+
+    def test_compare_caps_a_long_difference_list(self):
+        a = self.with_maps({f"spark.sql.k{i:03d}": "a" for i in range(150)})
+        b = self.with_maps({f"spark.sql.k{i:03d}": "b" for i in range(150)})
+        for m in (a, b):
+            self.post(build_envelope(m))
+        page = self.c.get(f"{LB}/compare?runs={a['run_id']},{b['run_id']}").get_data(as_text=True)
+        self.assertEqual(page.count("spark_conf_effective (xflare) · spark.sql.k"), 100)
+        self.assertIn("50 more — see raw JSON", page)
+
+    def test_a_blank_velox_cell_says_why(self):
+        m = build_manifest(run_id=rid())
+        m["repeats"][1]["queries"][2]["engines"]["velox"]["status"] = "timeout"
+        self.post(build_envelope(m))
+        page = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
+        self.assertRegex(page, r'<td class="num" title="velox timeout in repeat 2">—</td>')
+
+    def test_a_run_whose_settings_drifted_does_not_rank(self):
+        m = self.with_maps({"spark.sql.shuffle.partitions": "200"})
+        m["repeats"][1]["applications"][1]["spark_conf_effective"] = {"spark.sql.shuffle.partitions": "400"}
+        out = self.post(build_envelope(m), "?dry_run=1", status=200)
+        self.assertFalse(out["ranked_total"])
+        self.assertEqual(out["ineligible_reasons"]["common"], [aggregate.SPARK_SETTINGS_DIFFER])
 
 
 if __name__ == "__main__":

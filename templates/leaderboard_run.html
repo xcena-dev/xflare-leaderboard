@@ -2,7 +2,7 @@
     autoescape; nothing here is marked safe. Uploaded scalars go through v (cut
     to SCALAR_CHARS), long-form texts through lb_text (`chars`), lists are cut to
     `limit` items; the raw JSON download has the rest. -#}
-{%- from "leaderboard_macros.html" import v, more, badge -%}
+{%- from "leaderboard_macros.html" import v, more, badge, settings_table -%}
 {%- set limit, chars = lb_budget.preview_items, lb_budget.preview_chars -%}
 {%- set run = m.run -%}
 {%- set env = meta.environment or {} -%}
@@ -108,7 +108,7 @@
           <tr class="{{ '' if p.eligible else 'lb-ineligible' }}">
             <td>Q{{ p.q }}</td>
             <td class="num">{{ p.xflare_ms | lb_ms }}</td>
-            <td class="num">{{ p.velox_ms | lb_ms }}</td>
+            <td class="num"{% if p.velox_problems %} title="{{ p.velox_problems[:limit] | map('lb_cut') | join('; ') }}"{% endif %}>{{ p.velox_ms | lb_ms }}</td>
             <td class="num">{{ p.speedup | lb_x }}</td>
             <td class="num">{{ v(p.n) }}</td>
             <td>{{ xs[:limit] | map('lb_ms') | join(', ') }}{{ more(xs, limit, 'span') }}</td>
@@ -246,20 +246,18 @@
     </dl>
     {% for title, view in [('Requested — run.spark_conf', spark_conf), ('Read back by the session — run.spark_conf_readback', spark_conf_readback)] %}
     <p class="lb-note">{{ title }}</p>
-    {% if not view.recorded %}<p class="lb-note lb-dim">not recorded</p>
-    {% elif view['items'] is none %}<p class="lb-note">not a key/value object — see raw JSON</p>
-    {% elif not view.count %}<p class="lb-note">none ({})</p>
-    {% else %}
-    <table class="cmp-table lb-table">
-      <thead><tr><th>Key</th><th>Value</th></tr></thead>
-      <tbody>
-      {% for key, value in view['items'] %}
-        <tr><td><code>{{ v(key) }}</code></td><td><code>{{ v(value) }}</code></td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    {% if view.count > limit %}<p class="lb-more">{{ view.count - limit }} more — see raw JSON</p>{% endif %}
-    {% endif %}
+    {{ settings_table(view, limit) }}
+    {% endfor %}
+  </section>
+
+  <section class="lb-panel" id="effective-settings">
+    <h3>Settings in effect (A7)</h3>
+    <p class="lb-note">What each application's session and engine reported, read once at its start. They never gate a ranking,
+      except that <code>spark.sql.*</code> / <code>spark.gluten.*</code> differing between two applications of one engine does.</p>
+    {% for label, view in effective %}
+    <p class="lb-note">{{ v(label) }}</p>
+    {{ settings_table(view, lb_budget.effective_items) }}
+    {% else %}<p class="lb-note lb-dim">not recorded</p>
     {% endfor %}
   </section>
 

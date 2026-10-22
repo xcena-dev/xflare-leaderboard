@@ -17,12 +17,15 @@ from fractions import Fraction
 from . import repro
 from .schema import _snip, application_mode_state
 
-DERIVE_VERSION = 9  # offload badge: partial and offloaded_except_skipped read as offloaded
+DERIVE_VERSION = 10  # A7: velox optional, engines/codec config keys, Spark settings reason
 QUERY_IDS = range(1, 23)
 METRICS = ("total",) + tuple(f"q{q}" for q in QUERY_IDS)
 DEFAULT_FILTER = {"executors": 4, "executor_cores": 6}
 CONFIG_KEYS = ("executors", "executor_cores", "offheap", "shuffle_partitions", "devices", "toml", "bundle",
-               "application_mode", "spark_conf")
+               "application_mode", "spark_conf", "engines", "codec")
+# A7: the slice of a recorded Spark settings map that must not change between applications of one engine.
+_GATED_SETTING_PREFIXES = ("spark.sql.", "spark.gluten.")
+SPARK_SETTINGS_DIFFER = "Spark settings differ across applications"
 OUT_OF_RANGE = "value beyond numeric range"
 SHARED_REASON = "shared application: engine order affects timings"
 ROLLUP_PREFIX = "queries not eligible: "
@@ -87,27 +90,64 @@ def _engine_problems(res, engine: str, idx: int) -> list[str]:
     return out
 
 
-def _unfinished_problems(entry: dict, repeat: dict) -> list[str]:
+def _unfinished_problems(entry: dict, repeat: dict, engine: str) -> list[str]:
     """A failed or aborted repeat still recorded a wrong answer for this query: an engine status other than
     ok/skipped, or a verify status other than ok/null."""
+    res = entry["engines"].get(engine)
+    if res is None:
+        return []
     out = []
     where = f"{repeat['status']} repeat {_snip(repeat['index'])}"
-    for engine in ("velox", "xflare"):
-        res = entry["engines"].get(engine)
-        if res is None:
-            continue
-        if res["status"] not in ("ok", "skipped"):
-            out.append(f"{engine} {res['status']} in {where}")
-        verify = (res["verify"] or {}).get("status")
-        if verify not in ("ok", None):
-            out.append(f"{engine} verify {verify} in {where}")
+    if res["status"] not in ("ok", "skipped"):
+        out.append(f"{engine} {res['status']} in {where}")
+    verify = (res["verify"] or {}).get("status")
+    if verify not in ("ok", None):
+        out.append(f"{engine} verify {verify} in {where}")
     return out
 
 
+def _entry(repeat: dict, q: int) -> dict | None:
+    return next((x for x in repeat["queries"] if x["id"] == q), None)
+
+
+def _query_problems(completed: list[dict], unfinished: list[dict], q: int, engine: str) -> list[str]:
+    """Why `engine`'s timings of query q cannot be used: a completed repeat without it or with a bad result, or a
+    failed/aborted repeat that recorded a wrong answer for it (A2)."""
+    reasons = []
+    for rep in completed:
+        entry = _entry(rep, q)
+        if entry is None:
+            reasons.append(f"missing in repeat {_snip(rep['index'])}")
+        else:
+            reasons += _engine_problems(entry["engines"].get(engine), engine, rep["index"])
+    for rep in unfinished:
+        entry = _entry(rep, q)
+        if entry is not None:
+            reasons += _unfinished_problems(entry, rep, engine)
+    return reasons
+
+
+def _settings_differ(completed: list[dict], engines: list[str]) -> bool:
+    """A7: two applications of one engine recorded different gated Spark settings. An application that recorded none
+    is ignored. Only validated applications get here (application_mode_state checks the maps' shape)."""
+    for engine in engines:
+        seen = set()
+        for rep in completed:
+            for app in rep["applications"]:
+                settings = app.get("spark_conf_effective")
+                if app["engine"] == engine and settings is not None:
+                    seen.add(json.dumps({k: v for k, v in settings.items() if k.startswith(_GATED_SETTING_PREFIXES)},
+                                        sort_keys=True))
+        if len(seen) > 1:
+            return True
+    return False
+
+
 def _query_eligibility(manifest: dict, completed: list[dict], application_mode: str,
-                       application_problems: list[str]) -> tuple[list[str], dict[int, list[str]]]:
-    """Measurement problems, before A6's per-engine ranking gate. Completed repeats must be fully ok;
-    failed/aborted ones must not have recorded a wrong answer for q."""
+                       application_problems: list[str]) -> tuple[list[str], dict[int, list[str]], dict[int, list[str]]]:
+    """(common reasons, xflare problems per query, velox problems per query), before A6's per-engine ranking gate.
+    xflare gates: completed repeats must be fully ok, failed/aborted ones must not have recorded a wrong answer for q.
+    A7: velox never gates, a velox problem only blanks that query's velox time."""
     run = manifest["run"]
     common = list(application_problems)
     if run["record_answers"]:
@@ -132,28 +172,18 @@ def _query_eligibility(manifest: dict, completed: list[dict], application_mode: 
         for key, label in (("artifact_id", "artifact"), ("bundle", "bundle")):
             if len({app[key] for app in applications}) > 1:
                 common.append(f"{label} differs across applications of completed repeats")
+        if _settings_differ(completed, run["engines"]):
+            common.append(SPARK_SETTINGS_DIFFER)
 
     unfinished = sorted((r for r in manifest["repeats"] if r["status"] != "completed"), key=lambda r: r["index"])
-    out = {}
-    for q in QUERY_IDS:
-        reasons = []
-        for rep in completed:
-            entry = next((x for x in rep["queries"] if x["id"] == q), None)
-            if entry is None:
-                reasons.append(f"missing in repeat {_snip(rep['index'])}")
-                continue
-            for engine in ("velox", "xflare"):
-                reasons += _engine_problems(entry["engines"].get(engine), engine, rep["index"])
-        for rep in unfinished:
-            entry = next((x for x in rep["queries"] if x["id"] == q), None)
-            if entry is not None:
-                reasons += _unfinished_problems(entry, rep)
-        out[q] = reasons
+    out = {q: _query_problems(completed, unfinished, q, "xflare") for q in QUERY_IDS}
+    velox = {q: _query_problems(completed, unfinished, q, "velox") if "velox" in run["engines"] else []
+             for q in QUERY_IDS}
     shared = set.intersection(*(set(why) for why in out.values()))
     common.extend(dict.fromkeys(reason for reason in out[1] if reason in shared))
     if shared:
         out = {q: [reason for reason in why if reason not in shared] for q, why in out.items()}
-    return common, out
+    return common, out, velox
 
 
 def _samples(completed: list[dict], q: int, engine: str) -> list:
@@ -184,6 +214,8 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
     repeats = sorted(manifest["repeats"], key=lambda r: r["index"])
     completed = [r for r in repeats if r["status"] == "completed"]
     application_mode, application_problems = application_mode_state(manifest)
+    # A7: one engine has no engine order for A6 to protect, so it needs no application per engine to rank.
+    mode = "per-engine" if application_mode == "shared" and len(run["engines"]) == 1 else application_mode
     if "spark_conf" in run:
         settings = run["spark_conf"]
         spark_conf_source = "field"
@@ -194,10 +226,10 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
     else:
         spark_conf_source = "argv"
         spark_conf = "custom" if repro.has_option(run["argv"], "--spark-conf") else "default"
-    common, q_reasons = _query_eligibility(manifest, completed, application_mode, application_problems)
+    common, q_reasons, velox_problems = _query_eligibility(manifest, completed, application_mode, application_problems)
 
     # Shared timings stay visible on stored runs; only per-engine measurements may rank (A6).
-    rankable_mode = application_mode == "per-engine"
+    rankable_mode = mode == "per-engine"
     per_query = {}
     measured_queries = []
     for q in QUERY_IDS:
@@ -205,15 +237,19 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
         x = v = None
         if not common and not q_reasons[q]:
             try:
-                x, v = _median(xs), _median(vs)
+                x = _median(xs)
             except OverflowError:
-                x = v = None
                 q_reasons[q].append(OUT_OF_RANGE)
         ok = not common and not q_reasons[q]
         if ok:
             measured_queries.append(q)
+            if "velox" in run["engines"] and not velox_problems[q]:
+                try:
+                    v = _median(vs)
+                except OverflowError:
+                    pass
         per_query[str(q)] = {"eligible": ok and rankable_mode, "xflare_ms": x, "velox_ms": v,
-                             "speedup": _ratio(v, x) if ok else None,
+                             "speedup": _ratio(v, x) if v is not None else None, "velox_problems": velox_problems[q],
                              "n": len(completed), "xflare_samples": xs, "velox_samples": vs}
     eligible = [q for q in QUERY_IDS if per_query[str(q)]["eligible"]]
 
@@ -228,12 +264,19 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
             and run["exit_status"] == "ok"):
         try:
             tx = _exact_sum([per_query[str(q)]["xflare_ms"] for q in QUERY_IDS])
-            tv = _exact_sum([per_query[str(q)]["velox_ms"] for q in QUERY_IDS])
-            totals = {"xflare_ms": tx, "velox_ms": tv, "speedup": _ratio(tv, tx)}
+            totals = {"xflare_ms": tx, "velox_ms": None, "speedup": None}
         except OverflowError:
             total_reasons.append(OUT_OF_RANGE)
+        else:
+            velox = [per_query[str(q)]["velox_ms"] for q in QUERY_IDS]
+            if None not in velox:
+                try:
+                    tv = _exact_sum(velox)
+                    totals.update(velox_ms=tv, speedup=_ratio(tv, tx))
+                except OverflowError:
+                    pass
     total_eligible = not total_reasons
-    if application_mode == "shared":
+    if mode == "shared":
         common.insert(0, SHARED_REASON)
 
     res = run["resources"]
@@ -241,11 +284,12 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
     config = {"executors": res["executors"], "executor_cores": res["executor_cores"], "offheap": res["offheap"],
               "shuffle_partitions": res["shuffle_partitions"], "devices": res["devices"],
               "toml": run["xflare_toml"]["name"], "bundle": bundle["resolved"],
-              "application_mode": application_mode, "spark_conf": spark_conf}
+              "application_mode": mode, "spark_conf": spark_conf, "engines": ",".join(sorted(run["engines"])),
+              "codec": run["codec"]}
 
     env = (envelope or {}).get("environment") or {}
     badges = [f"x{len(completed)}"]
-    if application_mode == "shared":
+    if mode == "shared":
         badges.append(SHARED_BADGE)
     if _reproducible(manifest):
         badges.append("reproducible")
@@ -289,7 +333,7 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
         "config_label": (f"{config['executors']}×{config['executor_cores']} · {_dash(config['offheap'])}"
                          f" · sp={_dash(config['shuffle_partitions'])} · dev={_dash(config['devices'])}"
                          f" · {config['toml']} · {_dash(config['bundle'])} · {config['application_mode']}"
-                         + (" +conf" if spark_conf == "custom" else "")),
+                         f" · {config['engines']} · {config['codec']}" + (" +conf" if spark_conf == "custom" else "")),
         "build": {"revision": manifest["build"]["revision"], "artifact_id": manifest["build"]["artifact_id"],
                   "bundle_kind": bundle["kind"], "provenance_source": manifest["build"]["provenance_source"],
                   "client_revision": manifest["client"]["revision"]},
@@ -300,6 +344,11 @@ def derive(manifest: dict, envelope: dict | None, *, manifest_content_id: str | 
         "ineligible_reasons": reasons,
         "repro": repro.script(manifest),
     }
+
+
+def tab_of(derived: dict) -> tuple[str, str]:
+    """The board tab a run belongs to: (scale factor, codec)."""
+    return derived["sf"], derived["config"]["codec"]
 
 
 def metric_values(derived: dict, metric: str) -> dict:

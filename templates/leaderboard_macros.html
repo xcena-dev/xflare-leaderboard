@@ -11,3 +11,20 @@
 {%- macro more(items, limit, tag='p') -%}
   {%- if items | length > limit -%}<{{ tag }} class="lb-more">{{ items | length - limit }} more — see raw JSON</{{ tag }}>{%- endif -%}
 {%- endmacro -%}
+{#- A settings map as web._settings built it: a key/value table, or the reason there is none. -#}
+{%- macro settings_table(view, limit) -%}
+  {%- if not view.recorded -%}<p class="lb-note lb-dim">not recorded</p>
+  {%- elif view['items'] is none -%}<p class="lb-note">not a key/value object — see raw JSON</p>
+  {%- elif not view.count -%}<p class="lb-note">none ({})</p>
+  {%- else -%}
+  <table class="cmp-table lb-table">
+    <thead><tr><th>Key</th><th>Value</th></tr></thead>
+    <tbody>
+    {% for key, value in view['items'] %}
+      <tr><td><code>{{ v(key) }}</code></td><td><code>{{ v(value) }}</code></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {%- if view.count > limit -%}<p class="lb-more">{{ view.count - limit }} more — see raw JSON</p>{%- endif -%}
+  {%- endif -%}
+{%- endmacro -%}

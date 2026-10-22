@@ -6,7 +6,7 @@ A small Flask service that ranks hand-run `spark-tpch.sh` batches people upload.
 | path | what |
 |---|---|
 | `app.py` | the service: `create_app(config)` and the `python3 app.py` entry point |
-| `config.yaml` | service settings: `server` (port, bind) and `leaderboard` (title, description, color, storage, SF tabs, default filter) |
+| `config.yaml` | service settings: `server` (port, bind) and `leaderboard` (title, description, color, storage, pinned SF tabs, default filter) |
 | `leaderboard/schema.py` | strict JSON parse (duplicate keys, NaN → reject) and the stdlib validator (authoritative) |
 | `leaderboard/schema/*.schema.json` | JSON Schema for producers (documentation; `schema.py` decides) |
 | `leaderboard/aggregate.py` | `content_id`, eligibility, medians, totals, ordering, hero — pure functions |
@@ -37,7 +37,7 @@ XFLARE_LEADERBOARD_DATA=/tmp/lb-data python3 app.py --host 127.0.0.1 --port 8894
 ## Payload contract
 
 This section restates data contract v1 (frozen 2026-10-19, shared with the producer `spark-tpch.sh --submission`
-and the submit skill) with amendments A1–A6; this README is the contract's home, and code comments cite it as
+and the submit skill) with amendments A1–A7; this README is the contract's home, and code comments cite it as
 README §1–§4. The schema files give each field's type; the meanings are stated here.
 
 ### §1 Manifest
@@ -84,6 +84,16 @@ A5 (additive; absent = unknown, a manifest from before A5):
   `xflare_overrides` or argv carry a secret-looking key (`secret|password|token|credential|access.?key|\.key$`,
   case-insensitive) rather than publish it; the server does not repeat that check.
 
+A7 (additive; absent = not recorded):
+- `repeats[].applications[].spark_conf_effective`: object `{"<key>": "<value>"}` (string values), the session's
+  effective `spark.sql.*`, `spark.gluten.*`, `spark.executor.*` and `spark.memory.*` settings, read once after the
+  runner has set the application's first engine switch.
+- `repeats[].applications[].xflare_parameters_effective`: same shape, the engine's effective parameters as the first
+  query admitted by that application's executors printed them (an unset optional parameter is `""`); only xflare
+  applications have it.
+- Either one that is not an object of string values is a 400 (and, on a stored run, makes the applications "missing or
+  malformed" like any other broken A4 field). Like A5's maps, accepted values are bounded only by the body cap.
+
 ### §2 Envelope
 
 `"schema": "xflare-bench-submission/1"`: `manifest` (the §1 document as `spark-tpch.sh` wrote it),
@@ -114,9 +124,9 @@ The routes are in API below.
 ### §4 Eligibility and ranking
 
 Computed on the server, never taken from the client.
-- Query `q` of a run counts when, in every completed repeat, both velox and xflare have `status=ok`,
-  `elapsed_ms > 0`, `verify.against=answers`, `verify.status=ok`; the run has `record_answers=false`; and all
-  completed repeats share one `artifact_id` and one `bundle`. A2: a failed or aborted repeat does not count toward
+- Query `q` of a run counts when, in every completed repeat, xflare (A7: velox does not gate, see below) has
+  `status=ok`, `elapsed_ms > 0`, `verify.against=answers`, `verify.status=ok`; the run has `record_answers=false`; and
+  all completed repeats share one `artifact_id` and one `bundle`. A2: a failed or aborted repeat does not count toward
   the medians, but a wrong answer it recorded for `q` (an engine `status` other than ok/skipped, or a
   `verify.status` other than ok/null) still disqualifies `q` for that run, with a reason such as
   `xflare error in aborted repeat 3` on the run page. A failed/aborted repeat that never reached `q` adds nothing.
@@ -134,6 +144,31 @@ Computed on the server, never taken from the client.
   (first in `common`) and the `shared application` badge. Its per-query medians and totals are still computed and
   shown (run page, detail API, compare) as measurements; every `per_query[q].eligible` and `total_eligible` is
   false. A run whose stored mode is unreadable (`-`, below) keeps its own reason and gets no shared badge.
+- A7 (supersedes the "both velox and xflare" wording of the first bullet and A2's velox case):
+  1. Velox never gates. `per_query[q].velox_ms` (and `speedup`) is the velox median when velox is in `run.engines` and,
+     in every completed repeat, has `status=ok`, `elapsed_ms > 0`, `verify.against=answers`, `verify.status=ok`, and no
+     failed or aborted repeat recorded a wrong velox answer for `q` (A2's test, applied to velox). Otherwise they are `null`
+     (pages print "—"), `per_query[q].velox_problems` says why (empty when velox is simply not in `run.engines`), and `q`
+     still counts for xflare. The xflare checks, the order (xflare total) and the Total's other conditions are unchanged.
+  2. `totals.velox_ms` and `totals.speedup` are `null` unless all 22 velox medians exist (a velox total beyond float
+     range is also `null`; it never makes the Total ineligible).
+  3. A run with one engine in `run.engines` and no `application_mode` (or `shared`) counts as `per-engine` for A6: there is
+     no engine order to protect. It ranks, gets no shared reason or badge, and its `config.application_mode` reads
+     `per-engine`. A4's application checks still apply only to a manifest that says `per-engine`.
+  4. `engines` (the run's engines sorted and joined by `,`: `velox,xflare` or `xflare`) and `codec` are config keys: part
+     of the config label (`... · <mode> · <engines> · <codec>`), filters and facets. `engines` is a board filter, never a
+     separate board.
+  5. A tab is (scale factor, codec). The pinned tabs are `config.yaml` `leaderboard.tabs` with `snappy`, always listed in
+     that order, empty or not; every other (scale factor, codec) of the stored non-withdrawn runs follows, scale factors
+     in numeric order (`1`, `1.0` and `01` are three tabs), then `snappy`, `zstd`, `uncompressed`. The first run stored
+     at a new pair creates its tab. The hero, the default filter and A3's fallback apply per tab. Existing runs are
+     `snappy`; their ranks do not change.
+  6. `spark_conf_effective` and `xflare_parameters_effective` are shown on the run page and in the compare diff and gate
+     nothing, with one exception: when two completed applications of the same engine recorded different `spark.sql.*` /
+     `spark.gluten.*` values (a key present in only one counts), the run gets the common reason
+     `Spark settings differ across applications` (the artifact/bundle pattern, per engine because the velox and xflare
+     applications differ on purpose in the engine switch; `spark.executor.*` and `spark.memory.*` are shown, not
+     compared). An application that recorded none is ignored.
 - Reasons (`derived.ineligible_reasons`): causes shared by every query (A6's shared application, recording mode,
   incomplete repeat list, no completed repeat, artifact or bundle differing across repeats, and the A4 application
   checks) are listed once under `common`; `qN` lists only
@@ -156,7 +191,7 @@ Computed on the server, never taken from the client.
   configuration, under a notice ("no 4×6 result yet" for the default filter, "no result for this filter yet"
   otherwise) and with its config label shown at the top; the board itself stays filtered. The fallback never
   crosses tabs, and (A6) its candidates are total-eligible, hence `per-engine`, runs only; with none on the tab
-  there is no hero. Tabs: SF-100, then SF-1000.
+  there is no hero. Tabs: A7 (above).
 - Badges never gate: `xN`, `reproducible` (`build.provenance_source=artifact-manifest`, `build.dirty=false`,
   `client.dirty=false`, and a bundle that is not `dev` or one with `gluten.commit` set and `gluten.dirty=false`),
   `dev bundle`, `booking overlap` / `overlap unknown`, `partial`,
@@ -205,16 +240,16 @@ reads no storage and still loads.
 
 | method, path | params / body | responses |
 |---|---|---|
-| `POST /api/leaderboard/submissions` | body = envelope; `?dry_run=1` also accepts a bare manifest | 201 created: receipt `{run_id, content_id, url, ranked_total, warnings}`; 200 existing: the receipt as first issued; dry run: 200 `{dry_run: true, run_id, content_id, url, ranked_total, warnings, badges, ineligible_reasons}` and nothing written; 400 `{errors, warnings}` (validation) or `{errors}` (unparseable body); 409 `{errors, run_id, content_id}`; 413 over 8 MiB; 503 |
+| `POST /api/leaderboard/submissions` | body = envelope; `?dry_run=1` also accepts a bare manifest | 201 created: receipt `{run_id, content_id, url, ranked_total, warnings}`; 200 existing: the receipt as first issued; dry run: 200 `{dry_run: true, run_id, content_id, url, ranked_total, tab_note, warnings, badges, ineligible_reasons}` and nothing written (`tab_note` is `null` for a pinned tab, else `SF X · codec is not a pinned tab: the first run stored at it creates its tab`; a dry run reads no store, so the note is advisory); 400 `{errors, warnings}` (validation) or `{errors}` (unparseable body); 409 `{errors, run_id, content_id}`; 413 over 8 MiB; 503 |
 | `POST /api/leaderboard/runs/<run_id>/withdraw` | `{"actor": str, "reason": str}`, both non-empty (no length cap) | 200 run summary (idempotent; the first withdrawal's actor/reason/time are kept); 400; 404 `unknown run_id`; 503 |
-| `GET /api/leaderboard/runs` | `sf=100\|1000`, `include_withdrawn=1`, and the board's filters with NO default (absent = any) | 200 `[run summary]`, oldest `finished_at` instant first (then `run_id`); 400 bad sf |
+| `GET /api/leaderboard/runs` | `sf` (any decimal scale factor; one with no runs lists nothing), `include_withdrawn=1`, and the board's filters with NO default (absent = any) | 200 `[run summary]`, oldest `finished_at` instant first (then `run_id`); 400 an `sf` that is not a decimal |
 | `GET /api/leaderboard/runs/<run_id>` | | 200 run summary + `derived`, `meta`, `manifest`; 404 `unknown run_id` |
 | `GET /api/leaderboard/runs/<run_id>/raw` | | 200 the whole stored manifest file (no size cap), `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`; 404 `raw manifest not found` (no row, file missing, symlink or not a regular file); 503 when the file cannot be read |
-| `GET /api/leaderboard/board` | `sf` (default first tab), `metric=total\|q1..q22`, `top=5\|10\|25` (default 10), filters `executors`, `executor_cores`, `offheap`, `shuffle_partitions`, `devices`, `toml`, `bundle`, `application_mode` (`shared\|per-engine`), `spark_conf` (`default\|custom`, or `unknown`; §4 A5), `device`, `submitter`, `badge` (each also as `<key>_t` = facet token), `from`, `to` (YYYY-MM-DD) | 200 `{sf, tabs, metric, top, filter, filter_tokens, default_filter, facets, facets_truncated, hero, hero_fallback, hero_notice, eligible_count, shared_count, shared_runs, rows}`; `shared_count` is the number of non-withdrawn `shared` runs under the filter (A6: stored and listed, never ranked) and `shared_runs` the first `top` of them, oldest `finished_at` first, as `{run_id, url, finished_at, config_label}`; `hero_fallback` is true when `hero` is the tab's fallback run (rows stay filtered, possibly empty) and `hero_notice` is then the line the page shows above it, else null; `hero` adds `per_query` (22 entries from that one run); each row is a run summary plus `rank`, `value {xflare_ms, velox_ms, speedup}` and `repro` (the reproduce script, or null when none is offered); 400 bad sf or metric |
+| `GET /api/leaderboard/board` | `sf` (default: the first tab) and `codec` (default `snappy`; with neither, the first tab) name the tab (A7), `metric=total\|q1..q22`, `top=5\|10\|25` (default 10), filters `executors`, `executor_cores`, `offheap`, `shuffle_partitions`, `devices`, `toml`, `bundle`, `application_mode` (`shared\|per-engine`), `engines` (`velox,xflare\|xflare`), `spark_conf` (`default\|custom`, or `unknown`; §4 A5), `device`, `submitter`, `badge` (each also as `<key>_t` = facet token), `from`, `to` (YYYY-MM-DD) | 200 `{sf, codec, tabs, metric, top, filter, filter_tokens, default_filter, facets, facets_truncated, hero, hero_fallback, hero_notice, eligible_count, shared_count, shared_runs, rows}`; `shared_count` is the number of non-withdrawn `shared` runs under the filter (A6: stored and listed, never ranked) and `shared_runs` the first `top` of them, oldest `finished_at` first, as `{run_id, url, finished_at, config_label}`; `hero_fallback` is true when `hero` is the tab's fallback run (rows stay filtered, possibly empty) and `hero_notice` is then the line the page shows above it, else null; `hero` adds `per_query` (22 entries from that one run); each row is a run summary plus `rank`, `value {xflare_ms, velox_ms, speedup}` and `repro` (the reproduce script, or null when none is offered); 400 an `sf`/`codec` that is not a tab (the message lists the tabs) or a bad metric; `tabs` is `[{sf, codec, label}]` (A7: it was a list of scale factors); the tab consumes `codec`, so it is not among the board's `filter` |
 | `GET /` | | 302 to `/b/xflare_leaderboard` |
 | `GET /b/xflare_leaderboard` | | page: tabs, hero chart, board, and under the board the `shared_runs` (A6) linked to their pages; a tab with no total-eligible run shows the empty hero, and a board with no rows says why |
-| `GET /b/xflare_leaderboard/run/<run_id>` | | page: for a `shared` run (A6) a notice at the top ("shared application: engine order affects timings — this run is listed but never ranked (amendment A6)…") and its measured totals beside the reasons it is not ranked; argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table (plus, for a `per-engine` run, each repeat's applications: engine, cleanup, app_id, artifact, bundle, started/finished, invocation), application mode, Spark settings (the state and where it came from, then `run.spark_conf` and `run.spark_conf_readback` as key → value tables, each "not recorded" when absent, "none ({})" when empty and "not a key/value object" when stored before A5 validated it), raw download, how to reproduce, withdraw |
-| `GET /b/xflare_leaderboard/compare?runs=a,b[,c,d]` | 2–4 distinct run ids | page: per-query deltas vs the first run, parameter diff (including `application_mode` and four Spark settings rows: `spark_conf (state)`, `spark_conf.source`, and `spark_conf (settings)` / `spark_conf_readback (settings)`, each map on one line as "not recorded" (absent), "{}" (empty), "not an object" (stored before A5 validated it) or its sorted `k=v` pairs joined by "; ", cut like any scalar; a settings row differs when the full maps differ); 400 / 404 |
+| `GET /b/xflare_leaderboard/run/<run_id>` | | page: for a `shared` run (A6) a notice at the top ("shared application: engine order affects timings — this run is listed but never ranked (amendment A6)…") and its measured totals beside the reasons it is not ranked; argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table (plus, for a `per-engine` run, each repeat's applications: engine, cleanup, app_id, artifact, bundle, started/finished, invocation), application mode, Spark settings (the state and where it came from, then `run.spark_conf` and `run.spark_conf_readback` as key → value tables, each "not recorded" when absent, "none ({})" when empty and "not a key/value object" when stored before A5 validated it), A7's settings in effect (each engine's `spark_conf_effective` and `xflare_parameters_effective` from its first application that recorded them, as key → value tables up to 500 keys), a velox cell that is "—" with its `velox_problems` as the tooltip, raw download, how to reproduce, withdraw |
+| `GET /b/xflare_leaderboard/compare?runs=a,b[,c,d]` | 2–4 distinct run ids | page: per-query deltas vs the first run, parameter diff (including `application_mode`, A7's per-map "N keys" rows and one row per setting that differs between the runs that recorded the map (`<map> (<engine>) · <key>`, at most 100 per map then "N more — see raw JSON"), and four Spark settings rows: `spark_conf (state)`, `spark_conf.source`, and `spark_conf (settings)` / `spark_conf_readback (settings)`, each map on one line as "not recorded" (absent), "{}" (empty), "not an object" (stored before A5 validated it) or its sorted `k=v` pairs joined by "; ", cut like any scalar; a settings row differs when the full maps differ); 400 / 404 |
 
 A run summary is `{run_id, content_id, url, sf, finished_at, submitter, total_eligible, repeats, totals, config,
 config_label, build, device_ids, device_count, host, badges, ineligible_reasons, withdrawn, withdrawal}`. It is a
@@ -242,8 +277,8 @@ value spelled `-`; `from`/`to` that are not YYYY-MM-DD narrow nothing.
 Pages show previews of uploaded data; the raw JSON always has everything. Every uploaded string is cut to 512
 characters plus "…", except the run-level long texts (note, toml input and rendered text, gluten build command), which
 stop at 65,536 characters. Lists (argv, overrides, devices, overlapping bookings, samples, repeats, each repeat's
-applications, ineligible reasons, the run page's Spark settings maps, compare override rows) stop at 100 items with
-"N more — see raw JSON", and the repeat × query matrix shows the first 10 repeats. A duration, or a compare Δ%, past
+applications, ineligible reasons, the run page's A5 Spark settings maps, compare override rows) stop at 100 items with
+"N more — see raw JSON" (A7's settings-in-effect maps on the run page stop at 500 keys), and the repeat × query matrix shows the first 10 repeats. A duration, or a compare Δ%, past
 float range prints "out of range", and the charts get `null` for it. The toml diff is skipped above 1000 lines or
 65,536 characters per side.
 
@@ -260,7 +295,7 @@ copies it on click (a run without one links to its page). Copying also works on 
 
 On the board, the Run column shows when each run finished (UTC) and links to its page; the config cell shows only
 the resources (e.g. `4×6 64g`, plus `sp…`/`d…` when set, and ` +conf` for custom Spark settings) and its tooltip
-spells out every config field; the Mode column shows the application mode (always `per-engine` since A6). Badge
+spells out every config field; the Mode column shows the application mode (always `per-engine` since A6). The Engines column shows the run's engines (A7: `velox, xflare` or `xflare`). Badge
 colours come from one fixed map (`display.BADGE_CLASS`, sent to the board script in the page's data block):
 `reproducible` green; `partial`, `dev bundle`, `spark conf` and `shared application` amber; `booking overlap` red;
 `overlap unknown` and `offload:*` dim. The run and compare pages colour badges the same way.

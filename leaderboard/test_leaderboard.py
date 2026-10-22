@@ -156,10 +156,23 @@ class Validator(unittest.TestCase):
             (lambda e, m: e.update(manifest=[]), "$.manifest: expected object, got array"),
             (lambda e, m: m["run"].update(scale_factor="100; rm"), "scale_factor"),
             (lambda e, m: e["environment"]["reservation"].update(end="tomorrow"), "reservation.end"),
+            (lambda e, m: m["repeats"][0]["applications"][0].update(spark_conf_effective=[]),
+             "applications[0].spark_conf_effective: expected object, got array"),
+            (lambda e, m: m["repeats"][0]["applications"][0].update(spark_conf_effective={"a": 1}),
+             "applications[0].spark_conf_effective['a']: expected string, got integer"),
+            (lambda e, m: m["repeats"][0]["applications"][1].update(xflare_parameters_effective="x"),
+             "applications[1].xflare_parameters_effective: expected object, got string"),
         ]
         for mutate, expect in cases:
             with self.subTest(expect=expect):
                 self.rejects(mutate, expect)
+
+    def test_accept_effective_settings_without_warnings(self):
+        env = copy.deepcopy(load("valid-envelope.json"))
+        apps = env["manifest"]["repeats"][0]["applications"]
+        apps[0]["spark_conf_effective"] = {"spark.sql.shuffle.partitions": "200"}
+        apps[1]["xflare_parameters_effective"] = {"driver.merge_launch_groups": "true", "driver.launch_parallelism": ""}
+        self.assertEqual(schema.validate_envelope(env), ([], []))
 
     def test_many_duplicates_capped_and_fast(self):
         """Duplicate checks are set-based (linear) and diagnostics are capped."""
@@ -365,12 +378,17 @@ class Eligibility(unittest.TestCase):
     def test_velox_mismatch(self):
         env = load("velox-mismatch.json")
         d = agg.derive(env["manifest"], env)
-        self.assertFalse(d["total_eligible"])
-        self.assertEqual(d["eligible_queries"], [q for q in range(1, 23) if q != 7])
-        self.assertEqual(d["ineligible_reasons"], {"q7": ["velox verify mismatch in repeat 2"],
-                                                   "total": ["queries not eligible: 7"]})
-        self.assertIsNone(d["per_query"]["7"]["xflare_ms"])
-        self.assertIn("partial", d["badges"])
+        self.assertTrue(d["total_eligible"], "A7: a wrong velox answer only blanks that query's velox time")
+        self.assertEqual(d["eligible_queries"], list(range(1, 23)))
+        self.assertEqual(d["ineligible_reasons"], {})
+        q7 = d["per_query"]["7"]
+        self.assertIsNotNone(q7["xflare_ms"])
+        self.assertEqual((q7["velox_ms"], q7["speedup"], q7["velox_problems"]),
+                         (None, None, ["velox verify mismatch in repeat 2"]))
+        self.assertEqual(d["per_query"]["8"]["velox_problems"], [])
+        self.assertIsNotNone(d["totals"]["xflare_ms"])
+        self.assertEqual((d["totals"]["velox_ms"], d["totals"]["speedup"]), (None, None))
+        self.assertNotIn("partial", d["badges"])
 
     def test_partial(self):
         env = load("partial.json")
@@ -429,19 +447,22 @@ class Eligibility(unittest.TestCase):
         self.assertEqual(len(d["eligible_queries"]), 22)
         self.assertEqual(d["ineligible_reasons"], {"total": ["exit_status failed"]})
 
-        d = self.derive_m(lambda m: None, engines=("xflare",))
-        self.assertEqual(d["eligible_queries"], [], "both engines are required")
-        self.assertIn("velox missing in repeat 1", d["ineligible_reasons"]["common"])
+        d = self.derive_m(lambda m: None, engines=("velox",))
+        self.assertEqual(d["eligible_queries"], [], "xflare is required")
+        self.assertIn("xflare missing in repeat 1", d["ineligible_reasons"]["common"])
 
         d = self.derive_m(lambda m: m["repeats"][0]["queries"][2]["engines"]["xflare"]["verify"].update(
             against="previous"))
         self.assertEqual(d["ineligible_reasons"]["q3"], ["xflare not verified against answers in repeat 1"])
 
         d = self.derive_m(lambda m: m["repeats"][0]["queries"][2]["engines"]["velox"].update(verify=None))
-        self.assertEqual(d["ineligible_reasons"]["q3"], ["velox not verified against answers in repeat 1"])
+        self.assertEqual(d["per_query"]["3"]["velox_problems"], ["velox not verified against answers in repeat 1"])
+        self.assertEqual(d["ineligible_reasons"], {})
 
         d = self.derive_m(lambda m: m["repeats"][1]["queries"][3]["engines"]["velox"].update(status="timeout"))
-        self.assertEqual(d["ineligible_reasons"]["q4"], ["velox timeout in repeat 2"])
+        self.assertEqual(d["per_query"]["4"]["velox_problems"], ["velox timeout in repeat 2"])
+        self.assertEqual((d["per_query"]["4"]["velox_ms"], d["per_query"]["4"]["speedup"]), (None, None))
+        self.assertTrue(d["per_query"]["4"]["eligible"])
 
         d = self.derive_m(lambda m: [r.update(status="aborted") for r in m["repeats"]])
         self.assertEqual(d["eligible_queries"], [])
@@ -490,6 +511,12 @@ class Eligibility(unittest.TestCase):
         for (status, engine, change), reason in cases:
             with self.subTest(reason=reason):
                 d = unfinished(status, engine, change)
+                if engine == "velox":        # A7: velox only blanks its own time
+                    self.assertTrue(d["per_query"]["5"]["eligible"])
+                    self.assertEqual(d["per_query"]["5"]["velox_problems"], [reason])
+                    self.assertEqual((d["per_query"]["5"]["velox_ms"], d["per_query"]["5"]["speedup"]), (None, None))
+                    self.assertEqual(d["ineligible_reasons"], {"total": [f"repeat 2 {status}"]})
+                    continue
                 self.assertFalse(d["per_query"]["5"]["eligible"])
                 self.assertEqual(d["ineligible_reasons"]["q5"], [reason])
                 self.assertEqual(d["eligible_queries"], [q for q in range(1, 23) if q != 5])
@@ -532,6 +559,108 @@ class Eligibility(unittest.TestCase):
         m["repeats"][2]["queries"][2]["evidence"]["status"] = "declined"
         self.assertIn("offload:mixed", agg.derive(m, None)["badges"])
         self.assertGreater(agg.DERIVE_VERSION, 8)  # stored rows pick up the offload badge rule
+
+
+class OptionalVelox(unittest.TestCase):
+    """A7: xflare gates every query, velox only fills its own column; the velox total needs all 22 medians."""
+
+    def test_xflare_only_run_ranks_without_velox(self):
+        d = agg.derive(mf.build_manifest(engines=("xflare",)), None)
+        self.assertTrue(d["total_eligible"])
+        self.assertEqual(d["ineligible_reasons"], {})
+        self.assertEqual((d["totals"]["xflare_ms"], d["totals"]["velox_ms"], d["totals"]["speedup"]),
+                         (sum(1000 + 37 * q + 4 for q in range(1, 23)), None, None))
+        self.assertEqual(d["per_query"]["3"]["velox_problems"], [])
+        self.assertIsNone(d["per_query"]["3"]["velox_ms"])
+        self.assertEqual((d["config"]["engines"], d["config"]["codec"]), ("xflare", "snappy"))
+
+    def test_a_velox_problem_blanks_only_that_query(self):
+        def blank(change):
+            return lambda m: m["repeats"][1]["queries"][2]["engines"]["velox"].update(change)
+        cases = [
+            (blank({"status": "error", "elapsed_ms": None}), "velox error in repeat 2"),
+            (blank({"elapsed_ms": 0}), "velox elapsed_ms not positive in repeat 2"),
+            (blank({"verify": {"against": "answers", "status": "mismatch", "detail": None}}),
+             "velox verify mismatch in repeat 2"),
+            (lambda m: m["repeats"][1]["queries"][2]["engines"].pop("velox"), "velox missing in repeat 2"),
+        ]
+        for mutate, problem in cases:
+            with self.subTest(problem=problem):
+                m = mf.build_manifest()
+                mutate(m)
+                d = agg.derive(m, None)
+                q3 = d["per_query"]["3"]
+                self.assertEqual((q3["eligible"], q3["velox_ms"], q3["speedup"], q3["velox_problems"]),
+                                 (True, None, None, [problem]))
+                self.assertIsNotNone(q3["xflare_ms"])
+                self.assertEqual((d["total_eligible"], d["ineligible_reasons"]), (True, {}))
+                self.assertEqual((d["totals"]["velox_ms"], d["totals"]["speedup"]), (None, None))
+                self.assertIsNotNone(d["totals"]["xflare_ms"])
+                self.assertIsNotNone(d["per_query"]["4"]["speedup"])
+
+    def test_xflare_problem_still_disqualifies(self):
+        m = mf.build_manifest()
+        m["repeats"][1]["queries"][2]["engines"]["xflare"]["verify"]["status"] = "mismatch"
+        d = agg.derive(m, None)
+        self.assertEqual(d["ineligible_reasons"]["q3"], ["xflare verify mismatch in repeat 2"])
+        self.assertFalse(d["per_query"]["3"]["eligible"])
+
+    def test_single_engine_shared_run_counts_as_per_engine(self):
+        for mode in (None, "shared"):
+            with self.subTest(mode=mode):
+                d = agg.derive(mf.build_manifest(engines=("xflare",), application_mode=mode), None)
+                self.assertTrue(d["total_eligible"])
+                self.assertEqual(d["config"]["application_mode"], "per-engine")
+                self.assertNotIn(agg.SHARED_BADGE, d["badges"])
+                self.assertNotIn("common", d["ineligible_reasons"])
+        d = agg.derive(mf.build_manifest(application_mode="shared"), None)
+        self.assertFalse(d["total_eligible"], "two engines in one application still never rank (A6)")
+
+    def test_engines_and_codec_are_config_keys(self):
+        d = agg.derive(mf.build_manifest(codec="zstd"), None)
+        self.assertTrue(set(("engines", "codec")) <= set(agg.CONFIG_KEYS))
+        self.assertTrue(d["config_label"].endswith(" · per-engine · velox,xflare · zstd"))
+        for flt, want in (({"engines": "velox,xflare"}, True), ({"engines": "xflare"}, False),
+                          ({"codec": "zstd"}, True), ({"codec": "snappy"}, False)):
+            self.assertEqual(agg.matches_filter(d, flt), want, flt)
+        self.assertEqual(agg.tab_of(d), ("100", "zstd"))
+
+
+class SettingsDifferAcrossApplications(unittest.TestCase):
+    """A7: the same engine's gated Spark settings must not change between applications of a run."""
+
+    def derive_with(self, maps):
+        """maps: {(repeat index, engine): spark_conf_effective, or None for the field absent}."""
+        m = mf.build_manifest()
+        for rep in m["repeats"]:
+            for app in rep["applications"]:
+                value = maps.get((rep["index"], app["engine"]), {"spark.sql.shuffle.partitions": "200"})
+                if value is not None:
+                    app["spark_conf_effective"] = value
+        return agg.derive(m, None)
+
+    def test_cases(self):
+        base = {"spark.sql.shuffle.partitions": "200", "spark.executor.cores": "6"}
+        cases = [
+            ("identical", {}, False),
+            ("gated key changed", {(2, "xflare"): {**base, "spark.sql.shuffle.partitions": "400"}}, True),
+            ("gated key only in one", {(2, "velox"): {**base, "spark.gluten.new": "1"}}, True),
+            ("ungated key changed", {(2, "xflare"): {**base, "spark.executor.cores": "8"},
+                                     (1, "xflare"): base}, False),
+            ("engines differ from each other", {(r, "velox"): {"spark.sql.shuffle.partitions": "1"}
+                                                for r in (1, 2, 3)}, False),
+            ("one application recorded none", {(2, "xflare"): None}, False),
+        ]
+        for name, maps, differs in cases:
+            with self.subTest(name):
+                d = self.derive_with(maps)
+                reasons = d["ineligible_reasons"].get("common", [])
+                self.assertEqual(agg.SPARK_SETTINGS_DIFFER in reasons, differs)
+                self.assertEqual(d["total_eligible"], not differs)
+
+    def test_a_malformed_map_is_an_application_problem(self):
+        d = self.derive_with({(2, "xflare"): ["x"]})
+        self.assertEqual(d["ineligible_reasons"]["common"], ["applications missing or malformed in repeat 2"])
 
 
 class ReproArguments(unittest.TestCase):
@@ -811,8 +940,9 @@ class Aggregation(unittest.TestCase):
         d = with_q1("velox", [BIG, BIG, BIG])
         self.assertEqual(agg.metric_values(d, "q1"), {"xflare_ms": 1041, "velox_ms": BIG, "speedup": None})
         self.assertTrue(d["per_query"]["1"]["eligible"])
-        self.assertEqual(d["ineligible_reasons"], {"total": [agg.OUT_OF_RANGE]})
-        self.assertEqual(agg.metric_values(d, "total"), {"xflare_ms": None, "velox_ms": None, "speedup": None})
+        self.assertEqual(d["ineligible_reasons"], {}, "a velox total beyond float range never unranks the run")
+        self.assertEqual(agg.metric_values(d, "total"),
+                         {"xflare_ms": sum(1000 + 37 * q + 4 for q in range(1, 23)), "velox_ms": None, "speedup": None})
         d = with_q1("xflare", [BIG, BIG, BIG])
         self.assertEqual(d["per_query"]["1"]["speedup"], 0.0)                 # underflows, does not raise
 
@@ -903,8 +1033,10 @@ class Aggregation(unittest.TestCase):
         self.assertLess(agg.utc_key(early), agg.utc_key(late))
 
     def test_rank_per_query_and_withdrawn(self):
-        mis = row(load("velox-mismatch.json"))
         ok = row(load("valid-envelope.json"))
+        wrong = mf.build_manifest(run_id=mf.fixture_uuid(7))
+        wrong["repeats"][1]["queries"][6]["engines"]["xflare"]["verify"]["status"] = "mismatch"
+        mis = row(mf.build_envelope(wrong))
         self.assertEqual([r["run_id"] for r in agg.rank([mis, ok], "q7")], [ok["run_id"]])
         self.assertEqual(len(agg.rank([mis, ok], "q8")), 2)
         self.assertEqual(agg.rank([mis, ok], "total"), [ok])
@@ -986,7 +1118,8 @@ class Aggregation(unittest.TestCase):
         json.dumps(d, allow_nan=False)
         self.assertEqual(d["content_id"], agg.content_id(env["manifest"]))
         self.assertEqual(d["config_label"],
-                         "4×6 · 64g · sp=- · dev=- · Resource.mu.d1.toml.in · xflare-admin-2026.10.1 · per-engine")
+                         "4×6 · 64g · sp=- · dev=- · Resource.mu.d1.toml.in · xflare-admin-2026.10.1 · per-engine"
+                         " · velox,xflare · snappy")
         self.assertEqual((d["sf"], d["repeats_requested"], d["repeats_completed"], d["submitter"], d["device_ids"]),
                          ("100", 3, 3, "bench@example.com", ["0"]))
 
@@ -1258,7 +1391,7 @@ class ApplicationMode(unittest.TestCase):
         for item, mode in ((shared, "shared"), (per_engine, "per-engine")):
             d = item["derived"]
             self.assertEqual(d["config"]["application_mode"], mode)
-            self.assertTrue(d["config_label"].endswith(" · " + mode))
+            self.assertIn(" · " + mode + " · ", d["config_label"])
             self.assertTrue(agg.matches_filter(d, {"application_mode": mode}))
             self.assertFalse(agg.matches_filter(d, {"application_mode": "other"}))
 
@@ -1277,11 +1410,11 @@ class ApplicationMode(unittest.TestCase):
 
     def test_shared_mode_does_not_restore_invalid_measurements(self):
         m = mf.build_manifest(application_mode="shared")
-        m["repeats"][1]["queries"][6]["engines"]["velox"]["verify"]["status"] = "mismatch"
+        m["repeats"][1]["queries"][6]["engines"]["xflare"]["verify"]["status"] = "mismatch"
         d = agg.derive(m, None)
         self.assertFalse(d["per_query"]["7"]["eligible"])
         self.assertIsNone(d["per_query"]["7"]["xflare_ms"])
-        self.assertEqual(d["ineligible_reasons"]["q7"], ["velox verify mismatch in repeat 2"])
+        self.assertEqual(d["ineligible_reasons"]["q7"], ["xflare verify mismatch in repeat 2"])
         self.assertEqual(d["totals"], {"xflare_ms": None, "velox_ms": None, "speedup": None})
         self.assertEqual(d["per_query"]["1"]["xflare_ms"], 1041)
         self.assertIn("shared application: engine order affects timings", d["ineligible_reasons"]["common"])

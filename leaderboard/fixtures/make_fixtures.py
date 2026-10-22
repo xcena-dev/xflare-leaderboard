@@ -47,7 +47,7 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
                    record_answers: bool = False, elapsed=default_elapsed, queries=QUERIES,
                    engines=("velox", "xflare"), started_at: datetime = T0, seed: str = "",
                    application_mode: str | None = "per-engine", spark_conf: dict | None = None,
-                   spark_conf_readback: dict | None = None) -> dict:
+                   spark_conf_readback: dict | None = None, codec: str = "snappy") -> dict:
     """`elapsed(q, r, engine) -> int` sets every timing; `seed` varies the hashes/revisions between runs."""
     seed = seed or run_id
     toml_in = f"[resource]\nexecutors = {executors}\ncores = {executor_cores}\n"
@@ -110,7 +110,7 @@ def build_manifest(*, run_id: str = fixture_uuid(1), sf: str = "100", executors:
         "run": {
             "argv": argv,
             "scale_factor": sf,
-            "codec": "snappy",
+            "codec": codec,
             "engines": list(engines),
             "queries": list(queries),
             "repeat_requested": repeats,

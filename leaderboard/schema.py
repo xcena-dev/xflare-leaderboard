@@ -17,6 +17,9 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 SUBMISSION_SCHEMA = "xflare-bench-submission/1"
 MANIFEST_SCHEMA = "xflare-bench-manifest/1"
 ENGINES = ("velox", "xflare")
+CODECS = ("snappy", "zstd", "uncompressed")
+# A7: optional per-application maps of what the session and the engine ran with (string values).
+APPLICATION_SETTINGS = ("spark_conf_effective", "xflare_parameters_effective")
 MAX_MESSAGES = 50  # per list; a hostile body must not turn into a multi-megabyte 400 response
 # Contract amendment: any submitted JSON value is at most 64 levels deep (each object/array is one level). Every later
 # step (hashing, storage, rendering) recurses, so deeper documents are refused before anything else touches them.
@@ -29,7 +32,7 @@ _TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 UUID4_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")  # use fullmatch
-_SF = re.compile(r"[0-9]+(\.[0-9]+)?")
+SCALE_FACTOR_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 
 
 class BadJSON(ValueError):
@@ -257,20 +260,12 @@ def _manifest(v: _V, m, path):
         p = f"{path}.run"
         v.str_(r, "application_mode", p, enum=("shared", "per-engine"))
         for field in ("spark_conf", "spark_conf_readback"):
-            if field not in r:
-                continue
-            settings = r[field]
-            if not isinstance(settings, dict):
-                v.err(f"{p}.{field}", f"expected object, got {_type_name(settings)}")
-                continue
-            for key, value in settings.items():
-                if not isinstance(value, str):
-                    v.err(f"{p}.{field}[{_snip(key)}]", f"expected string, got {_type_name(value)}")
+            _string_map(v, r, field, p)
         for i, s in enumerate(v.list_(r, "argv", p)):
             if not isinstance(s, str):
                 v.err(f"{p}.argv[{i}]", f"expected string, got {_type_name(s)}")
-        v.str_(r, "scale_factor", p, pattern=_SF, what="a decimal scale factor")
-        v.str_(r, "codec", p, enum=("snappy", "zstd", "uncompressed"))
+        v.str_(r, "scale_factor", p, pattern=SCALE_FACTOR_RE, what="a decimal scale factor")
+        v.str_(r, "codec", p, enum=CODECS)
         engines = v.list_(r, "engines", p)
         if isinstance(r.get("engines"), list) and not engines:
             v.err(f"{p}.engines", "empty")
@@ -381,6 +376,19 @@ def _manifest(v: _V, m, path):
                     v.err(f"{pq}.evidence.detail", f"expected object or null, got {_type_name(ev['detail'])}")
 
 
+def _string_map(v: _V, obj: dict, field: str, path: str):
+    """`obj[field]`, when present, must be an object of string values (A5, A7)."""
+    if field not in obj:
+        return
+    settings = obj[field]
+    if not isinstance(settings, dict):
+        v.err(f"{path}.{field}", f"expected object, got {_type_name(settings)}")
+        return
+    for key, value in settings.items():
+        if not isinstance(value, str):
+            v.err(f"{path}.{field}[{_snip(key)}]", f"expected string, got {_type_name(value)}")
+
+
 def _applications(v: _V, rep: dict, path: str, run: dict):
     p = f"{path}.applications"
     if "applications" not in rep:
@@ -398,9 +406,11 @@ def _applications(v: _V, rep: dict, path: str, run: dict):
     fields = ("engine", "invocation", "app_id", "artifact_id", "bundle", "started_at", "finished_at", "cleanup")
     for i, application in enumerate(applications):
         pa = f"{p}[{i}]"
-        app = v.obj(application, pa, fields)
+        app = v.obj(application, pa, fields, optional=APPLICATION_SETTINGS)
         if app is None:
             continue
+        for field in APPLICATION_SETTINGS:
+            _string_map(v, app, field, pa)
         engine = v.str_(app, "engine", pa, enum=ENGINES)
         if engine in ENGINES:
             if engine not in positions:

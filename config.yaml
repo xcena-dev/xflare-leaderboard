@@ -11,6 +11,7 @@ leaderboard:
   storage:
     # Local disk, created once by the operator (see README); never inside this checkout.
     data_dir: /home/sw-devops/data/xflare_leaderboard
+  # Pinned tabs, snappy codec, always listed first; every other (SF, codec) of the stored runs gets its own tab (A7).
   tabs: ["100", "1000"]
   # The board's first filter; the hero is the first Total-eligible run under it, or, when none matches, the
   # tab's fastest in any configuration (A3).
