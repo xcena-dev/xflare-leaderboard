@@ -389,6 +389,21 @@
       let resp, data;
       try {
         resp = await fetch(`/api/leaderboard/board?${q}`);
+      } catch (e) {
+        if (mine === generation) showStatus('board 를 불러오지 못했습니다.');
+        return;
+      }
+      if (mine !== generation) return;
+      // An answer from a service whose script is not this one (a page left open across a deploy, or after going back
+      // a version) may not fit this script: keep the hero and board as they are and ask for a reload. Read before the
+      // body, which may not be JSON. Every answer since this check names its script; a 2xx without one is from an
+      // older service.
+      const served = resp.headers.get('X-Leaderboard-Script');
+      if (served ? served !== cfg.script : resp.ok) {
+        showStatus('서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요.');
+        return;
+      }
+      try {
         data = await resp.json();
       } catch (e) {
         if (mine === generation) showStatus('board 를 불러오지 못했습니다.');

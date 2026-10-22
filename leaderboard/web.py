@@ -13,9 +13,11 @@ What a page or summary shows is bounded by the budgets in ``display``.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import itertools
 import json
 import math
+import os
 from fractions import Fraction
 
 from flask import Blueprint, Response, abort, current_app, jsonify, redirect, render_template, request, url_for
@@ -56,6 +58,8 @@ class _UnknownRun(Exception):
 def init_app(app, cfg: dict):
     """Register the blueprint with the leaderboard's settings (config.yaml's ``leaderboard`` block)."""
     app.extensions["leaderboard_cfg"] = cfg
+    # Hashed once, at start: a missing asset fails here, not in every later answer.
+    app.extensions["leaderboard_assets"] = {name: _digest(os.path.join(app.static_folder, name)) for name in _ASSETS}
     app.register_blueprint(bp)
 
 
@@ -63,6 +67,30 @@ def init_app(app, cfg: dict):
 # (through the board page's data block) its script.
 bp.record_once(lambda state: state.app.add_template_global(BUDGET, "lb_budget"))
 bp.record_once(lambda state: state.app.add_template_global(BADGE_CLASS, "lb_badge_classes"))
+
+
+_ASSETS = ("style.css", "leaderboard.css", "leaderboard.js")
+_BOARD_SCRIPT = "leaderboard.js"
+_SCRIPT_HEADER = "X-Leaderboard-Script"
+
+
+def _digest(path: str) -> str:
+    """The first 12 hex digits of the file's sha256."""
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:12]
+
+
+def _asset_version(name: str) -> str:
+    return current_app.extensions["leaderboard_assets"][name]
+
+
+def _static_url(name: str) -> str:
+    return url_for("static", filename=name, v=_asset_version(name))
+
+
+bp.record_once(lambda state: state.app.add_template_global(_static_url, "lb_static"))
+bp.record_once(lambda state: state.app.add_template_global(lambda: _asset_version(_BOARD_SCRIPT),
+                                                           "lb_script_version"))
 
 
 def _cfg() -> dict:
@@ -475,6 +503,14 @@ def api_board():
                   "repro": r["derived"]["repro"]["command"]}
                  for i, r in enumerate(ranked[:top])],
     })
+
+
+@bp.after_request
+def _name_script(resp):
+    # Every board answer, errors included: a stale page must not act on a 400 or 503 either.
+    if request.endpoint == "leaderboard.api_board":
+        resp.headers[_SCRIPT_HEADER] = _asset_version(_BOARD_SCRIPT)
+    return resp
 
 
 # --- pages ----------------------------------------------------------------------

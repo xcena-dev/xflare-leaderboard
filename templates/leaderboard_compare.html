@@ -6,8 +6,8 @@
 <head>
   <meta charset="utf-8">
   <title>Compare {{ runs | length }} runs — {{ benchmark.title }}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='leaderboard.css') }}">
+  <link rel="stylesheet" href="{{ lb_static('style.css') }}">
+  <link rel="stylesheet" href="{{ lb_static('leaderboard.css') }}">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body data-page="compare">
@@ -87,6 +87,6 @@
 </main>
 
 <script type="application/json" id="lb-compare-data">{{ chart | tojson }}</script>
-<script src="{{ url_for('static', filename='leaderboard.js') }}"></script>
+<script src="{{ lb_static('leaderboard.js') }}"></script>
 </body>
 </html>
