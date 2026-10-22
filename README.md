@@ -36,6 +36,15 @@ XFLARE_LEADERBOARD_DATA=/tmp/lb-data python3 app.py --host 127.0.0.1 --port 8894
   missing runtime. `XFLARE_LEADERBOARD_SKIP_NODE_TESTS=1` skips the page-script tests instead; only the auto-updater's
   self-check sets it.
 
+**Before every merge to main, run the page-script tests by hand.** Nothing else runs them: there is no CI, and the
+server's auto-updater skips them (server 60's node is 12) and deploys what passes the rest. A page-script regression
+merged without this run goes live unattended. As a non-root user, on a machine with node ≥ 14:
+```
+node --version                                                              # v14 or later
+env -u XFLARE_LEADERBOARD_SKIP_NODE_TESTS -u XFLARE_LEADERBOARD_CONFIG python3 leaderboard/test_leaderboard.py
+```
+It must end in a plain `OK`. `skipped=` in that line means some tests did not run: never set the skip variable here.
+
 ## Payload contract
 
 This section restates data contract v1 (frozen 2026-10-19, shared with the producer `spark-tpch.sh --submission`
@@ -475,8 +484,8 @@ boot and then every 10 min (+ up to 60 s jitter). A tick:
    holds a commit `origin/main` lacks.
 3. Runs `leaderboard/test_leaderboard.py` with `/usr/bin/python3` on a `git archive` of `origin/main` in a temp dir,
    with `XFLARE_LEADERBOARD_DATA` pointed at a scratch dir and the page-script tests skipped: server 60's node is 12,
-   and the page script runs in browsers, not on the server. Those tests must pass on a machine with node ≥ 14 before
-   a merge; no CI runs them. About 80 s on server 60. A failure prints the log's tail and leaves the checkout and the
+   and the page script runs in browsers, not on the server. They must be run by hand before every merge (Run
+   locally). About 80 s on server 60. A failure prints the log's tail and leaves the checkout and the
    service as they are; the next tick tries again.
 4. Checks the checkout again (a pin made meanwhile holds), fast-forwards it, runs
    `sudo -n /usr/bin/systemctl restart xflare-leaderboard`, and gives
