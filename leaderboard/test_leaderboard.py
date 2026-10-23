@@ -1993,6 +1993,31 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 2)
         c.close()
 
+    def test_v1_database_gains_the_target_tables(self):
+        """A database written before A8 (user_version 1, runs only) opens with the target tables added and its runs
+        intact: the live service's upgrade path."""
+        run_id = self.store.put(self.env())[1]["run_id"]
+        import sqlite3
+        c = sqlite3.connect(os.path.join(self.tmp, "leaderboard.sqlite3"))
+        c.executescript("DROP TABLE target_events; DROP TABLE targets; PRAGMA user_version = 1;")
+        c.close()
+        s = Store(self.tmp)
+        self.assertEqual(s.get(run_id)["run_id"], run_id)
+        self.assertIsNone(s.get_target("100", "snappy"))
+        self.assertEqual(s.set_target("100", "snappy", run_id, None, "a", 0)[0], "set")
+        c = sqlite3.connect(os.path.join(self.tmp, "leaderboard.sqlite3"))
+        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 2)
+        c.close()
+
+    def test_target_history_keeps_the_latest_50(self):
+        """The history read lists at most 50 changes, newest first; every change stays stored."""
+        s = self.store
+        ids = [s.put(self.env(n))[1]["run_id"] for n in (1, 2)]
+        for revision in range(55):
+            self.assertEqual(s.set_target("100", "snappy", ids[revision % 2], None, "a", revision)[0], "set")
+        pin, events = s.target_history("100", "snappy")
+        self.assertEqual((len(events), events[0]["revision"], events[-1]["revision"], pin["revision"]), (50, 55, 6, 55))
+
     def test_target_revisions_and_history(self):
         """A8: a target change applies only at the revision the caller saw and only to a stored, non-withdrawn run;
         a repeat of the stored state writes nothing; every change is one event, newest first."""

@@ -627,7 +627,6 @@ def api_board():
         "facets": facets,
         "facets_truncated": facets_truncated,
         "hero": _hero(hero, None if target_derived is None else target_derived["totals"]["velox_ms"]),
-        # A8: the run the tab compares with (velox side, any configuration) and its goal speedup.
         "target": target,
         "target_pin": pin,
         "hero_fallback": hero_fallback,

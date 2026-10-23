@@ -128,7 +128,7 @@ The routes are in API below.
   or as hero, and an identical re-upload (200) does not revive it.
 - Unknown properties are warnings, not errors (inside `manifest` they are still part of the hash). Request bodies
   are capped at 8 MiB. A1: any JSON value in a submission is at most 64 levels deep (each object or array is one
-  level); deeper bodies (submission, dry run, withdraw) are a 400
+  level); deeper bodies (submission, dry run, withdraw, target change) are a 400
   `{"errors": ["invalid JSON: JSON nesting deeper than 64 levels"]}` and nothing is stored. A validation 400 lists
   at most 50 errors and 50 warnings, then one line saying how many more.
 

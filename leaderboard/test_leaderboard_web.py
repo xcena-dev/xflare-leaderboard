@@ -1324,7 +1324,7 @@ class TestBoardScript(WebCase):
                                "hist": get("/api/leaderboard/targets/100/snappy"), "pin": '{"revision": 3}'}
 
     def test_target_history_pins_an_earlier_target_again(self):
-        """A8: the history lists every change; "다시 지정" posts that earlier target and goal at the revision the
+        """A8: the history lists the latest changes; "다시 지정" posts that earlier target and goal at the revision the
         history showed, then reloads the board."""
         first, second, responses = self.target_tabs()
         out = self.drive([{"answer": 0, "with": "100"}, {"open": "hero-target-history"}, {"answer": 1, "with": "hist"},
@@ -1528,6 +1528,8 @@ class TestTarget(WebCase):
         link = self.board(f"?target={hero}")["target"]
         self.assertEqual((link["run_id"], link["source"], link["goal"]), (hero, "link", None))
         self.assertIsNone(self.board("?target=none")["target"])
+        unknown = self.board(f"?target={rid()}")
+        self.assertEqual((unknown["target"]["problem"], unknown["hero"]["vs_target"]), ("unknown run", None))
         self.assertTrue(self.board("?target=nope", status=400)["errors"][0].startswith("target:"))
         self.c.post(f"/api/leaderboard/runs/{target}/withdraw", json={"actor": "x", "reason": "gone"})
         gone = self.board()
