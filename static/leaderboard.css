@@ -92,7 +92,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 
 /* Column widths for the fixed layout (cells are border-box: padding included); Submitter takes what is left.
    A narrower page scrolls the table. */
-.lb-board { min-width: 1300px; }
+.lb-board { min-width: 1324px; }
 .lb-board th, .lb-board td { padding-left: 8px; padding-right: 8px; }
 .lb-board th:nth-child(1) { width: 52px; }
 .lb-board th:nth-child(2) { width: 172px; }
