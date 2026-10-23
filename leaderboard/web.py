@@ -440,7 +440,7 @@ def _hero(row: dict | None, target_velox) -> dict | None:
     return {
         **_run_summary(row),
         # Always the totals, whatever the board's metric: the hero is the Total board's.
-        "vs_target": _vs_target(target_velox, d, "total"),
+        "vs_target": _with_vs_target(aggregate.metric_values(d, "total"), target_velox)["vs_target"],
         "per_query": [{"q": q, **aggregate.metric_values(d, m)}
                       for q, m in zip(aggregate.QUERY_IDS, aggregate.METRICS[1:])],
     }
@@ -463,7 +463,7 @@ def _target_problem(row: dict | None, sf: str, codec: str) -> str | None:
     if aggregate.tab_of(d) != (sf, codec):
         return f"on another tab ({tab_label(*aggregate.tab_of(d))})"
     if d["totals"]["velox_ms"] is None:
-        return "no velox total (velox is missing or wrong on some query)"
+        return "no velox total"
     return None
 
 
@@ -503,10 +503,10 @@ def _effective_target(store, sf: str, codec: str, pin: dict, rows: dict) -> tupl
     return out, d
 
 
-def _vs_target(target_velox, derived: dict, metric: str) -> float | None:
-    """The target's velox for ``metric`` over this run's xflare; None without a usable target."""
-    return None if target_velox is None else aggregate.speedup(
-        target_velox, aggregate.metric_values(derived, metric)["xflare_ms"])
+def _with_vs_target(values: dict, target_velox) -> dict:
+    """A run's metric values plus ``vs_target``: the target's velox over the run's xflare, None without a target."""
+    return {**values, "vs_target": None if target_velox is None
+            else aggregate.speedup(target_velox, values["xflare_ms"])}
 
 
 def _known_tab(sf: str, codec: str) -> bool:
@@ -639,8 +639,7 @@ def api_board():
                          "config_label": cut(r["derived"]["config_label"])} for r in shared[:top]],
         # A row carries its reproduce script so the board can copy it within the click.
         "rows": [{"rank": i + 1, **_run_summary(r),
-                  "value": {**aggregate.metric_values(r["derived"], metric),
-                            "vs_target": _vs_target(target_velox, r["derived"], metric)},
+                  "value": _with_vs_target(aggregate.metric_values(r["derived"], metric), target_velox),
                   "repro": r["derived"]["repro"]["command"]}
                  for i, r in enumerate(ranked[:top])],
     })

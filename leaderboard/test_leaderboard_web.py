@@ -100,9 +100,9 @@ class WebCase(unittest.TestCase):
         self.post(build_envelope(m))
         return m["run_id"]
 
-    def pin_target(self, run_id, revision=0, goal=None, status=200, sf="100", **headers):
-        """POST a tab's target (A8) and check the status; returns the JSON answer."""
-        r = self.c.post(f"/api/leaderboard/targets/{sf}/snappy",
+    def pin_target(self, run_id, revision=0, goal=None, status=200, **headers):
+        """POST the SF-100 tab's target (A8) and check the status; returns the JSON answer."""
+        r = self.c.post("/api/leaderboard/targets/100/snappy",
                         json={"actor": "a@x", "expected_revision": revision, "run_id": run_id, "goal": goal},
                         headers=headers)
         self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:300])
@@ -917,6 +917,16 @@ class TestPageBudgets(WebCase):
         self.assertIn("argv 를 spark-tpch.sh 의 옵션으로 읽지 못했습니다", html)
         self.assertNotIn('id="repro-cmd"', html)
 
+    def test_withdraw_on_a_lost_connection(self):
+        """A lost connection while withdrawing re-enables the button and says the outcome is unknown."""
+        run_id = self.submit()
+        html = self.c.get(f"{LB}/run/{run_id}").get_data(as_text=True)
+        data = re.search(r'id="lb-run-data">(.*?)</script>', html, re.S).group(1)
+        out = run_page_js("run", ids=re.findall(r'id="([^"]+)"', html), data={"lb-run-data": data},
+                          click="lb-withdraw", prompts=["me@x", "why"], fetch="{}", reject_post=True)
+        self.assertEqual((len(out["fetches"]), out["reloads"], out["disabled"]["lb-withdraw"]), (1, 0, False))
+        self.assertIn("저장됐는지 알 수 없으니", out["alerts"][0])
+
     def test_withdraw_attaches_without_copy_button(self):
         """With the command omitted there is no copy button; the page script must still wire withdraw."""
         m = build_manifest(run_id=rid())
@@ -1333,6 +1343,37 @@ class TestBoardScript(WebCase):
         self.assertIn("HTTP 409", refused["alerts"][0])
         self.assertEqual(len(refused["requests"]), 3)                         # nothing reloads after a refusal
 
+    def test_open_history_refetches_only_on_a_new_revision(self):
+        """A8: with the history open, a board answer at a new revision fetches it again; one at the same revision
+        (another metric) does not. The target line names the pinned run and who set it."""
+        _, second, responses = self.target_tabs()
+        newer = json.loads(responses["100"])
+        newer["target_pin"]["revision"] += 1
+        responses["newer"] = json.dumps(newer)
+        out = self.drive([{"answer": 0, "with": "100"}, {"open": "hero-target-history"}, {"answer": 1, "with": "hist"},
+                          {"click": "Q1"}, {"answer": 2, "with": "100"}, {"click": "Q2"}, {"answer": 3, "with": "newer"}],
+                         responses)
+        targets = [u for u in out["requests"] if "/api/leaderboard/targets/" in u]
+        self.assertEqual(len(targets), 2, out["requests"])                    # the opening, then the new revision
+        self.assertFalse(out["targetHidden"])
+
+    def test_target_line_wording(self):
+        """A8: what the target line says without a target, for a link's own target and for ?target=none."""
+        first, second, responses = self.target_tabs()
+        never = json.loads(responses["1000"])
+        self.assertEqual(never["target_pin"]["revision"], 0)
+        out = run_page_js("board", data=self.page_data(), fetch=responses["1000"])
+        self.assertTrue(out["text"]["hero-target"].startswith("이 탭에 target 이 없습니다"))
+        none = run_page_js("board", data=self.page_data(),
+                           fetch=self.c.get("/api/leaderboard/board?sf=100&target=none").get_data(as_text=True))
+        self.assertEqual(none["text"]["hero-target"], "이 보기는 target 없이 같은 run 의 velox 와 비교합니다.")
+        link = run_page_js("board", data=self.page_data(),
+                           fetch=self.c.get(f"/api/leaderboard/board?sf=100&target={first}").get_data(as_text=True))
+        self.assertIn(" · 이 링크에서만 (저장된 target 아님)", link["texts"])
+        pinned = run_page_js("board", data=self.page_data(), fetch=responses["100"])
+        self.assertTrue(any(t.endswith(" 에 지정") and "a@x 가 " in t for t in pinned["texts"]), pinned["texts"])
+        self.assertIn(f"{LB}/run/{second}", pinned["hrefs"])
+
     def test_hero_chart_draws_the_target_velox(self):
         """A8: the hero chart's bars are the hero's xflare, the target's velox and (faint) the hero's own velox."""
         first, second, responses = self.target_tabs()
@@ -1472,10 +1513,22 @@ class TestTarget(WebCase):
         q1 = self.board("?metric=q1")
         self.assertAlmostEqual(q1["rows"][0]["value"]["vs_target"], 2001 / 401)
         self.assertEqual(q1["hero"]["vs_target"], board["hero"]["vs_target"])        # the hero keeps the totals
+        # Pinning a ranked run (here the hero itself) changes no rank, count or hero, on any metric or view.
+        plain = {m: self.board(f"?metric={m}&target=none") for m in ("total", "q1")}
+        self.set(hero, revision=1)
+        for m, before in plain.items():
+            for query in (f"?metric={m}", f"?metric={m}&target={target}"):
+                after = self.board(query)
+                self.assertEqual([(r["rank"], r["run_id"], r["value"]["speedup"]) for r in after["rows"]],
+                                 [(r["rank"], r["run_id"], r["value"]["speedup"]) for r in before["rows"]], query)
+                self.assertEqual((after["eligible_count"], after["hero"]["run_id"], after["hero_fallback"]),
+                                 (before["eligible_count"], before["hero"]["run_id"], before["hero_fallback"]), query)
+        self.assertEqual(self.board()["target"]["run_id"], hero)
+        self.set(target, revision=2, goal=1.5)
         link = self.board(f"?target={hero}")["target"]
         self.assertEqual((link["run_id"], link["source"], link["goal"]), (hero, "link", None))
         self.assertIsNone(self.board("?target=none")["target"])
-        self.board("?target=nope", status=400)
+        self.assertTrue(self.board("?target=nope", status=400)["errors"][0].startswith("target:"))
         self.c.post(f"/api/leaderboard/runs/{target}/withdraw", json={"actor": "x", "reason": "gone"})
         gone = self.board()
         self.assertEqual((gone["target"]["problem"], gone["hero"]["vs_target"]), ("withdrawn", None))

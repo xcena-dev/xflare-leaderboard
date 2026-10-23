@@ -360,11 +360,15 @@ class Store:
                 raise
         return self.get(run_id) if found else None
 
+    @staticmethod
+    def _target_row(conn: sqlite3.Connection, sf: str, codec: str) -> sqlite3.Row | None:
+        return conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone()
+
     def get_target(self, sf: str, codec: str) -> dict | None:
         """The tab's pinned target {sf, codec, run_id, goal, revision, updated_by, updated_at}; None when never
         set. ``goal`` is the target speedup (velox / xflare) the tab aims for, or None."""
         with self._db("read") as conn:
-            r = conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone()
+            r = self._target_row(conn, sf, codec)
         return dict(r) if r else None
 
     def target_history(self, sf: str, codec: str, limit: int = 50) -> tuple[dict | None, list[dict]]:
@@ -373,11 +377,14 @@ class Store:
         with self._db("read") as conn:
             conn.execute("BEGIN")
             try:
-                pin = conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone()
+                pin = self._target_row(conn, sf, codec)
                 rows = conn.execute("SELECT * FROM target_events WHERE sf = ? AND codec = ? ORDER BY event_id DESC"
                                     " LIMIT ?", (sf, codec, limit)).fetchall()
-            finally:
                 conn.execute("COMMIT")
+            except BaseException:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                raise
         return (dict(pin) if pin else None), [dict(r) for r in rows]
 
     def set_target(self, sf: str, codec: str, run_id: str | None, goal: float | None, actor: str,
@@ -390,7 +397,7 @@ class Store:
         with self._db("target") as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                cur = conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone()
+                cur = self._target_row(conn, sf, codec)
                 revision = cur["revision"] if cur else 0
                 before = (cur["run_id"], cur["goal"]) if cur else (None, None)
                 live = run_id is None or conn.execute("SELECT 1 FROM runs WHERE run_id = ? AND withdrawn = 0",
@@ -406,7 +413,7 @@ class Store:
                 conn.execute("INSERT INTO target_events (sf, codec, revision, before_run_id, after_run_id,"
                              " before_goal, after_goal, actor, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                              (sf, codec, revision + 1, before[0], run_id, before[1], goal, actor, now))
-                state = dict(conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone())
+                state = dict(self._target_row(conn, sf, codec))
                 conn.execute("COMMIT")
             except BaseException:
                 with contextlib.suppress(sqlite3.Error):
