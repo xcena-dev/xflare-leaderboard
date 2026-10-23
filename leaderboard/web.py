@@ -25,7 +25,7 @@ from flask import Blueprint, Response, abort, current_app, jsonify, redirect, re
 from . import aggregate, repro
 from .display import (BADGE_CLASS, BENCH_ID, BUDGET, DEFAULT_CODEC, EFFECTIVE_ITEMS, FACET_VALUES, MATRIX_REPEATS,
                       PREVIEW_CHARS, PREVIEW_ITEMS, SCALAR_CHARS, as_float, badge_class, cut, default_filter,
-                      facet_option, facet_token, fallback_notice, norm_date, tab_note, tabs)
+                      facet_option, facet_token, fallback_notice, norm_date, tab_label, tab_note, tabs)
 from .schema import (APPLICATION_SETTINGS, CODECS, MANIFEST_SCHEMA, MAX_BODY_BYTES, SCALE_FACTOR_RE, UUID4_RE, BadJSON,
                      parse_json_strict, validate_envelope, validate_manifest)
 from .store import StorageUnavailable, store_for
@@ -433,13 +433,14 @@ def _facets(values: dict[str, set]) -> tuple[dict, bool]:
             for k, v in values.items()}, truncated
 
 
-def _hero(row: dict | None, target: dict | None) -> dict | None:
+def _hero(row: dict | None, target_velox) -> dict | None:
     if row is None:
         return None
     d = row["derived"]
     return {
         **_run_summary(row),
-        "vs_target": _vs_target(target, d, "total"),
+        # Always the totals, whatever the board's metric: the hero is the Total board's.
+        "vs_target": _vs_target(target_velox, d, "total"),
         "per_query": [{"q": q, **aggregate.metric_values(d, m)}
                       for q, m in zip(aggregate.QUERY_IDS, aggregate.METRICS[1:])],
     }
@@ -474,12 +475,14 @@ def _pin(state: dict | None, sf: str, codec: str) -> dict:
             "updated_at": state["updated_at"]}
 
 
-def _effective_target(store, sf: str, codec: str, pin: dict) -> dict | None:
-    """What the board compares with: ``?target=<run id>`` for this view only (no goal), ``?target=none`` for the
-    same-run velox, else the pinned target. A target that cannot serve says why in ``problem``."""
+def _effective_target(store, sf: str, codec: str, pin: dict, rows: dict) -> tuple[dict | None, dict | None]:
+    """What the board compares with, and that run's derived data when it can serve: ``?target=<run id>`` for this
+    view only (no goal), ``?target=none`` for the same-run velox, else the pinned target. ``rows`` holds the runs the
+    board already read (every non-withdrawn one), so only a withdrawn or unknown target costs a lookup. A target that
+    cannot serve says why in ``problem``."""
     asked = request.args.get("target")
     if asked == "none":
-        return None
+        return None, None
     if asked:
         if not UUID4_RE.fullmatch(asked):
             raise _BadBody("target: a run id or none")
@@ -487,25 +490,23 @@ def _effective_target(store, sf: str, codec: str, pin: dict) -> dict | None:
     elif pin["run_id"]:
         run_id, source = pin["run_id"], "pinned"
     else:
-        return None
-    row = store.get(run_id)
+        return None, None
+    row = rows.get(run_id) or store.get(run_id)
     problem = _target_problem(row, sf, codec)
     out = {"run_id": run_id, "url": _url(run_id), "source": source,
            "goal": pin["goal"] if source == "pinned" else None, "problem": problem}
-    if problem is None:
-        d = row["derived"]
-        out.update(config_label=cut(d["config_label"]), finished_at=d["finished_at"],
-                   velox_ms=d["totals"]["velox_ms"],
-                   per_query=[d["per_query"][str(q)]["velox_ms"] for q in aggregate.QUERY_IDS])
-    return out
+    if problem is not None:
+        return out, None
+    d = row["derived"]
+    out.update(config_label=cut(d["config_label"]), finished_at=d["finished_at"], velox_ms=d["totals"]["velox_ms"],
+               per_query=[d["per_query"][str(q)]["velox_ms"] for q in aggregate.QUERY_IDS])
+    return out, d
 
 
-def _vs_target(target: dict | None, derived: dict, metric: str) -> float | None:
-    """The target's velox over this run's xflare for ``metric``; None without a usable target."""
-    if target is None or target["problem"]:
-        return None
-    velox = target["velox_ms"] if metric == "total" else target["per_query"][aggregate.QUERY_IDS.index(int(metric[1:]))]
-    return aggregate.speedup(velox, aggregate.metric_values(derived, metric)["xflare_ms"])
+def _vs_target(target_velox, derived: dict, metric: str) -> float | None:
+    """The target's velox for ``metric`` over this run's xflare; None without a usable target."""
+    return None if target_velox is None else aggregate.speedup(
+        target_velox, aggregate.metric_values(derived, metric)["xflare_ms"])
 
 
 def _known_tab(sf: str, codec: str) -> bool:
@@ -569,13 +570,16 @@ def api_set_target(sf, codec):
                                      revision)
     if status == "conflict":
         return _errors(409, "the target changed meanwhile: reload and try again", current=_pin(state, sf, codec))
+    if status == "withdrawn":
+        return _errors(400, "run_id: withdrawn")
     return jsonify(_pin(state, sf, codec))
 
 
 @bp.get("/api/leaderboard/board")
 def api_board():
     cfg = _cfg()
-    all_rows = store_for(cfg).list_runs()
+    store = store_for(cfg)
+    all_rows = store.list_runs()
     tab_list = tabs(cfg, [r["derived"] for r in all_rows])
     tab = _select_tab(tab_list)
     metric = request.args.get("metric") or "total"
@@ -591,9 +595,10 @@ def api_board():
     # The tab consumes the codec: it is not a filter of the board.
     for params in (flt, tokens):
         params.pop("codec", None)
-    store = store_for(cfg)
     pin = _pin(store.get_target(tab["sf"], tab["codec"]), tab["sf"], tab["codec"])
-    target = _effective_target(store, tab["sf"], tab["codec"], pin)
+    target, target_derived = _effective_target(store, tab["sf"], tab["codec"], pin,
+                                               {r["run_id"]: r for r in all_rows})
+    target_velox = None if target_derived is None else aggregate.metric_values(target_derived, metric)["velox_ms"]
     rows = [r for r in all_rows if aggregate.tab_of(r["derived"]) == (tab["sf"], tab["codec"])]
     chosen = _filtered(rows, flt, tokens)
     ranked = aggregate.rank(chosen, metric)
@@ -621,7 +626,7 @@ def api_board():
         "default_filter": default_filter(cfg),
         "facets": facets,
         "facets_truncated": facets_truncated,
-        "hero": _hero(hero, target),
+        "hero": _hero(hero, None if target_derived is None else target_derived["totals"]["velox_ms"]),
         # A8: the run the tab compares with (velox side, any configuration) and its goal speedup.
         "target": target,
         "target_pin": pin,
@@ -635,7 +640,7 @@ def api_board():
         # A row carries its reproduce script so the board can copy it within the click.
         "rows": [{"rank": i + 1, **_run_summary(r),
                   "value": {**aggregate.metric_values(r["derived"], metric),
-                            "vs_target": _vs_target(target, r["derived"], metric)},
+                            "vs_target": _vs_target(target_velox, r["derived"], metric)},
                   "repro": r["derived"]["repro"]["command"]}
                  for i, r in enumerate(ranked[:top])],
     })
@@ -801,7 +806,7 @@ def run_page(run_id):
         shared_reason=aggregate.SHARED_REASON if d["config"]["application_mode"] == "shared" else None,
         per_query=per_query,
         # A8: whether this run is, or can be, its tab's target.
-        target={"sf": sf, "codec": codec, "label": f"{cut(sf)} · {codec}", "revision": pin["revision"],
+        target={"sf": sf, "codec": codec, "label": tab_label(sf, codec), "revision": pin["revision"],
                 "goal": pin["goal"], "is_target": pin["run_id"] == run_id,
                 "problem": _target_problem(row, sf, codec)},
         # as_float: a median past float range is a JSON integer the chart would read as Infinity.

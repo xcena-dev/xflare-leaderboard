@@ -378,17 +378,21 @@ class Store:
                    expected_revision: int) -> tuple[str, dict | None]:
         """Pin ``run_id`` (None clears) and the goal speedup as the tab's target when its revision is still
         ``expected_revision`` (0 for a tab never set): "set" (one event appended, revision + 1), "unchanged" (already
-        that run and goal: no event) or "conflict" (someone changed it meanwhile: nothing written). Returns the
-        status and the state after."""
+        that run and goal: no event), "conflict" (someone changed it meanwhile) or "withdrawn" (the run was
+        withdrawn, or is gone, by the time of the write); the last two write nothing. Returns the status and the
+        state after. The caller checks the rest of the run's fitness, which a stored run cannot lose."""
         with self._db("target") as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 cur = conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone()
                 revision = cur["revision"] if cur else 0
                 before = (cur["run_id"], cur["goal"]) if cur else (None, None)
-                if revision != expected_revision or before == (run_id, goal):
+                live = run_id is None or conn.execute("SELECT 1 FROM runs WHERE run_id = ? AND withdrawn = 0",
+                                                      (run_id,)).fetchone()
+                if revision != expected_revision or not live or before == (run_id, goal):
                     conn.execute("ROLLBACK")
-                    return ("conflict" if revision != expected_revision else "unchanged"), (dict(cur) if cur else None)
+                    status = "conflict" if revision != expected_revision else "withdrawn" if not live else "unchanged"
+                    return status, (dict(cur) if cur else None)
                 now = _now()
                 conn.execute("INSERT OR REPLACE INTO targets (sf, codec, run_id, goal, revision, updated_by,"
                              " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

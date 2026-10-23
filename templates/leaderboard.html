@@ -34,6 +34,12 @@
     <p class="lb-hero-notice" id="hero-notice" hidden></p>
     <p class="lb-empty" id="hero-empty" hidden>이 SF 탭에 Total-eligible run 이 아직 없습니다.
       shared application run 은 목록에만 남고 순위와 hero 에는 오르지 않습니다 (A6) — per-engine run 이 필요합니다.</p>
+    <!-- A8: outside the hero body, so a tab without a Total-eligible hero still shows its target and history. -->
+    <p class="lb-hero-target" id="hero-target" hidden></p>
+    <details class="lb-target-history" id="hero-target-history" hidden>
+      <summary>target 변경 이력</summary>
+      <ol class="lb-target-events" id="hero-target-events"></ol>
+    </details>
     <div id="hero-body" hidden>
       <p class="lb-hero-config" id="hero-config" hidden></p>
       <div class="lb-stats">
@@ -42,11 +48,6 @@
         <div class="lb-stat"><span class="lb-stat-label" id="hero-speedup-label">Speedup (velox / xflare)</span><span class="lb-stat-val" id="hero-speedup"></span>
           <span class="lb-stat-goal" id="hero-goal" hidden></span></div>
       </div>
-      <p class="lb-hero-target" id="hero-target"></p>
-      <details class="lb-target-history" id="hero-target-history">
-        <summary>target 변경 이력</summary>
-        <ol class="lb-target-events" id="hero-target-events"></ol>
-      </details>
       <dl class="lb-kv" id="hero-meta"></dl>
       <div class="chart-tools">
         <label><input type="checkbox" id="hero-log"> log scale</label>

@@ -1994,22 +1994,25 @@ class StoreTests(unittest.TestCase):
         c.close()
 
     def test_target_revisions_and_history(self):
-        """A8: a target change applies only at the revision the caller saw; a repeat of the stored state writes
-        nothing; every change is one event, newest first."""
+        """A8: a target change applies only at the revision the caller saw and only to a stored, non-withdrawn run;
+        a repeat of the stored state writes nothing; every change is one event, newest first."""
         s = self.store
+        r1, r2 = (s.put(self.env(n))[1]["run_id"] for n in (1, 2))
         self.assertIsNone(s.get_target("100", "snappy"))
-        self.assertEqual(s.set_target("100", "snappy", "r1", 2.0, "a", 1), ("conflict", None))
-        status, state = s.set_target("100", "snappy", "r1", 2.0, "a", 0)
+        self.assertEqual(s.set_target("100", "snappy", r1, 2.0, "a", 1), ("conflict", None))
+        self.assertEqual(s.set_target("100", "snappy", mf.fixture_uuid(9), 2.0, "a", 0), ("withdrawn", None))
+        status, state = s.set_target("100", "snappy", r1, 2.0, "a", 0)
         self.assertEqual((status, state["run_id"], state["goal"], state["revision"], state["updated_by"]),
-                         ("set", "r1", 2.0, 1, "a"))
-        self.assertEqual(s.set_target("100", "snappy", "r1", 2.0, "b", 1)[0], "unchanged")
-        self.assertEqual(s.set_target("100", "snappy", "r1", 3.0, "b", 1)[1]["revision"], 2)    # the goal alone
+                         ("set", r1, 2.0, 1, "a"))
+        self.assertEqual(s.set_target("100", "snappy", r1, 2.0, "b", 1)[0], "unchanged")
+        self.assertEqual(s.set_target("100", "snappy", r1, 3.0, "b", 1)[1]["revision"], 2)      # the goal alone
+        s.withdraw(r2, "x", "y")
+        self.assertEqual(s.set_target("100", "snappy", r2, None, "b", 2)[0], "withdrawn")
         self.assertEqual(s.set_target("100", "snappy", None, None, "c", 1)[0], "conflict")
         self.assertEqual(s.set_target("100", "snappy", None, None, "c", 2)[1]["run_id"], None)
         self.assertEqual([(e["revision"], e["before_run_id"], e["after_run_id"], e["before_goal"], e["after_goal"],
                            e["actor"]) for e in s.target_history("100", "snappy")],
-                         [(3, "r1", None, 3.0, None, "c"), (2, "r1", "r1", 2.0, 3.0, "b"),
-                          (1, None, "r1", None, 2.0, "a")])
+                         [(3, r1, None, 3.0, None, "c"), (2, r1, r1, 2.0, 3.0, "b"), (1, None, r1, None, 2.0, "a")])
         self.assertIsNone(s.get_target("1000", "snappy"))
         self.assertEqual(s.target_history("1000", "snappy"), [])
 

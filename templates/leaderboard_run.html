@@ -25,7 +25,7 @@
     <div class="lb-meta">
       <a class="lb-btn" href="{{ url_for('leaderboard.api_raw', run_id=row.run_id) }}">⤓ raw manifest (JSON)</a>
       {% if target.is_target %}
-      <span class="lb-badge b-good">target · SF-{{ target.label }}{% if target.goal %} · 목표 {{ '%.2f'|format(target.goal) }}×{% endif %}</span>
+      <span class="lb-badge b-good">target · SF-{{ target.label }}{% if target.goal %} · 목표 {{ target.goal | lb_x }}{% endif %}</span>
       <button id="lb-target-clear" class="lb-btn" type="button" data-sf="{{ target.sf }}" data-codec="{{ target.codec }}"
               data-revision="{{ target.revision }}">target 해제…</button>
       {% elif not target.problem %}
