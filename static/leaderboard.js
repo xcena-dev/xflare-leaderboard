@@ -7,9 +7,17 @@
 
 (function () {
   const QUERIES = Array.from({ length: 22 }, (_, i) => i + 1);
-  const XFLARE_COLOR = '#14B8A6';
-  const VELOX_COLOR = '#94A3B8';
-  const SERIES_COLORS = ['#14B8A6', '#F59E0B', '#818CF8', '#F472B6'];
+
+  // Chart colours come from style.css's tokens, so a chart follows the page's light or dark theme as drawn; the
+  // fallbacks (the light theme's) cover a page whose stylesheet did not load.
+  function token(name, fallback) {
+    if (typeof getComputedStyle !== 'function') return fallback;
+    return getComputedStyle(document.documentElement).getPropertyValue(name).replace(/\s+/g, ' ').trim() || fallback;
+  }
+  const xflareColor = () => token('--chart-xflare', '#3b5bdb');
+  const veloxColor = () => token('--chart-velox', '#aab3c0');
+  const seriesColors = () => [xflareColor(), token('--chart-2', '#7048e8'), token('--chart-3', '#b7791f'),
+                              token('--chart-4', '#1f8a4c')];
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -93,18 +101,25 @@
   // Grouped bars per query, linear or log as the page's toggle stands now.
   function perQueryChart(canvas, datasets, logBox) {
     if (typeof Chart === 'undefined') return null;
+    const font = { family: token('--font', 'sans-serif'), size: 12 };
+    const tick = token('--text-3', '#768194');
+    const grid = token('--border', '#e1e5eb');
     const chart = new Chart(canvas, {
       type: 'bar',
       data: { labels: QUERIES.map(q => `Q${q}`), datasets },
       options: {
         responsive: true, maintainAspectRatio: false, animation: false,
         scales: {
-          x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.08)' } },
+          x: { ticks: { color: tick, font }, grid: { display: false }, border: { color: grid } },
           y: { type: logBox && logBox.checked ? 'logarithmic' : 'linear',
-               title: { display: true, text: 'ms', color: '#94a3b8' },
-               ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.12)' } },
+               title: { display: true, text: 'ms', color: tick, font },
+               ticks: { color: tick, font }, grid: { color: grid }, border: { display: false } },
         },
-        plugins: { legend: { labels: { color: '#e2e8f0' } } },
+        plugins: {
+          legend: { align: 'end',
+                    labels: { color: token('--text-2', '#4a5566'), font, boxWidth: 10, boxHeight: 10,
+                              useBorderRadius: true, borderRadius: 2 } },
+        },
       },
     });
     return chart;
@@ -122,7 +137,7 @@
   }
 
   function bar(label, data, color) {
-    return { label, data, backgroundColor: color, borderColor: color, borderWidth: 1 };
+    return { label, data, backgroundColor: color, borderWidth: 0, borderRadius: 3, maxBarThickness: 18 };
   }
 
   async function postJSON(url, body) {
@@ -264,8 +279,8 @@
       kv(meta, 'Devices', fmtDevices(hero));
       kv(meta, 'Badges', badgeList(hero.badges, cfg.badge_class));
       chart = perQueryChart(document.getElementById('hero-chart'), [
-        bar('xflare', hero.per_query.map(p => p.xflare_ms), XFLARE_COLOR),
-        bar('velox', hero.per_query.map(p => p.velox_ms), VELOX_COLOR),
+        bar('xflare', hero.per_query.map(p => p.xflare_ms), xflareColor()),
+        bar('velox', hero.per_query.map(p => p.velox_ms), veloxColor()),
       ], heroLog);
     }
 
@@ -448,8 +463,8 @@
     const run = JSON.parse(document.getElementById('lb-run-data').textContent);
     const logBox = document.getElementById('run-log');
     const chart = perQueryChart(document.getElementById('run-chart'), [
-      bar('xflare', run.xflare, XFLARE_COLOR),
-      bar('velox', run.velox, VELOX_COLOR),
+      bar('xflare', run.xflare, xflareColor()),
+      bar('velox', run.velox, veloxColor()),
     ], logBox);
     bindLogToggle(logBox, () => chart);
 
@@ -490,8 +505,9 @@
   function initCompare() {
     const data = JSON.parse(document.getElementById('lb-compare-data').textContent);
     const logBox = document.getElementById('compare-log');
+    const colors = seriesColors();
     const chart = perQueryChart(document.getElementById('compare-chart'),
-                                data.series.map((s, i) => bar(data.names[i], s, SERIES_COLORS[i % SERIES_COLORS.length])),
+                                data.series.map((s, i) => bar(data.names[i], s, colors[i % colors.length])),
                                 logBox);
     bindLogToggle(logBox, () => chart);
     const only = document.getElementById('params-only-diff');

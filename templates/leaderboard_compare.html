@@ -12,10 +12,19 @@
 </head>
 <body data-page="compare">
 <header class="lb-header">
-  <h1><a href="{{ url_for('leaderboard.board_page') }}">{{ benchmark.title }}</a> / compare</h1>
+  <a class="lb-brand" href="{{ url_for('leaderboard.board_page') }}">
+    <span class="lb-brand-mark" aria-hidden="true">X</span>
+    <span class="lb-brand-text"><span class="lb-brand-name">XFLARE</span><span class="lb-brand-sub">Leaderboard</span></span>
+  </a>
+  <nav class="lb-crumbs" aria-label="Breadcrumb">
+    <a href="{{ url_for('leaderboard.board_page') }}">{{ benchmark.title }}</a><span class="lb-sep">/</span><span class="lb-here">compare</span>
+  </nav>
 </header>
 
 <main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
+  <div class="lb-page-head">
+    <h1>Compare {{ runs | length }} runs</h1>
+  </div>
   <section class="lb-panel">
     <h3>Runs</h3>
     <p class="lb-note">Δ 는 첫 번째 run 대비 xflare median 변화 (음수 = 빨라짐).</p>

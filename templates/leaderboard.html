@@ -9,15 +9,24 @@
 </head>
 <body data-page="board">
 <header class="lb-header">
-  <h1>{{ benchmark.title }}</h1>
-  <div class="lb-meta">
-    <span id="lb-updated">—</span>
-    <button id="lb-refresh" type="button">⟳ refresh</button>
-  </div>
+  <a class="lb-brand" href="{{ url_for('leaderboard.board_page') }}">
+    <span class="lb-brand-mark" aria-hidden="true">X</span>
+    <span class="lb-brand-text"><span class="lb-brand-name">XFLARE</span><span class="lb-brand-sub">Leaderboard</span></span>
+  </a>
+  <nav class="lb-crumbs" aria-label="Breadcrumb"><span class="lb-here">{{ benchmark.title }}</span></nav>
 </header>
 
 <main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
-  <p class="lb-desc">{{ benchmark.description or '' }}</p>
+  <div class="lb-page-head">
+    <div>
+      <h1>{{ benchmark.title }}</h1>
+      <p class="lb-desc">{{ benchmark.description or '' }}</p>
+    </div>
+    <div class="lb-meta">
+      <span id="lb-updated">—</span>
+      <button id="lb-refresh" class="lb-btn" type="button">⟳ refresh</button>
+    </div>
+  </div>
 
   <nav class="lb-tabs" id="lb-sf-tabs" aria-label="Scale factor and codec"></nav>
   <p class="lb-status" id="lb-status" hidden></p>
@@ -96,7 +105,7 @@
       <ul class="lb-shared-list" id="lb-shared-list"></ul>
     </div>
     <div class="lb-compare-bar">
-      <button type="button" id="lb-compare" class="lb-btn" disabled>선택한 run 비교 (2–4)</button>
+      <button type="button" id="lb-compare" class="lb-btn lb-btn-primary" disabled>선택한 run 비교 (2–4)</button>
     </div>
   </section>
 </main>

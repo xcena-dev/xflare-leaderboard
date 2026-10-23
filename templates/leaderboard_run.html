@@ -18,16 +18,25 @@
 </head>
 <body data-page="run">
 <header class="lb-header">
-  <h1><a href="{{ url_for('leaderboard.board_page') }}">{{ benchmark.title }}</a> / run {{ row.run_id[:8] }}</h1>
-  <div class="lb-meta">
-    <a class="lb-btn" href="{{ url_for('leaderboard.api_raw', run_id=row.run_id) }}">⤓ raw manifest (JSON)</a>
-    {% if not summary.withdrawn %}
-    <button id="lb-withdraw" class="lb-btn" type="button">withdraw…</button>
-    {% endif %}
-  </div>
+  <a class="lb-brand" href="{{ url_for('leaderboard.board_page') }}">
+    <span class="lb-brand-mark" aria-hidden="true">X</span>
+    <span class="lb-brand-text"><span class="lb-brand-name">XFLARE</span><span class="lb-brand-sub">Leaderboard</span></span>
+  </a>
+  <nav class="lb-crumbs" aria-label="Breadcrumb">
+    <a href="{{ url_for('leaderboard.board_page') }}">{{ benchmark.title }}</a><span class="lb-sep">/</span><span class="lb-here">run {{ row.run_id[:8] }}</span>
+  </nav>
 </header>
 
 <main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
+  <div class="lb-page-head">
+    <h1>Run {{ row.run_id[:8] }}</h1>
+    <div class="lb-meta">
+      <a class="lb-btn" href="{{ url_for('leaderboard.api_raw', run_id=row.run_id) }}">⤓ raw manifest (JSON)</a>
+      {% if not summary.withdrawn %}
+      <button id="lb-withdraw" class="lb-btn" type="button">withdraw…</button>
+      {% endif %}
+    </div>
+  </div>
   {% if summary.withdrawn %}
   <p class="lb-banner">
     Withdrawn {{ v(summary.withdrawal.at) }} by {{ v(summary.withdrawal.actor) }} — {{ v(summary.withdrawal.reason) }}.
