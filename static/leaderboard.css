@@ -71,9 +71,9 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 }
 .lb-stat-label { font-size: var(--text-sm); color: var(--text-3); }
 .lb-stat-val { font-size: var(--text-2xl); font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-/* A8: the goal speedup beside the speedup vs target, and the target line and its history under the numbers. */
+/* A8: the goal speedup beside the speedup vs target, and the target line and its history (outside the hero body). */
 .lb-stat-goal { font-size: var(--text-sm); color: var(--text-3); font-variant-numeric: tabular-nums; }
-.lb-goal-met, .lb-board td.lb-goal-met { color: var(--ok-text); font-weight: 650; }
+.lb-goal-met { color: var(--ok-text); font-weight: 650; }
 .lb-hero-target { margin: 0 0 var(--space-2); color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
 .lb-hero-target .lb-dim { margin-left: 2px; }
 .lb-target-history { margin: var(--space-2) 0 var(--space-3); font-size: var(--text-sm); color: var(--text-2); }

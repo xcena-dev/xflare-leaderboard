@@ -461,7 +461,7 @@ def _target_problem(row: dict | None, sf: str, codec: str) -> str | None:
         return "withdrawn"
     d = row["derived"]
     if aggregate.tab_of(d) != (sf, codec):
-        return f"on another tab ({cut(d['sf'])} · {cut(d['config']['codec'])})"
+        return f"on another tab ({tab_label(*aggregate.tab_of(d))})"
     if d["totals"]["velox_ms"] is None:
         return "no velox total (velox is missing or wrong on some query)"
     return None
@@ -528,11 +528,11 @@ def _same_site_json():
 def api_target(sf, codec):
     if not _known_tab(sf, codec):
         return _errors(404, "unknown tab")
-    store = store_for(_cfg())
+    pin, events = store_for(_cfg()).target_history(sf, codec)
     history = [{"event_id": e["event_id"], "revision": e["revision"], "before_run_id": e["before_run_id"],
                 "after_run_id": e["after_run_id"], "before_goal": e["before_goal"], "after_goal": e["after_goal"],
-                "actor": cut(e["actor"]), "at": e["at"]} for e in store.target_history(sf, codec)]
-    return jsonify({**_pin(store.get_target(sf, codec), sf, codec), "history": history})
+                "actor": cut(e["actor"]), "at": e["at"]} for e in events]
+    return jsonify({**_pin(pin, sf, codec), "history": history})
 
 
 @bp.post("/api/leaderboard/targets/<sf>/<codec>")

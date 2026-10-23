@@ -2010,11 +2010,13 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(s.set_target("100", "snappy", r2, None, "b", 2)[0], "withdrawn")
         self.assertEqual(s.set_target("100", "snappy", None, None, "c", 1)[0], "conflict")
         self.assertEqual(s.set_target("100", "snappy", None, None, "c", 2)[1]["run_id"], None)
+        pin, events = s.target_history("100", "snappy")
         self.assertEqual([(e["revision"], e["before_run_id"], e["after_run_id"], e["before_goal"], e["after_goal"],
-                           e["actor"]) for e in s.target_history("100", "snappy")],
+                           e["actor"]) for e in events],
                          [(3, r1, None, 3.0, None, "c"), (2, r1, r1, 2.0, 3.0, "b"), (1, None, r1, None, 2.0, "a")])
+        self.assertEqual(pin["revision"], events[0]["revision"])        # read together: the newest change listed
         self.assertIsNone(s.get_target("1000", "snappy"))
-        self.assertEqual(s.target_history("1000", "snappy"), [])
+        self.assertEqual(s.target_history("1000", "snappy"), (None, []))
 
     def test_reuse_finishes_durability_barriers(self):
         """Crash after os.replace but before the raw-dir fsync; the retry fsyncs file and dir before the row."""

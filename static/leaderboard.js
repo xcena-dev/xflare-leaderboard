@@ -174,7 +174,12 @@
       }
     }
     if (stillValid && !stillValid()) return null;
-    return postJSON(targetUrl(sf, codec), { actor, expected_revision: revision, run_id: runId, goal: runId ? goal : null });
+    try {
+      return await postJSON(targetUrl(sf, codec),
+                            { actor, expected_revision: revision, run_id: runId, goal: runId ? goal : null });
+    } catch (e) {
+      return { ok: false, status: 0, data: { errors: ['연결이 끊겼습니다 — 저장됐는지 알 수 없으니 새로고침해서 확인하세요'] } };
+    }
   }
 
   function failed(what, r) {
@@ -208,6 +213,11 @@
     let chart = null;
     let target = null;      // the target the last answer compared with (null: the same-run velox)
     let targetPin = null;   // the tab's stored target, for its history and changes
+    // A8: each tab change and each history fetch bumps historyGen, so an answer or a button from an older one never
+    // acts on the current tab; historyShown is the (tab, revision) the shown list was fetched for.
+    const targetHistory = document.getElementById('hero-target-history');
+    let historyGen = 0;
+    let historyShown = null;
     const heroLog = document.getElementById('hero-log');
 
     const status = document.getElementById('lb-status');
@@ -290,7 +300,7 @@
     // A8: the target usable for comparison (null: compare with the same-run velox).
     function liveTarget() { return target && !target.problem ? target : null; }
 
-    // A8: the target line and its history under the hero, shown whatever the hero (a tab may have none yet).
+    // A8: the target line and its history, shown whatever the hero (a tab may have none yet).
     function renderTarget() {
       const line = document.getElementById('hero-target');
       line.replaceChildren();
@@ -298,7 +308,7 @@
       line.hidden = targetHistory.hidden = !targetPin;
       if (!targetPin) return;
       if (!target) {
-        line.textContent = targetPin && targetPin.run_id
+        line.textContent = targetPin.run_id
           ? '이 보기는 target 없이 같은 run 의 velox 와 비교합니다.'
           : '이 탭에 target 이 없습니다 — 같은 run 의 velox 와 비교합니다. run 페이지에서 target 으로 지정할 수 있습니다.';
         return;
@@ -547,7 +557,7 @@
       targetPin = data.target_pin || null;
       renderTarget();
       renderHero(data.hero, data.hero_fallback ? data.hero_notice : null);
-      if (targetHistory.open) loadTargetHistory();
+      if (targetHistory.open && (!historyShown || historyShown.revision !== targetPin.revision)) loadTargetHistory();
       renderBoard(data);
       document.getElementById('lb-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
     }
@@ -561,12 +571,10 @@
       const ids = [...selected].map(encodeURIComponent).join(',');
       location.href = `${cfg.board}/compare?runs=${ids}`;
     });
-    // A8: the tab's target changes, newest first; any earlier target can be pinned again from here. Each load and
-    // each tab change bumps historyGen, so an answer or a button from an older one never acts on the current tab.
-    const targetHistory = document.getElementById('hero-target-history');
-    let historyGen = 0;
+    // A8: the tab's target changes, newest first; any earlier target can be pinned again from here.
     function forgetHistory() {
       historyGen++;
+      historyShown = null;
       document.getElementById('hero-target-events').replaceChildren();
     }
     async function loadTargetHistory() {
@@ -584,6 +592,7 @@
         return;
       }
       if (mine !== historyGen) return;
+      historyShown = { sf: data.sf, codec: data.codec, revision: data.revision };
       list.replaceChildren();
       if (!data.history.length) list.appendChild(el('li', 'lb-dim', '아직 지정된 적이 없습니다.'));
       for (const e of data.history) {

@@ -367,12 +367,18 @@ class Store:
             r = conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone()
         return dict(r) if r else None
 
-    def target_history(self, sf: str, codec: str, limit: int = 50) -> list[dict]:
-        """The tab's target changes, newest first, at most ``limit``."""
+    def target_history(self, sf: str, codec: str, limit: int = 50) -> tuple[dict | None, list[dict]]:
+        """The tab's target (as ``get_target``) and its changes, newest first, at most ``limit``, read in one
+        transaction: the revision always belongs to the newest change listed."""
         with self._db("read") as conn:
-            rows = conn.execute("SELECT * FROM target_events WHERE sf = ? AND codec = ? ORDER BY event_id DESC"
-                                " LIMIT ?", (sf, codec, limit)).fetchall()
-        return [dict(r) for r in rows]
+            conn.execute("BEGIN")
+            try:
+                pin = conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone()
+                rows = conn.execute("SELECT * FROM target_events WHERE sf = ? AND codec = ? ORDER BY event_id DESC"
+                                    " LIMIT ?", (sf, codec, limit)).fetchall()
+            finally:
+                conn.execute("COMMIT")
+        return (dict(pin) if pin else None), [dict(r) for r in rows]
 
     def set_target(self, sf: str, codec: str, run_id: str | None, goal: float | None, actor: str,
                    expected_revision: int) -> tuple[str, dict | None]:
