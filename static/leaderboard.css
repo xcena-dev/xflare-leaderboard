@@ -39,9 +39,9 @@
 .lb-metric-tabs { gap: 6px; border-bottom: 0; margin-bottom: var(--space-3); }
 .lb-metric-tabs .lb-tab {
   margin: 0; padding: 3px 10px; border: 1px solid var(--border-strong); border-radius: 999px;
-  font-size: var(--text-xs); font-weight: 600;
+  font-size: var(--text-xs);
 }
-.lb-metric-tabs .lb-tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-text); }
+.lb-metric-tabs .lb-tab.active { background: var(--accent-soft); border-color: var(--accent); }
 
 /* ---- callouts and notes ------------------------------------------------- */
 .lb-status, .lb-banner, .lb-hero-notice {
@@ -96,7 +96,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 .lb-board th, .lb-board td { padding-left: 8px; padding-right: 8px; }
 .lb-board th:nth-child(1) { width: 52px; }
 .lb-board th:nth-child(2) { width: 172px; }
-.lb-board th:nth-child(3), .lb-board th:nth-child(4) { width: 72px; }
+.lb-board th:nth-child(3), .lb-board th:nth-child(4) { width: 80px; }
 .lb-board th:nth-child(5) { width: 84px; }
 .lb-board th:nth-child(6) { width: 84px; }
 .lb-board th:nth-child(7) { width: 92px; }

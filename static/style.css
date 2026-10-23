@@ -114,7 +114,7 @@ p code, li code {
   background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px;
 }
 ::selection { background: var(--accent-soft); }
-:focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--radius-sm); }
+:focus-visible { outline: 2px solid transparent; outline-offset: 2px; box-shadow: var(--focus); border-radius: var(--radius-sm); }
 input[type=checkbox] { accent-color: var(--accent); }
 
 /* ---- top bar ------------------------------------------------------------ */
@@ -150,7 +150,7 @@ input[type=checkbox] { accent-color: var(--accent); }
   display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);
   flex-wrap: wrap; margin-bottom: var(--space-5);
 }
-/* The benchmark's own colour (config.yaml `color`) marks its title. */
+/* The benchmark's own colour (config.yaml `color`) marks each page's heading. */
 .lb-page-head h1::before {
   content: ""; display: inline-block; width: .42em; height: .42em; margin-right: .38em; vertical-align: .16em;
   border-radius: 3px; background: var(--bench-color, var(--accent));
@@ -217,7 +217,9 @@ input[type=checkbox] { accent-color: var(--accent); }
   background: var(--surface); color: var(--text); font: var(--text-sm) var(--font);
   transition: border-color .12s, box-shadow .12s;
 }
-.controls select:focus, .controls input[type=date]:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+.controls select:focus, .controls input[type=date]:focus {
+  outline: 2px solid transparent; outline-offset: 2px; border-color: var(--accent); box-shadow: var(--focus);
+}
 .controls .range-sep { color: var(--text-3); font-weight: 400; }
 
 .chart-tools {

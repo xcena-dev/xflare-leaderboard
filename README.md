@@ -313,7 +313,7 @@ colours come from one fixed map (`display.BADGE_CLASS`, sent to the board script
 
 The pages share the XFLARE Developer Platform's look: `static/style.css` carries its design tokens, light or dark as
 the browser's colour scheme says, and the charts read their colours from the same tokens. `config.yaml`'s `color`
-marks the benchmark's title.
+marks each page's heading.
 
 Every `/static/` URL the pages write carries `?v=` and the first 12 hex digits of the file's sha256, taken when the
 service starts (a missing file stops the start), so a reload never reuses a cached copy of an older file. The board

@@ -1515,6 +1515,24 @@ class TestCompare(WebCase):
         self.assertEqual(run_page_js("board", data=self.page_data(), fetch=fetch, check=5)["gate"],
                          [True, False, False, False, True])                 # five is one too many
 
+    def test_compare_script_wires_its_toggles(self):
+        """The compare page's script builds its chart series and attaches the log-scale and only-differences toggles."""
+        runs = [self.submit(elapsed=flat_elapsed(1000 + 10 * i)) for i in range(3)]
+        html = self.c.get(f"{LB}/compare?runs={','.join(runs)}").get_data(as_text=True)
+        data = re.search(r'id="lb-compare-data">(.*?)</script>', html, re.S).group(1)
+        out = run_page_js("compare", ids=re.findall(r'id="([^"]+)"', html), data={"lb-compare-data": data})
+        self.assertEqual(out["listeners"].get("compare-log"), ["change"])
+        self.assertEqual(out["listeners"].get("params-only-diff"), ["change"])
+
+    def test_run_and_compare_pages_link_back_to_the_board(self):
+        a, b = self.submit(), self.submit()
+        for url in (f"{LB}/run/{a}", f"{LB}/compare?runs={a},{b}"):
+            page = self.c.get(url).get_data(as_text=True)
+            self.assertIn(f'class="lb-brand" href="{LB}"', page, url)
+            self.assertIn(f'<nav class="lb-crumbs" aria-label="Breadcrumb">', page, url)
+            crumbs = page[page.index('<nav class="lb-crumbs"'):page.index("</nav>", page.index('<nav class="lb-crumbs"'))]
+            self.assertIn(f'href="{LB}"', crumbs, url)
+
     def compare_deltas(self, *runs):
         """The Δ% texts of the Xflare total row and the Q1 row, left to right."""
         html = self.c.get(f"{LB}/compare?runs={','.join(runs)}").get_data(as_text=True)
