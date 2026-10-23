@@ -1291,6 +1291,120 @@ class TestBoardScript(WebCase):
                 self.assertNotIn(f"{LB}/run/{hundred}", out["boardLinks"])
 
 
+class TestTarget(WebCase):
+    """A8: a tab's target run (its velox side, any configuration) and goal speedup: set through the API at the
+    revision the caller saw, every change kept, compared with on the board, overridable for one link."""
+
+    T = "/api/leaderboard/targets/100/snappy"
+
+    def set(self, run_id, revision=0, goal=None, status=200, **headers):
+        r = self.c.post(self.T, json={"actor": "a@x", "expected_revision": revision, "run_id": run_id, "goal": goal},
+                        headers=headers)
+        self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:300])
+        return r.get_json()
+
+    def two_runs(self):
+        """A 8×6 run to compare with (off the default filter) and a 4×6 run that is the hero."""
+        return (self.submit(executors=8, elapsed=flat_elapsed(500, velox=2000)),
+                self.submit(elapsed=flat_elapsed(400, velox=3000)))
+
+    def test_set_change_clear_and_history(self):
+        a, b = self.two_runs()
+        pin = self.set(a, goal=2.5)
+        self.assertEqual((pin["run_id"], pin["goal"], pin["revision"], pin["updated_by"]), (a, 2.5, 1, "a@x"))
+        self.assertEqual(self.set(a, revision=1, goal=2.5)["revision"], 1)          # the same: no new revision
+        stale = self.set(b, revision=0, status=409)
+        self.assertEqual((stale["current"]["run_id"], stale["current"]["revision"]), (a, 1))
+        self.set(b, revision=1)
+        self.set(None, revision=2)
+        state = self.c.get(self.T).get_json()
+        self.assertEqual((state["run_id"], state["revision"]), (None, 3))
+        self.assertEqual([(e["before_run_id"], e["after_run_id"], e["after_goal"]) for e in state["history"]],
+                         [(b, None, None), (a, b, None), (None, a, 2.5)])
+
+    def test_refusals(self):
+        a = self.submit()
+        self.set(self.submit(engines=("xflare",)), status=400)                    # no velox total
+        self.set(self.submit(sf="1000"), status=400)                              # another tab
+        self.set(rid(), status=404)
+        for body, field in (({"actor": " ", "expected_revision": 0, "run_id": a}, "actor"),
+                            ({"actor": "x", "expected_revision": -1, "run_id": a}, "expected_revision"),
+                            ({"actor": "x", "expected_revision": True, "run_id": a}, "expected_revision"),
+                            ({"actor": "x", "expected_revision": 0}, "run_id"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": "nope"}, "run_id"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": a, "goal": 0}, "goal"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": a, "goal": "2"}, "goal"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": a, "goal": 1001}, "goal"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": None, "goal": 2}, "goal")):
+            r = self.c.post(self.T, json=body)
+            self.assertEqual(r.status_code, 400, body)
+            self.assertTrue(r.get_json()["errors"][0].startswith(field + ":"), r.get_json())
+        plain = self.c.post(self.T, data='{"actor": "x", "expected_revision": 0, "run_id": null}',
+                            content_type="text/plain")
+        self.assertEqual(plain.status_code, 415)
+        self.set(a, status=403, Origin="http://evil.example")
+        self.set(a, Origin="http://localhost")                                    # this site (the test client's)
+        self.assertEqual(self.c.post("/api/leaderboard/targets/x1/snappy", json={}).status_code, 404)
+        self.assertEqual(self.c.get("/api/leaderboard/targets/100/lz4").status_code, 404)
+        self.c.post(f"/api/leaderboard/runs/{a}/withdraw", json={"actor": "x", "reason": "y"})
+        self.assertTrue(self.set(a, revision=1, goal=3, status=400)["errors"][0].endswith("withdrawn"))
+
+    def test_board_compares_with_the_target(self):
+        target, hero = self.two_runs()
+        board = self.board()
+        self.assertEqual((board["target"], board["hero"]["vs_target"], board["target_pin"]["revision"]),
+                         (None, None, 0))
+        self.set(target, goal=1.5)
+        board = self.board()
+        t = board["target"]
+        self.assertEqual((t["run_id"], t["source"], t["goal"], t["problem"]), (target, "pinned", 1.5, None))
+        velox, xflare = sum(2000 + q for q in range(1, 23)), sum(400 + q for q in range(1, 23))
+        self.assertEqual((t["velox_ms"], t["per_query"][0]), (velox, 2001))
+        self.assertEqual(board["hero"]["run_id"], hero)
+        self.assertAlmostEqual(board["hero"]["vs_target"], velox / xflare)
+        self.assertAlmostEqual(board["rows"][0]["value"]["vs_target"], velox / xflare)
+        self.assertAlmostEqual(self.board("?metric=q1")["rows"][0]["value"]["vs_target"], 2001 / 401)
+        link = self.board(f"?target={hero}")["target"]
+        self.assertEqual((link["run_id"], link["source"], link["goal"]), (hero, "link", None))
+        self.assertIsNone(self.board("?target=none")["target"])
+        self.board("?target=nope", status=400)
+        self.c.post(f"/api/leaderboard/runs/{target}/withdraw", json={"actor": "x", "reason": "gone"})
+        gone = self.board()
+        self.assertEqual((gone["target"]["problem"], gone["hero"]["vs_target"]), ("withdrawn", None))
+        self.assertIsNone(gone["rows"][0]["value"]["vs_target"])
+
+    def test_board_page_shows_the_target(self):
+        target, _ = self.two_runs()
+        before = run_page_js("board", data=self.page_data(),
+                             fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        self.assertEqual((before["text"]["hero-velox-label"], before["text"]["lb-col-speedup"]),
+                         ("Velox total (same run)", "Speedup"))
+        self.assertTrue(before["hidden"]["hero-goal"])
+        self.set(target, goal=1.5)
+        out = run_page_js("board", data=self.page_data(),
+                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        self.assertEqual((out["text"]["hero-velox-label"], out["text"]["hero-speedup-label"],
+                          out["text"]["lb-col-speedup"]), ("Target velox total", "Speedup vs target", "vs target"))
+        self.assertEqual((out["text"]["hero-goal"], out["hidden"]["hero-goal"]), ("목표 1.50× · 달성", False))
+        self.assertIn(f"{LB}/run/{target}", out["hrefs"])
+        self.assertIn("lb-goal-met", " ".join(out["classes"]))
+
+    def test_run_page_sets_and_clears_the_target(self):
+        a = self.submit()
+        html = self.c.get(f"{LB}/run/{a}").get_data(as_text=True)
+        self.assertIn('id="lb-target-set"', html)
+        self.assertIn('data-revision="0"', html)
+        data = re.search(r'id="lb-run-data">(.*?)</script>', html, re.S).group(1)
+        out = run_page_js("run", ids=re.findall(r'id="([^"]+)"', html), data={"lb-run-data": data})
+        self.assertEqual(out["listeners"].get("lb-target-set"), ["click"])
+        self.set(a, goal=2)
+        html = self.c.get(f"{LB}/run/{a}").get_data(as_text=True)
+        self.assertIn('id="lb-target-clear"', html)
+        self.assertIn("목표 2.00×", html)
+        self.assertNotIn('id="lb-target-set"', self.c.get(f"{LB}/run/{self.submit(engines=('xflare',))}")
+                         .get_data(as_text=True))
+
+
 class TestOneDeploy(WebCase):
     """Static URLs carry the hash taken at start, and every board answer names the board script by it: a board page
     with another script asks for a reload (TestBoardScript drives the open-page paths)."""

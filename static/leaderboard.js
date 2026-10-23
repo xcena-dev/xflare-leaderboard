@@ -151,6 +151,25 @@
     return { ok: resp.ok, status: resp.status, data };
   }
 
+  // A8: pins (or clears, runId null) a tab's target and goal speedup. The server refuses a stale revision (409),
+  // so a change made meanwhile is never overwritten. Resolves to the response, or null when the user cancels.
+  async function setTarget(sf, codec, revision, runId, askGoal, goal) {
+    const actor = prompt('Target 을 바꾸는 사람 (email):');
+    if (!actor) return null;
+    if (askGoal) {
+      const text = prompt('목표 speedup (target 의 velox / xflare, 예: 2.0). 비워 두면 목표 없음:', goal ?? '');
+      if (text === null) return null;
+      goal = text.trim() === '' ? null : Number(text);
+      if (goal !== null && !(goal > 0)) { alert('목표 speedup 은 0 보다 큰 숫자여야 합니다.'); return null; }
+    }
+    return postJSON(`/api/leaderboard/targets/${encodeURIComponent(sf)}/${encodeURIComponent(codec)}`,
+                    { actor, expected_revision: revision, run_id: runId, goal: runId ? goal : null });
+  }
+
+  function failed(what, r) {
+    alert(`${what} 실패 (HTTP ${r.status}): ${((r.data && r.data.errors) || []).join('; ')}`);
+  }
+
   // ---- board page ------------------------------------------------------------
   function initBoard() {
     const cfg = JSON.parse(document.getElementById('lb-page-data').textContent);
@@ -166,6 +185,8 @@
       codec: params.get('codec') || '',
       tabs: [],
       metric: params.get('metric') || 'total',
+      // A8: a shared link may name its own target (a run id, or none); it is never stored.
+      target: params.get('target') || '',
       top: params.get('top') || '10',
       // Only keys the user (or the shared URL) set. An absent key takes the
       // server default; an empty one means "any" and lifts that default.
@@ -174,6 +195,8 @@
     for (const k of FILTER_KEYS) if (params.has(k)) state.filter[k] = params.get(k);
     const selected = new Set();
     let chart = null;
+    let target = null;      // the target the last answer compared with (null: the same-run velox)
+    let targetPin = null;   // the tab's stored target, for its history and changes
     const heroLog = document.getElementById('hero-log');
 
     const status = document.getElementById('lb-status');
@@ -192,7 +215,7 @@
       sfHost.replaceChildren();
       for (const t of state.tabs) {
         tabButton(sfHost, `SF-${t.label}`, t.sf === state.sf && t.codec === state.codec,
-                  () => { state.sf = t.sf; state.codec = t.codec; load(); });
+                  () => { state.sf = t.sf; state.codec = t.codec; state.target = ''; load(); });
       }
       const mHost = document.getElementById('lb-metric-tabs');
       mHost.replaceChildren();
@@ -206,6 +229,7 @@
       const q = new URLSearchParams({ metric: state.metric, top: state.top });
       if (state.sf) q.set('sf', state.sf);
       if (state.codec) q.set('codec', state.codec);
+      if (state.target) q.set('target', state.target);
       for (const [k, v] of Object.entries(state.filter)) q.set(k, v);
       return q;
     }
@@ -252,6 +276,33 @@
 
     // notice: the server's line for a fallback hero (the filter matched no
     // Total-eligible run, so this is the tab's fastest in any configuration).
+    function id8(runId) { return runId ? runId.slice(0, 8) : '없음'; }
+
+    // A8: the target line under the hero's numbers, and what the hero is compared with.
+    function renderTarget() {
+      const line = document.getElementById('hero-target');
+      line.replaceChildren();
+      line.className = 'lb-hero-target';
+      if (!target) {
+        line.textContent = targetPin && targetPin.run_id
+          ? '이 보기는 target 없이 같은 run 의 velox 와 비교합니다.'
+          : '이 탭에 target 이 없습니다 — 같은 run 의 velox 와 비교합니다. run 페이지에서 target 으로 지정할 수 있습니다.';
+        return;
+      }
+      if (target.problem) {
+        line.className = 'lb-hero-target lb-banner lb-banner-warn';
+        line.textContent = `target ${id8(target.run_id)} 을 쓸 수 없습니다 (${target.problem}) — 같은 run 의 velox 와 비교합니다.`;
+        return;
+      }
+      line.appendChild(el('span', null, 'Target: '));
+      const a = el('a', 'lb-run', `${id8(target.run_id)} · ${fmtTs(target.finished_at)}`);
+      a.href = runHref(cfg.board, target.run_id);
+      line.appendChild(a);
+      line.appendChild(el('span', null, ` · ${target.config_label}`));
+      line.appendChild(el('span', 'lb-dim', target.source === 'link' ? ' · 이 링크에서만 (저장된 target 아님)'
+        : ` · ${targetPin.updated_by ?? '—'} 가 ${fmtTs(targetPin.updated_at)} 에 지정`));
+    }
+
     function renderHero(hero, notice) {
       const noticeEl = document.getElementById('hero-notice');
       noticeEl.textContent = notice || '';
@@ -267,8 +318,23 @@
       if (!hero) return;
       link.href = runHref(cfg.board, hero.run_id);
       document.getElementById('hero-xflare').textContent = fmtMs(hero.totals.xflare_ms);
-      document.getElementById('hero-velox').textContent = fmtMs(hero.totals.velox_ms);
-      document.getElementById('hero-speedup').textContent = fmtX(hero.totals.speedup);
+      const t = target && !target.problem ? target : null;
+      document.getElementById('hero-velox-label').textContent = t ? 'Target velox total' : 'Velox total (same run)';
+      document.getElementById('hero-velox').textContent = fmtMs(t ? t.velox_ms : hero.totals.velox_ms);
+      document.getElementById('hero-speedup-label').textContent = t ? 'Speedup vs target' : 'Speedup (velox / xflare)';
+      document.getElementById('hero-speedup').textContent = fmtX(t ? hero.vs_target : hero.totals.speedup);
+      const goalEl = document.getElementById('hero-goal');
+      goalEl.hidden = !(t && t.goal);
+      if (t && t.goal) {
+        const reached = hero.vs_target != null && hero.vs_target >= t.goal;
+        goalEl.className = reached ? 'lb-stat-goal lb-goal-met' : 'lb-stat-goal';
+        goalEl.textContent = hero.vs_target == null ? `목표 ${fmtX(t.goal)}`
+          : `목표 ${fmtX(t.goal)} · ${reached ? '달성' : `${Math.round(100 * hero.vs_target / t.goal)}%`}`;
+      }
+      renderTarget();
+      document.getElementById('hero-chart-note').textContent = t
+        ? 'per-query median (ms): hero 의 xflare vs target 의 velox (흐린 막대: hero 와 같은 run 의 velox)'
+        : 'per-query median (ms), 같은 run 의 xflare vs velox';
       const meta = document.getElementById('hero-meta');
       meta.replaceChildren();
       kv(meta, 'Config', hero.config_label).title = configText(hero.config);
@@ -281,10 +347,13 @@
       kv(meta, 'Devices', fmtDevices(hero));
       kv(meta, 'Badges', badgeList(hero.badges, cfg.badge_class));
       const colors = chartColors();
-      chart = perQueryChart(document.getElementById('hero-chart'), [
-        bar('xflare', hero.per_query.map(p => p.xflare_ms), colors.xflare),
-        bar('velox', hero.per_query.map(p => p.velox_ms), colors.velox),
-      ], heroLog, colors);
+      const sameRun = hero.per_query.map(p => p.velox_ms);
+      chart = perQueryChart(document.getElementById('hero-chart'), t
+        ? [bar('xflare', hero.per_query.map(p => p.xflare_ms), colors.xflare),
+           bar('target velox', t.per_query, colors.velox),
+           bar('velox (same run)', sameRun, colors.grid)]
+        : [bar('xflare', hero.per_query.map(p => p.xflare_ms), colors.xflare),
+           bar('velox', sameRun, colors.velox)], heroLog, colors);
     }
 
     // A6: shared-application runs under the filter, stored and listed but never ranked, named under the board
@@ -321,6 +390,8 @@
         `${metricName}: ${data.eligible_count} eligible run(s) under the filter · top ${data.top} · ` +
         (data.metric === 'total' ? 'xflare median 합' : 'xflare median') +
         ' 오름차순, 동률은 repeats 많은 순 → 먼저 끝난 순';
+      const t = target && !target.problem ? target : null;
+      document.getElementById('lb-col-speedup').textContent = t ? 'vs target' : 'Speedup';
       if (!data.rows.length) {
         const tr = tbody.insertRow();
         const td = tr.insertCell();
@@ -341,7 +412,10 @@
         a.title = `${r.run_id}\nfinished ${r.finished_at}`;
         tr.insertCell().appendChild(a);
         for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
-                                          [fmtX(r.value.speedup), 'num'], [`x${r.repeats}`, 'num'],
+                                          t ? [fmtX(r.value.vs_target),
+                                               t.goal && r.value.vs_target >= t.goal ? 'num lb-goal-met' : 'num',
+                                               `같은 run 의 velox 기준 ${fmtX(r.value.speedup)}`]
+                                            : [fmtX(r.value.speedup), 'num'], [`x${r.repeats}`, 'num'],
                                           [compactConfig(r.config), null, configText(r.config)],
                                           [r.config.application_mode ?? '—', null],
                                           [(r.config.engines ?? '—').replace(',', ', '), null],
@@ -442,7 +516,10 @@
       state.tabs = data.tabs;
       renderTabs();
       renderFilters(data);
+      target = data.target || null;
+      targetPin = data.target_pin || null;
       renderHero(data.hero, data.hero_fallback ? data.hero_notice : null);
+      if (targetHistory.open) loadTargetHistory();
       renderBoard(data);
       document.getElementById('lb-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
     }
@@ -456,6 +533,42 @@
       const ids = [...selected].map(encodeURIComponent).join(',');
       location.href = `${cfg.board}/compare?runs=${ids}`;
     });
+    // A8: the tab's target changes, newest first; any earlier target can be pinned again from here.
+    const targetHistory = document.getElementById('hero-target-history');
+    async function loadTargetHistory() {
+      const list = document.getElementById('hero-target-events');
+      const pin = targetPin;
+      if (!pin) return;
+      let data;
+      try {
+        const resp = await fetch(`/api/leaderboard/targets/${encodeURIComponent(pin.sf)}/${encodeURIComponent(pin.codec)}`);
+        data = await resp.json();
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      } catch (e) {
+        list.replaceChildren(el('li', 'lb-dim', '이력을 불러오지 못했습니다.'));
+        return;
+      }
+      if (targetPin !== pin) return;
+      list.replaceChildren();
+      if (!data.history.length) list.appendChild(el('li', 'lb-dim', '아직 지정된 적이 없습니다.'));
+      for (const e of data.history) {
+        const goal = e.after_goal ? ` · 목표 ${fmtX(e.after_goal)}` : '';
+        const li = el('li', null, `${fmtTs(e.at)} · ${e.actor} · ${id8(e.before_run_id)} → ${id8(e.after_run_id)}${goal}`);
+        if (e.after_run_id && (e.after_run_id !== data.run_id || e.after_goal !== data.goal)) {
+          const b = el('button', 'lb-btn', '다시 지정');
+          b.type = 'button';
+          b.addEventListener('click', async () => {
+            const r = await setTarget(data.sf, data.codec, data.revision, e.after_run_id, false, e.after_goal);
+            if (!r) return;
+            if (!r.ok) { failed('target 지정', r); return; }
+            load();
+          });
+          li.appendChild(b);
+        }
+        list.appendChild(li);
+      }
+    }
+    targetHistory.addEventListener('toggle', () => { if (targetHistory.open) loadTargetHistory(); });
     bindLogToggle(heroLog, () => chart);
     updateCompare();
     load();
@@ -488,6 +601,19 @@
         copy.textContent = 'selected — Ctrl+C';
       }
     });
+
+    for (const [id, runId, what] of [['lb-target-set', run.run_id, 'target 지정'], ['lb-target-clear', null, 'target 해제']]) {
+      const b = document.getElementById(id);
+      if (!b) continue;
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        const r = await setTarget(b.dataset.sf, b.dataset.codec, Number(b.dataset.revision), runId, !!runId,
+                                  b.dataset.goal ? Number(b.dataset.goal) : null);
+        if (r && r.ok) { location.reload(); return; }
+        b.disabled = false;
+        if (r) failed(what, r);
+      });
+    }
 
     const withdraw = document.getElementById('lb-withdraw');
     if (!withdraw) return;

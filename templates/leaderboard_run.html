@@ -24,6 +24,14 @@
     <h1>Run {{ row.run_id[:8] }}</h1>
     <div class="lb-meta">
       <a class="lb-btn" href="{{ url_for('leaderboard.api_raw', run_id=row.run_id) }}">⤓ raw manifest (JSON)</a>
+      {% if target.is_target %}
+      <span class="lb-badge b-good">target · SF-{{ target.label }}{% if target.goal %} · 목표 {{ '%.2f'|format(target.goal) }}×{% endif %}</span>
+      <button id="lb-target-clear" class="lb-btn" type="button" data-sf="{{ target.sf }}" data-codec="{{ target.codec }}"
+              data-revision="{{ target.revision }}">target 해제…</button>
+      {% elif not target.problem %}
+      <button id="lb-target-set" class="lb-btn" type="button" data-sf="{{ target.sf }}" data-codec="{{ target.codec }}"
+              data-revision="{{ target.revision }}" data-goal="{{ target.goal or '' }}">SF-{{ target.label }} target 으로 지정…</button>
+      {% endif %}
       {% if not summary.withdrawn %}
       <button id="lb-withdraw" class="lb-btn" type="button">withdraw…</button>
       {% endif %}

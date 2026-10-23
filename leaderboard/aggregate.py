@@ -53,6 +53,11 @@ def _ratio(num, den):
         return None
 
 
+def speedup(velox_ms, xflare_ms):
+    """velox / xflare as a float; None when either side is missing (and as ``_ratio`` otherwise)."""
+    return None if velox_ms is None or xflare_ms is None else _ratio(velox_ms, xflare_ms)
+
+
 def _median(values: list):
     """statistics.median without the float detour: odd N → the middle int; even N → exact int when the middle
     pair sums to an even number, else x.5 as a float (OverflowError when that is beyond float range)."""

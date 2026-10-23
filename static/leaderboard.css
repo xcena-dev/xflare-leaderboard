@@ -71,6 +71,15 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 }
 .lb-stat-label { font-size: var(--text-sm); color: var(--text-3); }
 .lb-stat-val { font-size: var(--text-2xl); font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+/* A8: the goal speedup beside the speedup vs target, and the target line and its history under the numbers. */
+.lb-stat-goal { font-size: var(--text-sm); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.lb-goal-met, .lb-board td.lb-goal-met { color: var(--ok-text); font-weight: 650; }
+.lb-hero-target { margin: var(--space-3) 0 0; color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.lb-hero-target .lb-dim { margin-left: 2px; }
+.lb-target-history { margin: var(--space-2) 0 var(--space-3); font-size: var(--text-sm); color: var(--text-2); }
+.lb-target-history summary { cursor: pointer; color: var(--text-3); }
+.lb-target-events { margin: var(--space-2) 0 0; padding-left: var(--space-5); display: grid; gap: var(--space-1); }
+.lb-target-events .lb-btn { height: 24px; margin-left: var(--space-2); padding: 0 8px; font-size: var(--text-xs); }
 
 .lb-kv {
   display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px var(--space-5);
@@ -97,7 +106,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 .lb-board th:nth-child(1) { width: 52px; }
 .lb-board th:nth-child(2) { width: 172px; }
 .lb-board th:nth-child(3), .lb-board th:nth-child(4) { width: 80px; }
-.lb-board th:nth-child(5) { width: 84px; }
+.lb-board th:nth-child(5) { width: 94px; }
 .lb-board th:nth-child(6) { width: 84px; }
 .lb-board th:nth-child(7) { width: 92px; }
 .lb-board th:nth-child(8) { width: 92px; }
@@ -105,7 +114,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 .lb-board th:nth-child(10) { width: 72px; }
 .lb-board th:nth-child(12) { width: 136px; }
 .lb-board th:nth-child(13) { width: 68px; }
-.lb-board th:nth-child(14) { width: 104px; }
+.lb-board th:nth-child(14) { width: 94px; }
 .lb-board td:nth-child(12) { white-space: normal; }
 .lb-board td a.lb-run { font-weight: 550; }
 .lb-board .lb-btn { height: 26px; padding: 0 9px; font-size: var(--text-xs); }
