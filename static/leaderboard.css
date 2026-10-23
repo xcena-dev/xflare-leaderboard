@@ -3,22 +3,27 @@
 
 /* ---- cards: a section with a divided head; tables run to its edges ------ */
 .lb-panel {
+  --panel-py: 20px; --panel-px: var(--space-5);
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm); padding: 20px var(--space-5); margin-bottom: var(--space-4);
-  overflow: hidden;
+  box-shadow: var(--shadow-sm); padding: var(--panel-py) var(--panel-px); margin-bottom: var(--space-4);
 }
 .lb-panel > h3, .lb-hero-head {
-  margin: -20px calc(-1 * var(--space-5)) var(--space-4); padding: 14px var(--space-5);
-  border-bottom: 1px solid var(--border); font-size: 15px;
+  margin: calc(-1 * var(--panel-py)) calc(-1 * var(--panel-px)) var(--space-4); padding: 14px var(--panel-px);
+  border-bottom: 1px solid var(--border);
 }
-.lb-hero-head h3 { font-size: 15px; }
-.lb-panel > .cmp-scroll, .lb-panel > .cmp-table { margin-left: calc(-1 * var(--space-5)); margin-right: calc(-1 * var(--space-5)); }
-.lb-panel > .cmp-table { width: calc(100% + 2 * var(--space-5)); }
-.lb-panel > .cmp-scroll:last-child, .lb-panel > .cmp-table:last-child { margin-bottom: -20px; }
-.lb-panel .cmp-table th:first-child, .lb-panel .cmp-table td:first-child { padding-left: var(--space-5); }
-.lb-panel .cmp-table th:last-child, .lb-panel .cmp-table td:last-child { padding-right: var(--space-5); }
-.lb-panel > * + .cmp-scroll, .lb-panel > * + .cmp-table { margin-top: var(--space-3); }
+.lb-panel > h3, .lb-hero-head h3 { font-size: 15px; }
+/* Every table sits in its own scroller, so a wide one scrolls inside the card instead of spilling out of it. */
+.lb-panel > .cmp-scroll { margin-left: calc(-1 * var(--panel-px)); margin-right: calc(-1 * var(--panel-px)); }
+.lb-panel > * + .cmp-scroll { margin-top: var(--space-3); }
 .lb-panel > .cmp-scroll + .cmp-scroll { margin-top: var(--space-5); }
+/* Flush under the head (the platform's tight card body) and, last in the card, rounded with it. */
+.lb-panel > h3 + .cmp-scroll { margin-top: calc(-1 * var(--space-4)); }
+.lb-panel > h3 + .cmp-scroll th { border-top: 0; }
+.lb-panel > .cmp-scroll:last-child {
+  margin-bottom: calc(-1 * var(--panel-py)); border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
+}
+.lb-panel .cmp-table th:first-child, .lb-panel .cmp-table td:first-child { padding-left: var(--panel-px); }
+.lb-panel .cmp-table th:last-child, .lb-panel .cmp-table td:last-child { padding-right: var(--panel-px); }
 
 /* ---- tabs: SF tabs underline like the platform's; metric tabs are chips -- */
 .lb-tabs {
@@ -78,6 +83,9 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 
 .lb-chart { position: relative; height: 320px; }
 
+/* Wider than the platform's 1320px content column: these pages have no sidebar and the board is 14 columns. */
+.lb-wrap { max-width: 1400px; }
+
 /* ---- board -------------------------------------------------------------- */
 .lb-filters .lb-filter-slot:empty { display: none; }
 .lb-filters select { max-width: 220px; }
@@ -87,7 +95,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 .lb-board { min-width: 1300px; }
 .lb-board th, .lb-board td { padding-left: 8px; padding-right: 8px; }
 .lb-board th:nth-child(1) { width: 52px; }
-.lb-board th:nth-child(2) { width: 148px; }
+.lb-board th:nth-child(2) { width: 172px; }
 .lb-board th:nth-child(3), .lb-board th:nth-child(4) { width: 72px; }
 .lb-board th:nth-child(5) { width: 84px; }
 .lb-board th:nth-child(6) { width: 84px; }
@@ -136,6 +144,8 @@ p.lb-badges { margin: 0 0 var(--space-3) 0; }
 .lb-diff { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); }
 .lb-notes, .lb-reasons { margin: var(--space-2) 0; padding-left: 20px; font-size: var(--text-sm); }
 .lb-argv { font-size: var(--text-sm); }
+/* Uploaded tokens can be long and unbroken (argv entries, hashes): wrap them rather than run past the card. */
+.lb-notes, .lb-reasons, .lb-argv { overflow-wrap: anywhere; }
 .lb-diff .d-add  { color: var(--diff-add-text); font-weight: 600; }
 .lb-diff .d-del  { color: var(--diff-del-text); }
 .lb-diff .d-hunk { color: var(--accent-text); }

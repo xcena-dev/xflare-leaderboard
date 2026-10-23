@@ -1,6 +1,6 @@
 /* Base for the leaderboard pages: the XFLARE Developer Platform's design tokens (light and dark under the same
    names), the top bar and page head, buttons, tables, the filter bar and chart tools. leaderboard.css adds the
-   page-specific parts. No external fonts: the service runs on a network without internet access. */
+   page-specific parts. Like the platform, it uses the system font stack: no font files to ship. */
 :root {
   --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo",
           "Noto Sans KR", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -145,8 +145,7 @@ input[type=checkbox] { accent-color: var(--accent); }
 .lb-crumbs .lb-here { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- page body and head ------------------------------------------------- */
-/* Wider than the platform's 1320px content column: these pages have no sidebar and the board is 14 columns. */
-.detail-wrap { padding: var(--space-6); max-width: 1400px; margin: 0 auto; }
+.detail-wrap { padding: var(--space-6); max-width: 1320px; margin: 0 auto; }
 .lb-page-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);
   flex-wrap: wrap; margin-bottom: var(--space-5);
@@ -197,6 +196,8 @@ input[type=checkbox] { accent-color: var(--accent); }
 .cmp-table tbody tr:hover td { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
 .cmp-table .num { text-align: right; }
 .cmp-table code { font-size: 12.5px; }
+/* A run id in a header is data, not a label: keep its case. */
+.cmp-table th .lb-id { text-transform: none; }
 .cmp-scroll { overflow-x: auto; }
 
 .diff-good { color: var(--ok); }

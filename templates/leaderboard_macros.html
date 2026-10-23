@@ -11,12 +11,28 @@
 {%- macro more(items, limit, tag='p') -%}
   {%- if items | length > limit -%}<{{ tag }} class="lb-more">{{ items | length - limit }} more — see raw JSON</{{ tag }}>{%- endif -%}
 {%- endmacro -%}
+{#- The top bar: the platform's brand, then the breadcrumbs as (label, href) pairs; href none marks the current page. -#}
+{%- macro topbar(crumbs) -%}
+<header class="lb-header">
+  <a class="lb-brand" href="{{ url_for('leaderboard.board_page') }}">
+    <span class="lb-brand-mark" aria-hidden="true">X</span>
+    <span class="lb-brand-text"><span class="lb-brand-name">XFLARE</span><span class="lb-brand-sub">Leaderboard</span></span>
+  </a>
+  <nav class="lb-crumbs" aria-label="Breadcrumb">
+    {%- for label, href in crumbs -%}
+    {%- if not loop.first %}<span class="lb-sep">/</span>{% endif -%}
+    {%- if href %}<a href="{{ href }}">{{ label }}</a>{% else %}<span class="lb-here">{{ label }}</span>{% endif -%}
+    {%- endfor -%}
+  </nav>
+</header>
+{%- endmacro -%}
 {#- A settings map as web._settings built it: a key/value table, or the reason there is none. -#}
 {%- macro settings_table(view, limit) -%}
   {%- if not view.recorded -%}<p class="lb-note lb-dim">not recorded</p>
   {%- elif view['items'] is none -%}<p class="lb-note">not a key/value object — see raw JSON</p>
   {%- elif not view.count -%}<p class="lb-note">none ({})</p>
   {%- else -%}
+  <div class="cmp-scroll">
   <table class="cmp-table lb-table">
     <thead><tr><th>Key</th><th>Value</th></tr></thead>
     <tbody>
@@ -25,6 +41,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
   {%- if view.count > limit -%}<p class="lb-more">{{ view.count - limit }} more — see raw JSON</p>{%- endif -%}
   {%- endif -%}
 {%- endmacro -%}

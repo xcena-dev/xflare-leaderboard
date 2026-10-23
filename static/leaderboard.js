@@ -8,16 +8,19 @@
 (function () {
   const QUERIES = Array.from({ length: 22 }, (_, i) => i + 1);
 
-  // Chart colours come from style.css's tokens, so a chart follows the page's light or dark theme as drawn; the
-  // fallbacks (the light theme's) cover a page whose stylesheet did not load.
-  function token(name, fallback) {
-    if (typeof getComputedStyle !== 'function') return fallback;
-    return getComputedStyle(document.documentElement).getPropertyValue(name).replace(/\s+/g, ' ').trim() || fallback;
+  // Chart colours come from style.css's tokens, read once per chart, so a chart follows the page's light or dark
+  // theme as drawn; the fallbacks (the light theme's) cover a page whose stylesheet did not load.
+  function chartColors() {
+    const css = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+    const token = (name, fallback) => (css && css.getPropertyValue(name).trim()) || fallback;
+    const xflare = token('--chart-xflare', '#3b5bdb');
+    return {
+      xflare, velox: token('--chart-velox', '#aab3c0'),
+      series: [xflare, token('--chart-2', '#7048e8'), token('--chart-3', '#b7791f'), token('--chart-4', '#1f8a4c')],
+      tick: token('--text-3', '#768194'), grid: token('--border', '#e1e5eb'), legend: token('--text-2', '#4a5566'),
+      font: token('--font', 'sans-serif'),
+    };
   }
-  const xflareColor = () => token('--chart-xflare', '#3b5bdb');
-  const veloxColor = () => token('--chart-velox', '#aab3c0');
-  const seriesColors = () => [xflareColor(), token('--chart-2', '#7048e8'), token('--chart-3', '#b7791f'),
-                              token('--chart-4', '#1f8a4c')];
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -99,11 +102,10 @@
   }
 
   // Grouped bars per query, linear or log as the page's toggle stands now.
-  function perQueryChart(canvas, datasets, logBox) {
+  function perQueryChart(canvas, datasets, logBox, colors) {
     if (typeof Chart === 'undefined') return null;
-    const font = { family: token('--font', 'sans-serif'), size: 12 };
-    const tick = token('--text-3', '#768194');
-    const grid = token('--border', '#e1e5eb');
+    const font = { family: colors.font, size: 12 };
+    const { tick, grid } = colors;
     const chart = new Chart(canvas, {
       type: 'bar',
       data: { labels: QUERIES.map(q => `Q${q}`), datasets },
@@ -117,7 +119,7 @@
         },
         plugins: {
           legend: { align: 'end',
-                    labels: { color: token('--text-2', '#4a5566'), font, boxWidth: 10, boxHeight: 10,
+                    labels: { color: colors.legend, font, boxWidth: 10, boxHeight: 10,
                               useBorderRadius: true, borderRadius: 2 } },
         },
       },
@@ -278,10 +280,11 @@
       kv(meta, 'Finished', fmtTs(hero.finished_at));
       kv(meta, 'Devices', fmtDevices(hero));
       kv(meta, 'Badges', badgeList(hero.badges, cfg.badge_class));
+      const colors = chartColors();
       chart = perQueryChart(document.getElementById('hero-chart'), [
-        bar('xflare', hero.per_query.map(p => p.xflare_ms), xflareColor()),
-        bar('velox', hero.per_query.map(p => p.velox_ms), veloxColor()),
-      ], heroLog);
+        bar('xflare', hero.per_query.map(p => p.xflare_ms), colors.xflare),
+        bar('velox', hero.per_query.map(p => p.velox_ms), colors.velox),
+      ], heroLog, colors);
     }
 
     // A6: shared-application runs under the filter, stored and listed but never ranked, named under the board
@@ -462,10 +465,11 @@
   function initRun() {
     const run = JSON.parse(document.getElementById('lb-run-data').textContent);
     const logBox = document.getElementById('run-log');
+    const colors = chartColors();
     const chart = perQueryChart(document.getElementById('run-chart'), [
-      bar('xflare', run.xflare, xflareColor()),
-      bar('velox', run.velox, veloxColor()),
-    ], logBox);
+      bar('xflare', run.xflare, colors.xflare),
+      bar('velox', run.velox, colors.velox),
+    ], logBox, colors);
     bindLogToggle(logBox, () => chart);
 
     // No copy button when no command is offered; withdraw below
@@ -505,10 +509,10 @@
   function initCompare() {
     const data = JSON.parse(document.getElementById('lb-compare-data').textContent);
     const logBox = document.getElementById('compare-log');
-    const colors = seriesColors();
+    const colors = chartColors();
     const chart = perQueryChart(document.getElementById('compare-chart'),
-                                data.series.map((s, i) => bar(data.names[i], s, colors[i % colors.length])),
-                                logBox);
+                                data.series.map((s, i) => bar(data.names[i], s, colors.series[i % colors.series.length])),
+                                logBox, colors);
     bindLogToggle(logBox, () => chart);
     const only = document.getElementById('params-only-diff');
     only.addEventListener('change', () => {

@@ -1,3 +1,4 @@
+{%- from "leaderboard_macros.html" import topbar -%}
 <!doctype html>
 <html lang="ko">
 <head>
@@ -8,13 +9,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body data-page="board">
-<header class="lb-header">
-  <a class="lb-brand" href="{{ url_for('leaderboard.board_page') }}">
-    <span class="lb-brand-mark" aria-hidden="true">X</span>
-    <span class="lb-brand-text"><span class="lb-brand-name">XFLARE</span><span class="lb-brand-sub">Leaderboard</span></span>
-  </a>
-  <nav class="lb-crumbs" aria-label="Breadcrumb"><span class="lb-here">{{ benchmark.title }}</span></nav>
-</header>
+{{ topbar([(benchmark.title, none)]) }}
 
 <main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
   <div class="lb-page-head">

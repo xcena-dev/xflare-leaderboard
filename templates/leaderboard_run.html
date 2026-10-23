@@ -2,7 +2,7 @@
     autoescape; nothing here is marked safe. Uploaded scalars go through v (cut
     to SCALAR_CHARS), long-form texts through lb_text (`chars`), lists are cut to
     `limit` items; the raw JSON download has the rest. -#}
-{%- from "leaderboard_macros.html" import v, more, badge, settings_table -%}
+{%- from "leaderboard_macros.html" import v, more, badge, settings_table, topbar -%}
 {%- set limit, chars = lb_budget.preview_items, lb_budget.preview_chars -%}
 {%- set run = m.run -%}
 {%- set env = meta.environment or {} -%}
@@ -17,15 +17,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body data-page="run">
-<header class="lb-header">
-  <a class="lb-brand" href="{{ url_for('leaderboard.board_page') }}">
-    <span class="lb-brand-mark" aria-hidden="true">X</span>
-    <span class="lb-brand-text"><span class="lb-brand-name">XFLARE</span><span class="lb-brand-sub">Leaderboard</span></span>
-  </a>
-  <nav class="lb-crumbs" aria-label="Breadcrumb">
-    <a href="{{ url_for('leaderboard.board_page') }}">{{ benchmark.title }}</a><span class="lb-sep">/</span><span class="lb-here">run {{ row.run_id[:8] }}</span>
-  </nav>
-</header>
+{{ topbar([(benchmark.title, url_for('leaderboard.board_page')), ('run ' ~ row.run_id[:8], none)]) }}
 
 <main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
   <div class="lb-page-head">
@@ -229,14 +221,16 @@
     <h3>Xflare overrides</h3>
     {% set overrides = run.xflare_overrides or [] %}
     {% if overrides %}
-    <table class="cmp-table lb-table">
-      <thead><tr><th>Key</th><th>Value</th><th>Source</th><th>Destination</th></tr></thead>
-      <tbody>
-      {% for o in overrides[:limit] %}
-        <tr><td><code>{{ v(o.key) }}</code></td><td><code>{{ v(o.value) }}</code></td><td>{{ v(o.source) }}</td><td>{{ v(o.destination) }}</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table">
+        <thead><tr><th>Key</th><th>Value</th><th>Source</th><th>Destination</th></tr></thead>
+        <tbody>
+        {% for o in overrides[:limit] %}
+          <tr><td><code>{{ v(o.key) }}</code></td><td><code>{{ v(o.value) }}</code></td><td>{{ v(o.source) }}</td><td>{{ v(o.destination) }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
     {{ more(overrides, limit) }}
     {% else %}<p class="lb-note">none</p>{% endif %}
   </section>
@@ -322,14 +316,16 @@
       <dt>CPU contention</dt><dd>{{ v(env.cpu_contention) }}</dd>
     </dl>
     {% if devices %}
-    <table class="cmp-table lb-table">
-      <thead><tr><th>Device</th><th>Serial</th><th>Type</th><th>FW</th></tr></thead>
-      <tbody>
-      {% for dev in devices[:limit] %}
-        <tr><td>{{ v(dev.id) }}</td><td>{{ v(dev.serial) }}</td><td>{{ v(dev.type) }}</td><td>{{ v(dev.fw) }}</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table">
+        <thead><tr><th>Device</th><th>Serial</th><th>Type</th><th>FW</th></tr></thead>
+        <tbody>
+        {% for dev in devices[:limit] %}
+          <tr><td>{{ v(dev.id) }}</td><td>{{ v(dev.serial) }}</td><td>{{ v(dev.type) }}</td><td>{{ v(dev.fw) }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
     {{ more(devices, limit) }}
     {% endif %}
   </section>
