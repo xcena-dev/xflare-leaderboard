@@ -27,7 +27,7 @@ from . import aggregate
 DEFAULT_DATA_DIR = "/home/sw-devops/data/xflare_leaderboard"
 DATA_DIR_ENV = "XFLARE_LEADERBOARD_DATA"
 DB_NAME = "leaderboard.sqlite3"
-USER_VERSION = 1
+USER_VERSION = 2
 _RAW_NAME = re.compile(r"[0-9a-f]{64}\.json")
 _LOCK = threading.RLock()
 _stores: dict[str, "Store"] = {}
@@ -52,6 +52,29 @@ CREATE TABLE IF NOT EXISTS runs (
     receipt_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runs_sf ON runs (sf);
+CREATE TABLE IF NOT EXISTS targets (
+    sf TEXT NOT NULL,
+    codec TEXT NOT NULL,
+    run_id TEXT,
+    goal REAL,
+    revision INTEGER NOT NULL,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (sf, codec)
+);
+CREATE TABLE IF NOT EXISTS target_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sf TEXT NOT NULL,
+    codec TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    before_run_id TEXT,
+    after_run_id TEXT,
+    before_goal REAL,
+    after_goal REAL,
+    actor TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS target_events_tab ON target_events (sf, codec, event_id);
 """
 
 
@@ -336,6 +359,67 @@ class Store:
                     conn.execute("ROLLBACK")
                 raise
         return self.get(run_id) if found else None
+
+    @staticmethod
+    def _target_row(conn: sqlite3.Connection, sf: str, codec: str) -> sqlite3.Row | None:
+        return conn.execute("SELECT * FROM targets WHERE sf = ? AND codec = ?", (sf, codec)).fetchone()
+
+    def get_target(self, sf: str, codec: str) -> dict | None:
+        """The tab's pinned target {sf, codec, run_id, goal, revision, updated_by, updated_at}; None when never
+        set. ``goal`` is the target speedup (velox / xflare) the tab aims for, or None."""
+        with self._db("read") as conn:
+            r = self._target_row(conn, sf, codec)
+        return dict(r) if r else None
+
+    def target_history(self, sf: str, codec: str, limit: int = 50) -> tuple[dict | None, list[dict]]:
+        """The tab's target (as ``get_target``) and its changes, newest first, at most ``limit``, read in one
+        transaction: the revision always belongs to the newest change listed."""
+        with self._db("read") as conn:
+            conn.execute("BEGIN")
+            try:
+                pin = self._target_row(conn, sf, codec)
+                rows = conn.execute("SELECT * FROM target_events WHERE sf = ? AND codec = ? ORDER BY event_id DESC"
+                                    " LIMIT ?", (sf, codec, limit)).fetchall()
+                conn.execute("COMMIT")
+            except BaseException:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                raise
+        return (dict(pin) if pin else None), [dict(r) for r in rows]
+
+    def set_target(self, sf: str, codec: str, run_id: str | None, goal: float | None, actor: str,
+                   expected_revision: int) -> tuple[str, dict | None]:
+        """Pin ``run_id`` (None clears) and the goal speedup as the tab's target when its revision is still
+        ``expected_revision`` (0 for a tab never set): "set" (one event appended, revision + 1), "unchanged" (already
+        that run and goal: no event), "conflict" (someone changed it meanwhile) or "withdrawn" (the run was
+        withdrawn, or is gone, by the time of the write); the last two write nothing. Returns the status and the
+        state after. The caller checks the rest of the run's fitness, which a stored run cannot lose."""
+        with self._db("target") as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self._target_row(conn, sf, codec)
+                revision = cur["revision"] if cur else 0
+                before = (cur["run_id"], cur["goal"]) if cur else (None, None)
+                live = run_id is None or conn.execute("SELECT 1 FROM runs WHERE run_id = ? AND withdrawn = 0",
+                                                      (run_id,)).fetchone()
+                if revision != expected_revision or not live or before == (run_id, goal):
+                    conn.execute("ROLLBACK")
+                    status = "conflict" if revision != expected_revision else "withdrawn" if not live else "unchanged"
+                    return status, (dict(cur) if cur else None)
+                now = _now()
+                conn.execute("INSERT OR REPLACE INTO targets (sf, codec, run_id, goal, revision, updated_by,"
+                             " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                             (sf, codec, run_id, goal, revision + 1, actor, now))
+                conn.execute("INSERT INTO target_events (sf, codec, revision, before_run_id, after_run_id,"
+                             " before_goal, after_goal, actor, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (sf, codec, revision + 1, before[0], run_id, before[1], goal, actor, now))
+                state = dict(self._target_row(conn, sf, codec))
+                conn.execute("COMMIT")
+            except BaseException:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                raise
+        return "set", state
 
     def health(self) -> dict:
         out = {"ok": False, "db_path": str(self.db_path), "row_count": None, "last_timestamp": None, "error": None}

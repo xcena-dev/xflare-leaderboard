@@ -63,7 +63,12 @@ def tabs(cfg: dict, deriveds: list[dict]) -> list[dict]:
     pinned = _pinned_tabs(cfg)
     found = {aggregate.tab_of(d) for d in deriveds} - set(pinned)
     rest = sorted(found, key=lambda t: (Decimal(t[0]), t[0], CODECS.index(t[1]) if t[1] in CODECS else len(CODECS)))
-    return [{"sf": sf, "codec": codec, "label": f"{cut(sf)} · {codec}"} for sf, codec in [*pinned, *rest]]
+    return [{"sf": sf, "codec": codec, "label": tab_label(sf, codec)} for sf, codec in [*pinned, *rest]]
+
+
+def tab_label(sf: str, codec: str) -> str:
+    """A tab as pages name it: the scale factor cut like any uploaded scalar, then the codec."""
+    return f"{cut(sf)} · {codec}"
 
 
 def tab_note(cfg: dict, sf: str, codec: str) -> str | None:

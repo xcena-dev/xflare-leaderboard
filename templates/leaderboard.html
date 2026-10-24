@@ -1,3 +1,4 @@
+{%- from "leaderboard_macros.html" import topbar -%}
 <!doctype html>
 <html lang="ko">
 <head>
@@ -8,16 +9,19 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body data-page="board">
-<header class="lb-header">
-  <h1>{{ benchmark.title }}</h1>
-  <div class="lb-meta">
-    <span id="lb-updated">—</span>
-    <button id="lb-refresh" type="button">⟳ refresh</button>
-  </div>
-</header>
+{{ topbar([(benchmark.title, none)]) }}
 
 <main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
-  <p class="lb-desc">{{ benchmark.description or '' }}</p>
+  <div class="lb-page-head">
+    <div>
+      <h1>{{ benchmark.title }}</h1>
+      <p class="lb-desc">{{ benchmark.description or '' }}</p>
+    </div>
+    <div class="lb-meta">
+      <span id="lb-updated">—</span>
+      <button id="lb-refresh" class="lb-btn" type="button">⟳ refresh</button>
+    </div>
+  </div>
 
   <nav class="lb-tabs" id="lb-sf-tabs" aria-label="Scale factor and codec"></nav>
   <p class="lb-status" id="lb-status" hidden></p>
@@ -30,17 +34,24 @@
     <p class="lb-hero-notice" id="hero-notice" hidden></p>
     <p class="lb-empty" id="hero-empty" hidden>이 SF 탭에 Total-eligible run 이 아직 없습니다.
       shared application run 은 목록에만 남고 순위와 hero 에는 오르지 않습니다 (A6) — per-engine run 이 필요합니다.</p>
+    <!-- A8: outside the hero body, so a tab without a Total-eligible hero still shows its target and history. -->
+    <p class="lb-hero-target" id="hero-target" hidden></p>
+    <details class="lb-target-history" id="hero-target-history" hidden>
+      <summary>target 변경 이력</summary>
+      <ol class="lb-target-events" id="hero-target-events"></ol>
+    </details>
     <div id="hero-body" hidden>
       <p class="lb-hero-config" id="hero-config" hidden></p>
       <div class="lb-stats">
         <div class="lb-stat"><span class="lb-stat-label">Xflare total</span><span class="lb-stat-val" id="hero-xflare"></span></div>
-        <div class="lb-stat"><span class="lb-stat-label">Velox total (same run)</span><span class="lb-stat-val" id="hero-velox"></span></div>
-        <div class="lb-stat"><span class="lb-stat-label">Speedup (velox / xflare)</span><span class="lb-stat-val" id="hero-speedup"></span></div>
+        <div class="lb-stat"><span class="lb-stat-label" id="hero-velox-label">Velox total (same run)</span><span class="lb-stat-val" id="hero-velox"></span></div>
+        <div class="lb-stat"><span class="lb-stat-label" id="hero-speedup-label">Speedup (velox / xflare)</span><span class="lb-stat-val" id="hero-speedup"></span>
+          <span class="lb-stat-goal" id="hero-goal" hidden></span></div>
       </div>
       <dl class="lb-kv" id="hero-meta"></dl>
       <div class="chart-tools">
         <label><input type="checkbox" id="hero-log"> log scale</label>
-        <span class="chart-note">per-query median (ms), 같은 run 의 xflare vs velox</span>
+        <span class="chart-note" id="hero-chart-note">per-query median (ms), 같은 run 의 xflare vs velox</span>
       </div>
       <div class="lb-chart"><canvas id="hero-chart"></canvas></div>
     </div>
@@ -84,7 +95,7 @@
         <thead>
           <tr>
             <th class="num">#</th><th>Run (finished, UTC)</th><th class="num">Xflare</th><th class="num">Velox</th>
-            <th class="num">Speedup</th><th class="num">Repeats</th><th>Config</th><th>Mode</th><th>Engines</th><th>Device</th>
+            <th class="num" id="lb-col-speedup">Speedup</th><th class="num">Repeats</th><th>Config</th><th>Mode</th><th>Engines</th><th>Device</th>
             <th>Submitter</th><th>Badges</th><th>Repro</th><th>Compare</th>
           </tr>
         </thead>
@@ -96,7 +107,7 @@
       <ul class="lb-shared-list" id="lb-shared-list"></ul>
     </div>
     <div class="lb-compare-bar">
-      <button type="button" id="lb-compare" class="lb-btn" disabled>선택한 run 비교 (2–4)</button>
+      <button type="button" id="lb-compare" class="lb-btn lb-btn-primary" disabled>선택한 run 비교 (2–4)</button>
     </div>
   </section>
 </main>

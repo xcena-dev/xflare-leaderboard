@@ -7,9 +7,20 @@
 
 (function () {
   const QUERIES = Array.from({ length: 22 }, (_, i) => i + 1);
-  const XFLARE_COLOR = '#14B8A6';
-  const VELOX_COLOR = '#94A3B8';
-  const SERIES_COLORS = ['#14B8A6', '#F59E0B', '#818CF8', '#F472B6'];
+
+  // Chart colours come from style.css's tokens, read once per chart, so a chart follows the page's light or dark
+  // theme as drawn; the fallbacks (the light theme's) cover a page whose stylesheet did not load.
+  function chartColors() {
+    const css = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+    const token = (name, fallback) => (css && css.getPropertyValue(name).trim()) || fallback;
+    const xflare = token('--chart-xflare', '#3b5bdb');
+    return {
+      xflare, velox: token('--chart-velox', '#aab3c0'),
+      series: [xflare, token('--chart-2', '#7048e8'), token('--chart-3', '#b7791f'), token('--chart-4', '#1f8a4c')],
+      tick: token('--text-3', '#768194'), grid: token('--border', '#e1e5eb'), legend: token('--text-2', '#4a5566'),
+      font: token('--font', 'sans-serif'),
+    };
+  }
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -91,20 +102,26 @@
   }
 
   // Grouped bars per query, linear or log as the page's toggle stands now.
-  function perQueryChart(canvas, datasets, logBox) {
+  function perQueryChart(canvas, datasets, logBox, colors) {
     if (typeof Chart === 'undefined') return null;
+    const font = { family: colors.font, size: 12 };
+    const { tick, grid } = colors;
     const chart = new Chart(canvas, {
       type: 'bar',
       data: { labels: QUERIES.map(q => `Q${q}`), datasets },
       options: {
         responsive: true, maintainAspectRatio: false, animation: false,
         scales: {
-          x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.08)' } },
+          x: { ticks: { color: tick, font }, grid: { display: false }, border: { color: grid } },
           y: { type: logBox && logBox.checked ? 'logarithmic' : 'linear',
-               title: { display: true, text: 'ms', color: '#94a3b8' },
-               ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.12)' } },
+               title: { display: true, text: 'ms', color: tick, font },
+               ticks: { color: tick, font }, grid: { color: grid }, border: { display: false } },
         },
-        plugins: { legend: { labels: { color: '#e2e8f0' } } },
+        plugins: {
+          legend: { align: 'end',
+                    labels: { color: colors.legend, font, boxWidth: 10, boxHeight: 10,
+                              useBorderRadius: true, borderRadius: 2 } },
+        },
       },
     });
     return chart;
@@ -122,16 +139,52 @@
   }
 
   function bar(label, data, color) {
-    return { label, data, backgroundColor: color, borderColor: color, borderWidth: 1 };
+    return { label, data, backgroundColor: color, borderWidth: 0, borderRadius: 3, maxBarThickness: 18 };
   }
 
+  // Resolves to {ok, status, data}; a lost connection is status 0, since whether the edit was stored is unknown.
   async function postJSON(url, body) {
-    const resp = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+    } catch (e) {
+      return { ok: false, status: 0, data: { errors: ['연결이 끊겼습니다 — 저장됐는지 알 수 없으니 새로고침해서 확인하세요'] } };
+    }
     let data = null;
     try { data = await resp.json(); } catch (e) { /* non-JSON error page */ }
     return { ok: resp.ok, status: resp.status, data };
+  }
+
+  const GOAL_MAX = 1000;   // the server's bound (web.GOAL_MAX)
+
+  function targetUrl(sf, codec) {
+    return `/api/leaderboard/targets/${encodeURIComponent(sf)}/${encodeURIComponent(codec)}`;
+  }
+
+  // A8: pins (or clears, runId null) a tab's target and goal speedup. The server refuses a stale revision (409),
+  // so a change made meanwhile is never overwritten. Resolves to the response, or null when the user cancels or
+  // `stillValid` says the page moved on while the prompts were open.
+  async function setTarget(sf, codec, revision, runId, askGoal, goal, stillValid) {
+    const actor = prompt('Target 을 바꾸는 사람 (email):');
+    if (!actor) return null;
+    if (askGoal) {
+      const text = prompt(`목표 speedup (target 의 velox / xflare, 0 초과 ${GOAL_MAX} 이하, 예: 2.0). 비워 두면 목표 없음:`,
+                          goal ?? '');
+      if (text === null) return null;
+      goal = text.trim() === '' ? null : Number(text);
+      if (goal !== null && !(Number.isFinite(goal) && goal > 0 && goal <= GOAL_MAX)) {
+        alert(`목표 speedup 은 0 보다 크고 ${GOAL_MAX} 이하인 숫자여야 합니다.`);
+        return null;
+      }
+    }
+    if (stillValid && !stillValid()) return null;
+    return postJSON(targetUrl(sf, codec), { actor, expected_revision: revision, run_id: runId, goal: runId ? goal : null });
+  }
+
+  function failed(what, r) {
+    alert(`${what} 실패 (HTTP ${r.status}): ${((r.data && r.data.errors) || []).join('; ')}`);
   }
 
   // ---- board page ------------------------------------------------------------
@@ -149,6 +202,8 @@
       codec: params.get('codec') || '',
       tabs: [],
       metric: params.get('metric') || 'total',
+      // A8: a shared link may name its own target (a run id, or none); it is never stored.
+      target: params.get('target') || '',
       top: params.get('top') || '10',
       // Only keys the user (or the shared URL) set. An absent key takes the
       // server default; an empty one means "any" and lifts that default.
@@ -157,6 +212,13 @@
     for (const k of FILTER_KEYS) if (params.has(k)) state.filter[k] = params.get(k);
     const selected = new Set();
     let chart = null;
+    let target = null;      // the target the last answer compared with (null: the same-run velox)
+    let targetPin = null;   // the tab's stored target, for its history and changes
+    // A8: each tab change and each history fetch bumps historyGen, so an answer or a button from an older one never
+    // acts on the current tab; historyRevision is the revision the shown list was fetched at.
+    const targetHistory = document.getElementById('hero-target-history');
+    let historyGen = 0;
+    let historyRevision = null;
     const heroLog = document.getElementById('hero-log');
 
     const status = document.getElementById('lb-status');
@@ -175,7 +237,7 @@
       sfHost.replaceChildren();
       for (const t of state.tabs) {
         tabButton(sfHost, `SF-${t.label}`, t.sf === state.sf && t.codec === state.codec,
-                  () => { state.sf = t.sf; state.codec = t.codec; load(); });
+                  () => { state.sf = t.sf; state.codec = t.codec; state.target = ''; load(); });
       }
       const mHost = document.getElementById('lb-metric-tabs');
       mHost.replaceChildren();
@@ -189,6 +251,7 @@
       const q = new URLSearchParams({ metric: state.metric, top: state.top });
       if (state.sf) q.set('sf', state.sf);
       if (state.codec) q.set('codec', state.codec);
+      if (state.target) q.set('target', state.target);
       for (const [k, v] of Object.entries(state.filter)) q.set(k, v);
       return q;
     }
@@ -233,6 +296,38 @@
       return dd;
     }
 
+    function id8(runId) { return runId ? runId.slice(0, 8) : '없음'; }
+
+    // A8: the target usable for comparison (null: compare with the same-run velox).
+    function liveTarget() { return target && !target.problem ? target : null; }
+
+    // A8: the target line and its history, shown whatever the hero (a tab may have none yet).
+    function renderTarget() {
+      const line = document.getElementById('hero-target');
+      line.replaceChildren();
+      line.className = 'lb-hero-target';
+      line.hidden = targetHistory.hidden = !targetPin;
+      if (!targetPin) return;
+      if (!target) {
+        line.textContent = targetPin.run_id
+          ? '이 보기는 target 없이 같은 run 의 velox 와 비교합니다.'
+          : '이 탭에 target 이 없습니다 — 같은 run 의 velox 와 비교합니다. run 페이지에서 target 으로 지정할 수 있습니다.';
+        return;
+      }
+      if (target.problem) {
+        line.className = 'lb-hero-target lb-banner lb-banner-warn';
+        line.textContent = `target ${id8(target.run_id)} 을 쓸 수 없습니다 (${target.problem}) — 같은 run 의 velox 와 비교합니다.`;
+        return;
+      }
+      line.appendChild(el('span', null, 'Target: '));
+      const a = el('a', 'lb-run', `${id8(target.run_id)} · ${fmtTs(target.finished_at)}`);
+      a.href = runHref(cfg.board, target.run_id);
+      line.appendChild(a);
+      line.appendChild(el('span', null, ` · ${target.config_label}`));
+      line.appendChild(el('span', 'lb-dim', target.source === 'link' ? ' · 이 링크에서만 (저장된 target 아님)'
+        : ` · ${targetPin.updated_by ?? '—'} 가 ${fmtTs(targetPin.updated_at)} 에 지정`));
+    }
+
     // notice: the server's line for a fallback hero (the filter matched no
     // Total-eligible run, so this is the tab's fastest in any configuration).
     function renderHero(hero, notice) {
@@ -250,8 +345,22 @@
       if (!hero) return;
       link.href = runHref(cfg.board, hero.run_id);
       document.getElementById('hero-xflare').textContent = fmtMs(hero.totals.xflare_ms);
-      document.getElementById('hero-velox').textContent = fmtMs(hero.totals.velox_ms);
-      document.getElementById('hero-speedup').textContent = fmtX(hero.totals.speedup);
+      const t = liveTarget();
+      document.getElementById('hero-velox-label').textContent = t ? 'Target velox total' : 'Velox total (same run)';
+      document.getElementById('hero-velox').textContent = fmtMs(t ? t.velox_ms : hero.totals.velox_ms);
+      document.getElementById('hero-speedup-label').textContent = t ? 'Speedup vs target' : 'Speedup (velox / xflare)';
+      document.getElementById('hero-speedup').textContent = fmtX(t ? hero.vs_target : hero.totals.speedup);
+      const goalEl = document.getElementById('hero-goal');
+      goalEl.hidden = !(t && t.goal);
+      if (t && t.goal) {
+        const reached = hero.vs_target != null && hero.vs_target >= t.goal;
+        goalEl.className = reached ? 'lb-stat-goal lb-goal-met' : 'lb-stat-goal';
+        goalEl.textContent = hero.vs_target == null ? `목표 ${fmtX(t.goal)}`
+          : `목표 ${fmtX(t.goal)} · ${reached ? '달성' : `${Math.round(100 * hero.vs_target / t.goal)}%`}`;
+      }
+      document.getElementById('hero-chart-note').textContent = t
+        ? 'per-query median (ms): hero 의 xflare vs target 의 velox (흐린 막대: hero 와 같은 run 의 velox)'
+        : 'per-query median (ms), 같은 run 의 xflare vs velox';
       const meta = document.getElementById('hero-meta');
       meta.replaceChildren();
       kv(meta, 'Config', hero.config_label).title = configText(hero.config);
@@ -263,10 +372,14 @@
       kv(meta, 'Finished', fmtTs(hero.finished_at));
       kv(meta, 'Devices', fmtDevices(hero));
       kv(meta, 'Badges', badgeList(hero.badges, cfg.badge_class));
-      chart = perQueryChart(document.getElementById('hero-chart'), [
-        bar('xflare', hero.per_query.map(p => p.xflare_ms), XFLARE_COLOR),
-        bar('velox', hero.per_query.map(p => p.velox_ms), VELOX_COLOR),
-      ], heroLog);
+      const colors = chartColors();
+      const sameRun = hero.per_query.map(p => p.velox_ms);
+      chart = perQueryChart(document.getElementById('hero-chart'), t
+        ? [bar('xflare', hero.per_query.map(p => p.xflare_ms), colors.xflare),
+           bar('target velox', t.per_query, colors.velox),
+           bar('velox (same run)', sameRun, colors.grid)]
+        : [bar('xflare', hero.per_query.map(p => p.xflare_ms), colors.xflare),
+           bar('velox', sameRun, colors.velox)], heroLog, colors);
     }
 
     // A6: shared-application runs under the filter, stored and listed but never ranked, named under the board
@@ -303,6 +416,8 @@
         `${metricName}: ${data.eligible_count} eligible run(s) under the filter · top ${data.top} · ` +
         (data.metric === 'total' ? 'xflare median 합' : 'xflare median') +
         ' 오름차순, 동률은 repeats 많은 순 → 먼저 끝난 순';
+      const t = liveTarget();
+      document.getElementById('lb-col-speedup').textContent = t ? 'vs target' : 'Speedup';
       if (!data.rows.length) {
         const tr = tbody.insertRow();
         const td = tr.insertCell();
@@ -323,7 +438,10 @@
         a.title = `${r.run_id}\nfinished ${r.finished_at}`;
         tr.insertCell().appendChild(a);
         for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
-                                          [fmtX(r.value.speedup), 'num'], [`x${r.repeats}`, 'num'],
+                                          t ? [fmtX(r.value.vs_target),
+                                               t.goal && r.value.vs_target >= t.goal ? 'num lb-goal-met' : 'num',
+                                               `같은 run 의 velox 기준 ${fmtX(r.value.speedup)}`]
+                                            : [fmtX(r.value.speedup), 'num'], [`x${r.repeats}`, 'num'],
                                           [compactConfig(r.config), null, configText(r.config)],
                                           [r.config.application_mode ?? '—', null],
                                           [(r.config.engines ?? '—').replace(',', ', '), null],
@@ -383,6 +501,8 @@
     let generation = 0;
     async function load() {
       const mine = ++generation;
+      // Another tab: the shown history (and its buttons) belongs to the old one.
+      if (targetPin && (state.sf !== targetPin.sf || state.codec !== targetPin.codec)) forgetHistory();
       renderTabs();
       const q = query();
       history.replaceState(null, '', `${location.pathname}?${q}`);
@@ -411,9 +531,18 @@
       }
       if (mine !== generation) return;
       if (!resp.ok) {
+        // A malformed ?target= from a shared link: drop it and show the tab's stored target.
+        if (resp.status === 400 && state.target && /^target:/.test((data.errors || [])[0] || '')) {
+          state.target = '';
+          load();
+          return;
+        }
         // An unknown ?sf= / ?codec= from a shared link: forget them so the tabs come back.
         if (resp.status === 400 && state.sf && !state.tabs.length) { state.sf = ''; state.codec = ''; load(); return; }
         showStatus((data.errors || []).join('; ') || `HTTP ${resp.status}`);
+        target = targetPin = null;
+        forgetHistory();
+        renderTarget();
         renderHero(null);
         renderBoard({ metric: state.metric, eligible_count: 0, top: state.top, rows: [] });
         return;
@@ -424,7 +553,12 @@
       state.tabs = data.tabs;
       renderTabs();
       renderFilters(data);
+      if (!targetPin || targetPin.sf !== data.sf || targetPin.codec !== data.codec) forgetHistory();
+      target = data.target || null;
+      targetPin = data.target_pin || null;
+      renderTarget();
       renderHero(data.hero, data.hero_fallback ? data.hero_notice : null);
+      if (targetHistory.open && historyRevision !== targetPin.revision) loadTargetHistory();
       renderBoard(data);
       document.getElementById('lb-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
     }
@@ -438,6 +572,49 @@
       const ids = [...selected].map(encodeURIComponent).join(',');
       location.href = `${cfg.board}/compare?runs=${ids}`;
     });
+    // A8: the tab's latest target changes (at most 50), newest first; a listed earlier target can be pinned again.
+    function forgetHistory() {
+      historyGen++;
+      historyRevision = null;
+      document.getElementById('hero-target-events').replaceChildren();
+    }
+    async function loadTargetHistory() {
+      const list = document.getElementById('hero-target-events');
+      const pin = targetPin;
+      if (!pin) return;
+      const mine = ++historyGen;
+      let data;
+      try {
+        const resp = await fetch(targetUrl(pin.sf, pin.codec));
+        data = await resp.json();
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      } catch (e) {
+        if (mine === historyGen) list.replaceChildren(el('li', 'lb-dim', '이력을 불러오지 못했습니다.'));
+        return;
+      }
+      if (mine !== historyGen) return;
+      historyRevision = data.revision;
+      list.replaceChildren();
+      if (!data.history.length) list.appendChild(el('li', 'lb-dim', '아직 지정된 적이 없습니다.'));
+      for (const e of data.history) {
+        const goal = e.after_goal ? ` · 목표 ${fmtX(e.after_goal)}` : '';
+        const li = el('li', null, `${fmtTs(e.at)} · ${e.actor} · ${id8(e.before_run_id)} → ${id8(e.after_run_id)}${goal}`);
+        if (e.after_run_id && (e.after_run_id !== data.run_id || e.after_goal !== data.goal)) {
+          const b = el('button', 'lb-btn', '다시 지정');
+          b.type = 'button';
+          b.addEventListener('click', async () => {
+            const r = await setTarget(data.sf, data.codec, data.revision, e.after_run_id, false, e.after_goal,
+                                      () => mine === historyGen && state.sf === data.sf && state.codec === data.codec);
+            if (!r) return;
+            if (!r.ok) { failed('target 지정', r); return; }
+            load();
+          });
+          li.appendChild(b);
+        }
+        list.appendChild(li);
+      }
+    }
+    targetHistory.addEventListener('toggle', () => { if (targetHistory.open) loadTargetHistory(); });
     bindLogToggle(heroLog, () => chart);
     updateCompare();
     load();
@@ -447,10 +624,11 @@
   function initRun() {
     const run = JSON.parse(document.getElementById('lb-run-data').textContent);
     const logBox = document.getElementById('run-log');
+    const colors = chartColors();
     const chart = perQueryChart(document.getElementById('run-chart'), [
-      bar('xflare', run.xflare, XFLARE_COLOR),
-      bar('velox', run.velox, VELOX_COLOR),
-    ], logBox);
+      bar('xflare', run.xflare, colors.xflare),
+      bar('velox', run.velox, colors.velox),
+    ], logBox, colors);
     bindLogToggle(logBox, () => chart);
 
     // No copy button when no command is offered; withdraw below
@@ -470,6 +648,19 @@
       }
     });
 
+    for (const [id, runId, what] of [['lb-target-set', run.run_id, 'target 지정'], ['lb-target-clear', null, 'target 해제']]) {
+      const b = document.getElementById(id);
+      if (!b) continue;
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        const r = await setTarget(b.dataset.sf, b.dataset.codec, Number(b.dataset.revision), runId, !!runId,
+                                  b.dataset.goal ? Number(b.dataset.goal) : null);
+        if (r && r.ok) { location.reload(); return; }
+        b.disabled = false;
+        if (r) failed(what, r);
+      });
+    }
+
     const withdraw = document.getElementById('lb-withdraw');
     if (!withdraw) return;
     withdraw.addEventListener('click', async () => {
@@ -482,7 +673,7 @@
                                { actor, reason });
       if (r.ok) { location.reload(); return; }
       withdraw.disabled = false;
-      alert(`withdraw 실패 (HTTP ${r.status}): ${((r.data && r.data.errors) || []).join('; ')}`);
+      failed('withdraw', r);
     });
   }
 
@@ -490,9 +681,10 @@
   function initCompare() {
     const data = JSON.parse(document.getElementById('lb-compare-data').textContent);
     const logBox = document.getElementById('compare-log');
+    const colors = chartColors();
     const chart = perQueryChart(document.getElementById('compare-chart'),
-                                data.series.map((s, i) => bar(data.names[i], s, SERIES_COLORS[i % SERIES_COLORS.length])),
-                                logBox);
+                                data.series.map((s, i) => bar(data.names[i], s, colors.series[i % colors.series.length])),
+                                logBox, colors);
     bindLogToggle(logBox, () => chart);
     const only = document.getElementById('params-only-diff');
     only.addEventListener('change', () => {

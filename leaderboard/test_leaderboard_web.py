@@ -100,6 +100,14 @@ class WebCase(unittest.TestCase):
         self.post(build_envelope(m))
         return m["run_id"]
 
+    def pin_target(self, run_id, revision=0, goal=None, status=200, **headers):
+        """POST the SF-100 tab's target (A8) and check the status; returns the JSON answer."""
+        r = self.c.post("/api/leaderboard/targets/100/snappy",
+                        json={"actor": "a@x", "expected_revision": revision, "run_id": run_id, "goal": goal},
+                        headers=headers)
+        self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:300])
+        return r.get_json()
+
     def page_data(self) -> dict:
         """The board page's real data block, for the page-script harnesses."""
         html = self.c.get(LB).get_data(as_text=True)
@@ -680,15 +688,19 @@ class TestAcceptedExtremes(WebCase):
 # null), "data" seeds their textContent, fetch answers with "fetch", "slots" are the board's filter slots. Prints
 # the listeners it saw, the text and hidden flag of every element by id, and the text, value, title and href of every element it
 # created. "check" ticks that many of the board's row checkboxes in order, then "click" names an element whose click
-# handlers run ("clickClass": every element of that class); "secure" is window.isSecureContext. The compare button's
-# disabled state after each tick ("gate"), location.href, clipboard writes and execCommand calls are reported.
+# handlers run ("clickClass": every element of that class); "secure" is window.isSecureContext. "prompts" answers
+# prompt() in turn, "datasets" gives elements their data-* attributes, "rejectPost" makes a POST fail like a lost
+# connection. The compare button's disabled state after each tick ("gate"), location.href, clipboard writes,
+# execCommand calls, every fetch ("fetches": url, method, JSON body), alerts, reloads and each element's disabled
+# flag by id ("disabled") are reported.
 _JS_HARNESS = r"""
 const fs = require('fs'), vm = require('vm');
 const cfg = JSON.parse(fs.readFileSync(0, 'utf8'));
 const listeners = {}, handlers = {}, byId = {}, all = [], clipboard = [], execs = [];
 class Element {
   constructor(tag, id) {
-    Object.assign(this, { tagName: tag, id, children: [], dataset: {}, hidden: false, value: '', attrs: {},
+    Object.assign(this, { tagName: tag, id, children: [], dataset: { ...((cfg.datasets || {})[id] || {}) },
+                          hidden: false, value: '', attrs: {},
                           title: '', textContent: (cfg.data || {})[id] || '' });
     this.style = { setProperty() {} };
     this.classList = { add() {}, remove() {}, toggle() {}, contains() { return false; } };
@@ -729,10 +741,17 @@ global.window = { isSecureContext: !!cfg.secure };
 Object.defineProperty(globalThis, 'navigator',
                       { value: { clipboard: { writeText: async t => { clipboard.push(t); } } }, configurable: true });
 global.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
-global.location = { search: '', pathname: '/b/xflare_leaderboard' };
+global.location = { search: '', pathname: '/b/xflare_leaderboard', reload() { reloads.push(1); } };
 global.history = { replaceState() {} };
-global.fetch = async () => ({ ok: true, status: 200, json: async () => JSON.parse(cfg.fetch),
-                               headers: { get: k => (cfg.headers || {})[k.toLowerCase()] || null } });
+const fetches = [], alerts = [], reloads = [], prompts = [...(cfg.prompts || [])];
+global.prompt = () => (prompts.length ? prompts.shift() : null);
+global.alert = m => { alerts.push(String(m)); };
+global.fetch = async (url, init) => {
+  fetches.push({ url, method: (init && init.method) || 'GET', body: init && init.body ? JSON.parse(init.body) : null });
+  if (cfg.rejectPost && init && init.method === 'POST') throw new TypeError('Failed to fetch');
+  return { ok: true, status: 200, json: async () => JSON.parse(cfg.fetch),
+           headers: { get: k => (cfg.headers || {})[k.toLowerCase()] || null } };
+};
 vm.runInThisContext(fs.readFileSync(cfg.js, 'utf8'));
 setTimeout(async () => {
   const gate = [];
@@ -745,11 +764,12 @@ setTimeout(async () => {
   for (const e of all.filter(e => cfg.clickClass && e.className === cfg.clickClass)) for (const h of e.clicks || []) await h();
   const text = {};
   const hidden = {};
-  for (const [id, e] of Object.entries(byId)) if (e.id) { text[id] = e.textContent; hidden[id] = e.hidden; }
+  const disabled = {};
+  for (const [id, e] of Object.entries(byId)) if (e.id) { text[id] = e.textContent; hidden[id] = e.hidden; disabled[id] = !!e.disabled; }
   console.log(JSON.stringify({ listeners, text, hidden, texts: all.map(e => String(e.textContent)),
                                values: all.map(e => String(e.value)), titles: all.map(e => String(e.title)),
                                classes: all.map(e => String(e.className)), hrefs: all.map(e => String(e.href || '')), gate, location: location.href || null,
-                               clipboard, execs }));
+                               clipboard, execs, fetches, alerts, reloads: reloads.length, disabled }));
 }, 50);
 """
 
@@ -771,11 +791,12 @@ def page_script_node() -> str:
 
 
 def run_page_js(page: str, ids=None, data=None, fetch=None, slots=None, click=None, click_class=None,
-                secure=False, check=0, headers=None) -> dict:
+                secure=False, check=0, headers=None, prompts=(), datasets=None, reject_post=False) -> dict:
     node = page_script_node()
     cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "page": page, "ids": ids,
            "data": data or {}, "fetch": fetch, "slots": slots, "click": click,
-           "clickClass": click_class, "secure": secure, "check": check}
+           "clickClass": click_class, "secure": secure, "check": check, "prompts": list(prompts),
+           "datasets": datasets or {}, "rejectPost": reject_post}
     if headers is None:
         # The answer names the page's own script, as the service that rendered the page does.
         script = json.loads((data or {}).get("lb-page-data") or "{}").get("script")
@@ -895,6 +916,16 @@ class TestPageBudgets(WebCase):
         html = self.c.get(f"{LB}/run/{unparsed['run_id']}").get_data(as_text=True)
         self.assertIn("argv 를 spark-tpch.sh 의 옵션으로 읽지 못했습니다", html)
         self.assertNotIn('id="repro-cmd"', html)
+
+    def test_withdraw_on_a_lost_connection(self):
+        """A lost connection while withdrawing re-enables the button and says the outcome is unknown."""
+        run_id = self.submit()
+        html = self.c.get(f"{LB}/run/{run_id}").get_data(as_text=True)
+        data = re.search(r'id="lb-run-data">(.*?)</script>', html, re.S).group(1)
+        out = run_page_js("run", ids=re.findall(r'id="([^"]+)"', html), data={"lb-run-data": data},
+                          click="lb-withdraw", prompts=["me@x", "why"], fetch="{}", reject_post=True)
+        self.assertEqual((len(out["fetches"]), out["reloads"], out["disabled"]["lb-withdraw"]), (1, 0, False))
+        self.assertIn("저장됐는지 알 수 없으니", out["alerts"][0])
 
     def test_withdraw_attaches_without_copy_button(self):
         """With the command omitted there is no copy button; the page script must still wire withdraw."""
@@ -1122,8 +1153,9 @@ class TestWrongAnswersShown(WebCase):
 # Drives the board script step by step against a DOM stub and a Chart stub. Every fetch stays pending until a step
 # answers it ({"answer": i, "with": key} resolves the i-th request with responses[key], with meta[key]'s status and
 # headers, else 200 and the default headers, or rejects it when meta[key] has "reject"); {"click": text} clicks the
-# button with that text; {"fire": id} clicks that element; {"toggle": id} flips a checkbox. Prints what the page ended
-# up showing.
+# last button made with that text (a detached one too); {"fire": id} clicks that element; {"open": id} opens a
+# <details>; {"toggle": id} flips a checkbox. cfg.search is the page's query string, cfg.prompts answers prompt() in
+# turn. Prints what the page ended up showing.
 _BOARD_HARNESS = r"""
 const fs = require('fs'), vm = require('vm');
 const cfg = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -1153,11 +1185,16 @@ global.document = {
   querySelectorAll() { return []; },
   createElement(tag) { return new Element(tag); },
 };
-global.location = { search: '', pathname: '/b/xflare_leaderboard' };
+global.location = { search: cfg.search || '', pathname: '/b/xflare_leaderboard' };
 global.history = { replaceState(a, b, u) { lastUrl = u; } };
-global.fetch = url => new Promise((res, rej) => pending.push({ url, res, rej }));
+global.fetch = (url, init) => new Promise((res, rej) => pending.push({ url, init, res, rej }));
+const alerts = [], prompts = [...(cfg.prompts || [])];
+global.prompt = () => (prompts.length ? prompts.shift() : null);
+global.alert = m => { alerts.push(String(m)); };
 global.Chart = class {
-  constructor(canvas, conf) { this.options = conf.options; this.destroyed = false; charts.push(this); }
+  constructor(canvas, conf) {
+    this.options = conf.options; this.datasets = conf.data.datasets; this.destroyed = false; charts.push(this);
+  }
   update() { if (this.destroyed) problems.push('update on a destroyed chart'); }
   destroy() { this.destroyed = true; }
 };
@@ -1177,6 +1214,9 @@ const tick = () => new Promise(r => setTimeout(r, 5));
       all.filter(e => e.tagName === 'button' && e.textContent === step.click).pop().fire('click');
     } else if (step.fire) {
       byId[step.fire].fire('click');
+    } else if (step.open) {
+      byId[step.open].open = true;
+      byId[step.open].fire('toggle');
     } else if (step.toggle) {
       const e = byId[step.toggle];
       e.checked = !e.checked;
@@ -1193,7 +1233,11 @@ const tick = () => new Promise(r => setTimeout(r, 5));
     boardLinks: links(byId['#lb-board tbody']),
     logListeners: (byId['hero-log'].on.change || []).length,
     charts: charts.map(c => ({ destroyed: c.destroyed, y: c.options.scales.y.type })), problems,
-    requests: pending.map(p => p.url) }));
+    datasets: charts.length ? charts[charts.length - 1].datasets.map(d => ({ label: d.label, data: d.data })) : [],
+    requests: pending.map(p => p.url),
+    posts: pending.filter(p => p.init && p.init.method === 'POST').map(p => ({ url: p.url, body: JSON.parse(p.init.body) })),
+    alerts, events: byId['hero-target-events'].children.map(c => c.textContent),
+    target: byId['hero-target'].textContent, targetHidden: byId['hero-target'].hidden }));
 })();
 """
 
@@ -1202,12 +1246,12 @@ class TestBoardScript(WebCase):
     """The board page script under controlled timing: stale answers never win, an answer for another script never
     renders, one log toggle drives the chart."""
 
-    def drive(self, steps, responses, meta=None):
+    def drive(self, steps, responses, meta=None, search="", prompts=()):
         """Answers name the page's own script unless meta[key] gives other headers (names in lower case)."""
         node = page_script_node()
         data = self.page_data()
         cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "data": data, "steps": steps,
-               "responses": responses, "meta": meta or {},
+               "responses": responses, "meta": meta or {}, "search": search, "prompts": list(prompts),
                "headers": {"x-leaderboard-script": json.loads(data["lb-page-data"])["script"]}}
         out = subprocess.run([node, "-e", _BOARD_HARNESS], input=json.dumps(cfg), capture_output=True, text=True,
                              timeout=30)
@@ -1269,6 +1313,111 @@ class TestBoardScript(WebCase):
         self.assertTrue(out["heroLink"].endswith(thousand), out)
         self.assertTrue(out["statusHidden"], out)
 
+    def target_tabs(self):
+        """SF-100 with two runs pinned in turn (the second is the target now) and SF-1000 with one run."""
+        first, second = self.submit(elapsed=flat_elapsed(500, velox=2500)), self.submit(elapsed=flat_elapsed(400))
+        self.submit(sf="1000")
+        self.pin_target(first, 0, goal=2.0)
+        self.pin_target(second, 1)
+        get = lambda u: self.c.get(u).get_data(as_text=True)
+        return first, second, {"100": get("/api/leaderboard/board?sf=100"), "1000": get("/api/leaderboard/board?sf=1000"),
+                               "hist": get("/api/leaderboard/targets/100/snappy"), "pin": '{"revision": 3}'}
+
+    def test_target_history_pins_an_earlier_target_again(self):
+        """A8: the history lists the latest changes; "다시 지정" posts that earlier target and goal at the revision the
+        history showed, then reloads the board."""
+        first, second, responses = self.target_tabs()
+        out = self.drive([{"answer": 0, "with": "100"}, {"open": "hero-target-history"}, {"answer": 1, "with": "hist"},
+                          {"click": "다시 지정"}, {"answer": 2, "with": "pin"}], responses, prompts=["me@x"])
+        self.assertEqual(len(out["events"]), 2, out)
+        self.assertEqual(out["posts"], [{"url": "/api/leaderboard/targets/100/snappy",
+                                         "body": {"actor": "me@x", "expected_revision": 2, "run_id": first,
+                                                  "goal": 2.0}}])
+        self.assertIn("sf=100", out["requests"][3])                         # the board reloads after the change
+        self.assertEqual(out["alerts"], [])
+        refused = self.drive([{"answer": 0, "with": "100"}, {"open": "hero-target-history"}, {"answer": 1, "with": "hist"},
+                              {"click": "다시 지정"}, {"answer": 2, "with": "stale"}],
+                             {**responses, "stale": '{"errors": ["the target changed meanwhile: reload and try again"]}'},
+                             meta={"stale": {"status": 409}}, prompts=["me@x"])
+        self.assertEqual(len(refused["alerts"]), 1)
+        self.assertIn("HTTP 409", refused["alerts"][0])
+        self.assertEqual(len(refused["requests"]), 3)                         # nothing reloads after a refusal
+
+    def test_open_history_refetches_only_on_a_new_revision(self):
+        """A8: with the history open, a board answer at a new revision fetches it again; one at the same revision
+        (another metric) does not. The target line names the pinned run and who set it."""
+        _, second, responses = self.target_tabs()
+        newer = json.loads(responses["100"])
+        newer["target_pin"]["revision"] += 1
+        responses["newer"] = json.dumps(newer)
+        out = self.drive([{"answer": 0, "with": "100"}, {"open": "hero-target-history"}, {"answer": 1, "with": "hist"},
+                          {"click": "Q1"}, {"answer": 2, "with": "100"}, {"click": "Q2"}, {"answer": 3, "with": "newer"}],
+                         responses)
+        targets = [u for u in out["requests"] if "/api/leaderboard/targets/" in u]
+        self.assertEqual(len(targets), 2, out["requests"])                    # the opening, then the new revision
+        self.assertFalse(out["targetHidden"])
+
+    def test_target_line_wording(self):
+        """A8: what the target line says without a target, for a link's own target and for ?target=none."""
+        first, second, responses = self.target_tabs()
+        never = json.loads(responses["1000"])
+        self.assertEqual(never["target_pin"]["revision"], 0)
+        out = run_page_js("board", data=self.page_data(), fetch=responses["1000"])
+        self.assertTrue(out["text"]["hero-target"].startswith("이 탭에 target 이 없습니다"))
+        none = run_page_js("board", data=self.page_data(),
+                           fetch=self.c.get("/api/leaderboard/board?sf=100&target=none").get_data(as_text=True))
+        self.assertEqual(none["text"]["hero-target"], "이 보기는 target 없이 같은 run 의 velox 와 비교합니다.")
+        link = run_page_js("board", data=self.page_data(),
+                           fetch=self.c.get(f"/api/leaderboard/board?sf=100&target={first}").get_data(as_text=True))
+        self.assertIn(" · 이 링크에서만 (저장된 target 아님)", link["texts"])
+        pinned = run_page_js("board", data=self.page_data(), fetch=responses["100"])
+        self.assertTrue(any(t.endswith(" 에 지정") and "a@x 가 " in t for t in pinned["texts"]), pinned["texts"])
+        self.assertIn(f"{LB}/run/{second}", pinned["hrefs"])
+
+    def test_hero_chart_draws_the_target_velox(self):
+        """A8: the hero chart's bars are the hero's xflare, the target's velox and (faint) the hero's own velox."""
+        first, second, responses = self.target_tabs()
+        self.pin_target(first, 2)                                             # a target that is not the hero
+        responses["100"] = self.c.get("/api/leaderboard/board?sf=100").get_data(as_text=True)
+        board = json.loads(responses["100"])
+        self.assertEqual((board["hero"]["run_id"], board["target"]["run_id"]), (second, first))
+        self.assertNotEqual(board["target"]["per_query"], [p["velox_ms"] for p in board["hero"]["per_query"]])
+        out = self.drive([{"answer": 0, "with": "100"}], responses)
+        self.assertEqual([d["label"] for d in out["datasets"]], ["xflare", "target velox", "velox (same run)"])
+        self.assertEqual(out["datasets"][1]["data"], board["target"]["per_query"])
+        self.assertEqual(out["datasets"][2]["data"], [p["velox_ms"] for p in board["hero"]["per_query"]])
+
+    def test_target_history_of_another_tab_never_acts(self):
+        """A8: after a tab change, a late history answer (or failure) of the old tab draws nothing, and a button
+        the old tab drew posts nothing."""
+        _, _, responses = self.target_tabs()
+        late = self.drive([{"answer": 0, "with": "100"}, {"open": "hero-target-history"},
+                           {"click": "SF-1000 · snappy"}, {"answer": 2, "with": "1000"}, {"answer": 1, "with": "hist"}],
+                          responses)
+        self.assertEqual(late["events"], [])
+        failed = self.drive([{"answer": 0, "with": "100"}, {"open": "hero-target-history"},
+                             {"click": "SF-1000 · snappy"}, {"answer": 2, "with": "1000"}, {"answer": 1, "with": "fail"}],
+                            {**responses, "fail": '{"errors": ["x"]}'}, meta={"fail": {"status": 503}})
+        self.assertEqual(failed["events"], [])
+        stale = self.drive([{"answer": 0, "with": "100"}, {"open": "hero-target-history"}, {"answer": 1, "with": "hist"},
+                            {"click": "SF-1000 · snappy"}, {"click": "다시 지정"}, {"answer": 2, "with": "1000"}],
+                           responses, prompts=["me@x"])
+        self.assertEqual(stale["posts"], [])
+
+    def test_target_link_is_passed_on_and_dropped_on_a_tab_change(self):
+        """A8: ?target= reaches the board API; another tab, or a malformed value, loads without it."""
+        first, _, responses = self.target_tabs()
+        out = self.drive([{"answer": 0, "with": "100"}, {"click": "SF-1000 · snappy"}],
+                         responses, search=f"?target={first}")
+        self.assertIn(f"target={first}", out["requests"][0])
+        self.assertNotIn("target=", out["requests"][1])
+        bad = self.drive([{"answer": 0, "with": "bad"}, {"answer": 1, "with": "100"}],
+                         {**responses, "bad": '{"errors": ["target: a run id or none"]}'},
+                         meta={"bad": {"status": 400}}, search="?sf=100&codec=snappy&target=nope")
+        self.assertIn("target=nope", bad["requests"][0])
+        self.assertNotIn("target=", bad["requests"][1])
+        self.assertTrue(bad["statusHidden"], bad)
+
     def test_answers_from_this_script_keep_their_own_paths(self):
         """The check stands only in front of answers for another script: a failed fetch keeps the board and says so,
         and an error that names this script, or a non-2xx without the header, clears the hero and board and shows its
@@ -1290,6 +1439,211 @@ class TestBoardScript(WebCase):
                 self.assertFalse(out["heroEmptyHidden"], out)
                 self.assertNotIn(f"{LB}/run/{hundred}", out["boardLinks"])
 
+
+class TestTarget(WebCase):
+    """A8: a tab's target run (its velox side, any configuration) and goal speedup: set through the API at the
+    revision the caller saw, every change kept, compared with on the board, overridable for one link."""
+
+    T = "/api/leaderboard/targets/100/snappy"
+
+    def set(self, run_id, revision=0, goal=None, status=200, **headers):
+        return self.pin_target(run_id, revision, goal, status, **headers)
+
+    def two_runs(self):
+        """A 8×6 run to compare with (off the default filter) and a 4×6 run that is the hero."""
+        return (self.submit(executors=8, elapsed=flat_elapsed(500, velox=2000)),
+                self.submit(elapsed=flat_elapsed(400, velox=3000)))
+
+    def test_set_change_clear_and_history(self):
+        a, b = self.two_runs()
+        pin = self.set(a, goal=2.5)
+        self.assertEqual((pin["run_id"], pin["goal"], pin["revision"], pin["updated_by"]), (a, 2.5, 1, "a@x"))
+        self.assertEqual(self.set(a, revision=1, goal=2.5)["revision"], 1)          # the same: no new revision
+        stale = self.set(b, revision=0, status=409)
+        self.assertEqual((stale["current"]["run_id"], stale["current"]["revision"]), (a, 1))
+        self.set(b, revision=1)
+        self.set(None, revision=2)
+        state = self.c.get(self.T).get_json()
+        self.assertEqual((state["run_id"], state["revision"]), (None, 3))
+        self.assertEqual([(e["before_run_id"], e["after_run_id"], e["after_goal"]) for e in state["history"]],
+                         [(b, None, None), (a, b, None), (None, a, 2.5)])
+
+    def test_refusals(self):
+        a = self.submit()
+        self.set(self.submit(engines=("xflare",)), status=400)                    # no velox total
+        self.set(self.submit(sf="1000"), status=400)                              # another tab
+        self.set(rid(), status=404)
+        for body, field in (({"actor": " ", "expected_revision": 0, "run_id": a}, "actor"),
+                            ({"actor": "x", "expected_revision": -1, "run_id": a}, "expected_revision"),
+                            ({"actor": "x", "expected_revision": True, "run_id": a}, "expected_revision"),
+                            ({"actor": "x", "expected_revision": 0}, "run_id"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": "nope"}, "run_id"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": a, "goal": 0}, "goal"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": a, "goal": "2"}, "goal"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": a, "goal": 1000.5}, "goal"),
+                            ({"actor": "x", "expected_revision": 0, "run_id": None, "goal": 2}, "goal")):
+            r = self.c.post(self.T, json=body)
+            self.assertEqual(r.status_code, 400, body)
+            self.assertTrue(r.get_json()["errors"][0].startswith(field + ":"), r.get_json())
+        plain = self.c.post(self.T, data='{"actor": "x", "expected_revision": 0, "run_id": null}',
+                            content_type="text/plain")
+        self.assertEqual(plain.status_code, 415)
+        self.set(a, status=403, Origin="http://evil.example")
+        self.set(a, Origin="http://localhost")                                    # this site (the test client's)
+        self.assertEqual(self.set(a, revision=1, goal=1000)["goal"], 1000)        # the bound itself is allowed
+        self.assertEqual(self.c.post("/api/leaderboard/targets/x1/snappy", json={}).status_code, 404)
+        self.assertEqual(self.c.get("/api/leaderboard/targets/100/lz4").status_code, 404)
+        self.c.post(f"/api/leaderboard/runs/{a}/withdraw", json={"actor": "x", "reason": "y"})
+        self.assertTrue(self.set(a, revision=2, goal=3, status=400)["errors"][0].endswith("withdrawn"))
+
+    def test_board_compares_with_the_target(self):
+        target, hero = self.two_runs()
+        board = self.board()
+        self.assertEqual((board["target"], board["hero"]["vs_target"], board["target_pin"]["revision"]),
+                         (None, None, 0))
+        self.set(target, goal=1.5)
+        board = self.board()
+        t = board["target"]
+        self.assertEqual((t["run_id"], t["source"], t["goal"], t["problem"]), (target, "pinned", 1.5, None))
+        velox, xflare = sum(2000 + q for q in range(1, 23)), sum(400 + q for q in range(1, 23))
+        self.assertEqual((t["velox_ms"], t["per_query"][0]), (velox, 2001))
+        self.assertEqual(board["hero"]["run_id"], hero)
+        self.assertAlmostEqual(board["hero"]["vs_target"], velox / xflare)
+        self.assertAlmostEqual(board["rows"][0]["value"]["vs_target"], velox / xflare)
+        q1 = self.board("?metric=q1")
+        self.assertAlmostEqual(q1["rows"][0]["value"]["vs_target"], 2001 / 401)
+        self.assertEqual(q1["hero"]["vs_target"], board["hero"]["vs_target"])        # the hero keeps the totals
+        # Pinning a ranked run (here the hero itself) changes no rank, count or hero, on any metric or view.
+        plain = {m: self.board(f"?metric={m}&target=none") for m in ("total", "q1")}
+        self.set(hero, revision=1)
+        for m, before in plain.items():
+            for query in (f"?metric={m}", f"?metric={m}&target={target}"):
+                after = self.board(query)
+                self.assertEqual([(r["rank"], r["run_id"], r["value"]["speedup"]) for r in after["rows"]],
+                                 [(r["rank"], r["run_id"], r["value"]["speedup"]) for r in before["rows"]], query)
+                self.assertEqual((after["eligible_count"], after["hero"]["run_id"], after["hero_fallback"]),
+                                 (before["eligible_count"], before["hero"]["run_id"], before["hero_fallback"]), query)
+        self.assertEqual(self.board()["target"]["run_id"], hero)
+        self.set(target, revision=2, goal=1.5)
+        link = self.board(f"?target={hero}")["target"]
+        self.assertEqual((link["run_id"], link["source"], link["goal"]), (hero, "link", None))
+        self.assertIsNone(self.board("?target=none")["target"])
+        unknown = self.board(f"?target={rid()}")
+        self.assertEqual((unknown["target"]["problem"], unknown["hero"]["vs_target"]), ("unknown run", None))
+        self.assertTrue(self.board("?target=nope", status=400)["errors"][0].startswith("target:"))
+        self.c.post(f"/api/leaderboard/runs/{target}/withdraw", json={"actor": "x", "reason": "gone"})
+        gone = self.board()
+        self.assertEqual((gone["target"]["problem"], gone["hero"]["vs_target"]), ("withdrawn", None))
+        self.assertIsNone(gone["rows"][0]["value"]["vs_target"])
+
+    def test_board_page_shows_the_target(self):
+        target, _ = self.two_runs()
+        before = run_page_js("board", data=self.page_data(),
+                             fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        self.assertEqual((before["text"]["hero-velox-label"], before["text"]["lb-col-speedup"]),
+                         ("Velox total (same run)", "Speedup"))
+        self.assertTrue(before["hidden"]["hero-goal"])
+        self.set(target, goal=1.5)
+        out = run_page_js("board", data=self.page_data(),
+                          fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        self.assertEqual((out["text"]["hero-velox-label"], out["text"]["hero-speedup-label"],
+                          out["text"]["lb-col-speedup"]), ("Target velox total", "Speedup vs target", "vs target"))
+        self.assertEqual((out["text"]["hero-goal"], out["hidden"]["hero-goal"]), ("목표 1.50× · 달성", False))
+        self.assertIn(f"{LB}/run/{target}", out["hrefs"])
+        self.assertIn("lb-goal-met", " ".join(out["classes"]))
+        board = self.board()
+        fmt_x = lambda v: f"{v:.2f}×"
+        self.assertEqual((out["text"]["hero-velox"], out["text"]["hero-speedup"]),
+                         (f"{board['target']['velox_ms'] / 1000:.2f} s", fmt_x(board["hero"]["vs_target"])))
+        # The speedup cells are the elements titled with the same-run speedup; their text is the vs-target one.
+        cells = [(t, x) for t, x in zip(out["titles"], out["texts"]) if t.startswith("같은 run 의 velox 기준 ")]
+        self.assertEqual(cells, [(f"같은 run 의 velox 기준 {fmt_x(r['value']['speedup'])}", fmt_x(r["value"]["vs_target"]))
+                                 for r in board["rows"]])
+        self.assertNotEqual(*{r["run_id"]: (r["value"]["speedup"], r["value"]["vs_target"])
+                              for r in board["rows"]}[board["hero"]["run_id"]])
+        self.set(target, revision=1, goal=10)
+        short = run_page_js("board", data=self.page_data(),
+                            fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        reached = round(100 * self.board()["hero"]["vs_target"] / 10)
+        self.assertEqual(short["text"]["hero-goal"], f"목표 10.00× · {reached}%")
+        self.c.post(f"/api/leaderboard/runs/{target}/withdraw", json={"actor": "x", "reason": "gone"})
+        gone = run_page_js("board", data=self.page_data(),
+                           fetch=self.c.get("/api/leaderboard/board").get_data(as_text=True))
+        board = self.board()
+        self.assertEqual((gone["text"]["hero-velox-label"], gone["text"]["lb-col-speedup"]),
+                         ("Velox total (same run)", "Speedup"))
+        self.assertEqual(gone["text"]["hero-velox"], f"{board['hero']['totals']['velox_ms'] / 1000:.2f} s")
+        self.assertIn(fmt_x(board["rows"][0]["value"]["speedup"]), gone["texts"])
+
+    def test_target_problem_shows_without_a_hero(self):
+        """A8: a pinned target that no longer qualifies says why, also on a tab whose only Total-eligible run it was."""
+        a = self.submit()
+        self.set(a)
+        self.c.post(f"/api/leaderboard/runs/{a}/withdraw", json={"actor": "x", "reason": "gone"})
+        board = self.c.get("/api/leaderboard/board").get_data(as_text=True)
+        self.assertIsNone(json.loads(board)["hero"])
+        out = run_page_js("board", data=self.page_data(), fetch=board)
+        self.assertFalse(out["hidden"]["hero-target"])
+        self.assertIn("(withdrawn)", out["text"]["hero-target"])
+        self.assertFalse(out["hidden"]["hero-target-history"])
+
+    @staticmethod
+    def run_page(page):
+        """run_page_js arguments for a run page: its ids, data block and the target buttons' data-* attributes."""
+        datasets = {}
+        for tag in re.findall(r"<button[^>]*>", page):
+            m = re.search(r'id="(lb-target-[a-z]+)"', tag)
+            if m:
+                datasets[m.group(1)] = {k: html.unescape(v) for k, v in re.findall(r'data-([a-z]+)="([^"]*)"', tag)}
+        return {"ids": re.findall(r'id="([^"]+)"', page), "datasets": datasets,
+                "data": {"lb-run-data": re.search(r'id="lb-run-data">(.*?)</script>', page, re.S).group(1)}}
+
+    def test_run_page_goal_prompt(self):
+        """A8: the goal must be a finite number above 0 and at most 1000 before anything is sent."""
+        a = self.submit()
+        page = self.run_page(self.c.get(f"{LB}/run/{a}").get_data(as_text=True))
+        for goal in ("Infinity", "1e309", "0", "-2", "1001", "two"):
+            out = run_page_js("run", click="lb-target-set", prompts=["me@x", goal], fetch="{}", **page)
+            self.assertEqual(out["fetches"], [], goal)
+            self.assertEqual(len(out["alerts"]), 1, goal)
+        out = run_page_js("run", click="lb-target-set", prompts=["me@x", "2.5"], fetch="{}", **page)
+        self.assertEqual(out["fetches"], [{"url": "/api/leaderboard/targets/100/snappy", "method": "POST",
+                                           "body": {"actor": "me@x", "expected_revision": 0, "run_id": a,
+                                                    "goal": 2.5}}])
+        self.assertEqual(out["reloads"], 1)
+        lost = run_page_js("run", click="lb-target-set", prompts=["me@x", ""], fetch="{}", reject_post=True, **page)
+        self.assertEqual((len(lost["fetches"]), lost["reloads"], lost["disabled"]["lb-target-set"]), (1, 0, False))
+        self.assertIn("저장됐는지 알 수 없으니", lost["alerts"][0])
+        self.set(a)
+        out = run_page_js("run", click="lb-target-clear", prompts=["me@x"], fetch="{}",
+                          **self.run_page(self.c.get(f"{LB}/run/{a}").get_data(as_text=True)))
+        self.assertEqual(out["fetches"][0]["body"], {"actor": "me@x", "expected_revision": 1, "run_id": None,
+                                                     "goal": None})
+
+    def test_withdrawn_meanwhile_is_refused(self):
+        """A8: a run withdrawn between the request's checks and the write is not pinned."""
+        a = self.submit()
+        real_get = lb_store.Store.get
+
+        done = []
+
+        def get_then_withdraw(store, run_id):
+            row = real_get(store, run_id)
+            if not done:                                         # withdraw() reads the row back through get()
+                done.append(1)
+                store.withdraw(run_id, "x", "meanwhile")
+            return row
+        with mock.patch.object(lb_store.Store, "get", get_then_withdraw):
+            self.assertEqual(self.set(a, status=400)["errors"], ["run_id: withdrawn"])
+        self.assertEqual(self.c.get(self.T).get_json()["revision"], 0)
+
+    def test_run_page_badge_and_who_can_be_a_target(self):
+        """A8: the target run's page names its tab and goal; a run without a velox total offers no "set" button."""
+        a = self.submit()
+        self.set(a, goal=2)
+        self.assertIn("target · SF-100 · snappy · 목표 2.00×", self.c.get(f"{LB}/run/{a}").get_data(as_text=True))
+        page = self.c.get(f"{LB}/run/{self.submit(engines=('xflare',))}").get_data(as_text=True)
+        self.assertNotIn('id="lb-target-set"', page)
 
 class TestOneDeploy(WebCase):
     """Static URLs carry the hash taken at start, and every board answer names the board script by it: a board page
@@ -1514,6 +1868,24 @@ class TestCompare(WebCase):
         self.assertEqual(self.c.get(out["location"]).status_code, 200)
         self.assertEqual(run_page_js("board", data=self.page_data(), fetch=fetch, check=5)["gate"],
                          [True, False, False, False, True])                 # five is one too many
+
+    def test_compare_script_wires_its_toggles(self):
+        """The compare page's script builds its chart series and attaches the log-scale and only-differences toggles."""
+        runs = [self.submit(elapsed=flat_elapsed(1000 + 10 * i)) for i in range(3)]
+        html = self.c.get(f"{LB}/compare?runs={','.join(runs)}").get_data(as_text=True)
+        data = re.search(r'id="lb-compare-data">(.*?)</script>', html, re.S).group(1)
+        out = run_page_js("compare", ids=re.findall(r'id="([^"]+)"', html), data={"lb-compare-data": data})
+        self.assertEqual(out["listeners"].get("compare-log"), ["change"])
+        self.assertEqual(out["listeners"].get("params-only-diff"), ["change"])
+
+    def test_run_and_compare_pages_link_back_to_the_board(self):
+        a, b = self.submit(), self.submit()
+        for url in (f"{LB}/run/{a}", f"{LB}/compare?runs={a},{b}"):
+            page = self.c.get(url).get_data(as_text=True)
+            self.assertIn(f'class="lb-brand" href="{LB}"', page, url)
+            self.assertIn(f'<nav class="lb-crumbs" aria-label="Breadcrumb">', page, url)
+            crumbs = page[page.index('<nav class="lb-crumbs"'):page.index("</nav>", page.index('<nav class="lb-crumbs"'))]
+            self.assertIn(f'href="{LB}"', crumbs, url)
 
     def compare_deltas(self, *runs):
         """The Δ% texts of the Xflare total row and the Q1 row, left to right."""

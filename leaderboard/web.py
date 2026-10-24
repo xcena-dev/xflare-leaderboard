@@ -25,8 +25,8 @@ from flask import Blueprint, Response, abort, current_app, jsonify, redirect, re
 from . import aggregate, repro
 from .display import (BADGE_CLASS, BENCH_ID, BUDGET, DEFAULT_CODEC, EFFECTIVE_ITEMS, FACET_VALUES, MATRIX_REPEATS,
                       PREVIEW_CHARS, PREVIEW_ITEMS, SCALAR_CHARS, as_float, badge_class, cut, default_filter,
-                      facet_option, facet_token, fallback_notice, norm_date, tab_note, tabs)
-from .schema import (APPLICATION_SETTINGS, MANIFEST_SCHEMA, MAX_BODY_BYTES, SCALE_FACTOR_RE, UUID4_RE, BadJSON,
+                      facet_option, facet_token, fallback_notice, norm_date, tab_label, tab_note, tabs)
+from .schema import (APPLICATION_SETTINGS, CODECS, MANIFEST_SCHEMA, MAX_BODY_BYTES, SCALE_FACTOR_RE, UUID4_RE, BadJSON,
                      parse_json_strict, validate_envelope, validate_manifest)
 from .store import StorageUnavailable, store_for
 
@@ -433,21 +433,153 @@ def _facets(values: dict[str, set]) -> tuple[dict, bool]:
             for k, v in values.items()}, truncated
 
 
-def _hero(row: dict | None) -> dict | None:
+def _hero(row: dict | None, target_velox) -> dict | None:
     if row is None:
         return None
     d = row["derived"]
     return {
         **_run_summary(row),
+        # Always the totals, whatever the board's metric: the hero is the Total board's.
+        "vs_target": _with_vs_target(aggregate.metric_values(d, "total"), target_velox)["vs_target"],
         "per_query": [{"q": q, **aggregate.metric_values(d, m)}
                       for q, m in zip(aggregate.QUERY_IDS, aggregate.METRICS[1:])],
     }
 
 
+# --- target (amendment A8) -------------------------------------------------------------------------------------
+# A tab's target is a stored run whose velox side the board compares the hero and every row with, whatever its
+# configuration, plus an optional goal speedup. Anyone may change it (no auth); every change is kept with its actor.
+
+GOAL_MAX = 1000.0
+
+
+def _target_problem(row: dict | None, sf: str, codec: str) -> str | None:
+    """Why a run cannot be the tab's target, or None."""
+    if row is None:
+        return "unknown run"
+    if row["withdrawn"]:
+        return "withdrawn"
+    d = row["derived"]
+    if aggregate.tab_of(d) != (sf, codec):
+        return f"on another tab ({tab_label(*aggregate.tab_of(d))})"
+    if d["totals"]["velox_ms"] is None:
+        return "no velox total"
+    return None
+
+
+def _pin(state: dict | None, sf: str, codec: str) -> dict:
+    """The stored target as the API shows it: revision 0 and no run for a tab never set."""
+    state = state or {"run_id": None, "goal": None, "revision": 0, "updated_by": None, "updated_at": None}
+    return {"sf": sf, "codec": codec, "run_id": state["run_id"], "goal": state["goal"],
+            "revision": state["revision"], "updated_by": state["updated_by"] and cut(state["updated_by"]),
+            "updated_at": state["updated_at"]}
+
+
+def _effective_target(store, sf: str, codec: str, pin: dict, rows: dict) -> tuple[dict | None, dict | None]:
+    """What the board compares with, and that run's derived data when it can serve: ``?target=<run id>`` for this
+    view only (no goal), ``?target=none`` for the same-run velox, else the pinned target. ``rows`` holds the runs the
+    board already read (every non-withdrawn one), so only a withdrawn or unknown target costs a lookup. A target that
+    cannot serve says why in ``problem``."""
+    asked = request.args.get("target")
+    if asked == "none":
+        return None, None
+    if asked:
+        if not UUID4_RE.fullmatch(asked):
+            raise _BadBody("target: a run id or none")
+        run_id, source = asked, "link"
+    elif pin["run_id"]:
+        run_id, source = pin["run_id"], "pinned"
+    else:
+        return None, None
+    row = rows.get(run_id) or store.get(run_id)
+    problem = _target_problem(row, sf, codec)
+    out = {"run_id": run_id, "url": _url(run_id), "source": source,
+           "goal": pin["goal"] if source == "pinned" else None, "problem": problem}
+    if problem is not None:
+        return out, None
+    d = row["derived"]
+    out.update(config_label=cut(d["config_label"]), finished_at=d["finished_at"], velox_ms=d["totals"]["velox_ms"],
+               per_query=[d["per_query"][str(q)]["velox_ms"] for q in aggregate.QUERY_IDS])
+    return out, d
+
+
+def _with_vs_target(values: dict, target_velox) -> dict:
+    """A run's metric values plus ``vs_target``: the target's velox over the run's xflare, None without a target."""
+    return {**values, "vs_target": None if target_velox is None
+            else aggregate.speedup(target_velox, values["xflare_ms"])}
+
+
+def _known_tab(sf: str, codec: str) -> bool:
+    return bool(SCALE_FACTOR_RE.fullmatch(sf)) and codec in CODECS
+
+
+def _same_site_json():
+    """Edits come from this site's pages or a script: a JSON body (a cross-site form cannot send one without a CORS
+    preflight this service never answers) and, when a browser names its Origin, this one. None when acceptable."""
+    if request.mimetype != "application/json":
+        return _errors(415, "Content-Type: application/json")
+    origin = request.headers.get("Origin")
+    if origin and origin.rstrip("/") != request.host_url.rstrip("/"):
+        return _errors(403, "cross-site edit refused")
+    return None
+
+
+@bp.get("/api/leaderboard/targets/<sf>/<codec>")
+def api_target(sf, codec):
+    if not _known_tab(sf, codec):
+        return _errors(404, "unknown tab")
+    pin, events = store_for(_cfg()).target_history(sf, codec)
+    history = [{"event_id": e["event_id"], "revision": e["revision"], "before_run_id": e["before_run_id"],
+                "after_run_id": e["after_run_id"], "before_goal": e["before_goal"], "after_goal": e["after_goal"],
+                "actor": cut(e["actor"]), "at": e["at"]} for e in events]
+    return jsonify({**_pin(pin, sf, codec), "history": history})
+
+
+@bp.post("/api/leaderboard/targets/<sf>/<codec>")
+def api_set_target(sf, codec):
+    refused = _same_site_json()
+    if refused:
+        return refused
+    if not _known_tab(sf, codec):
+        return _errors(404, "unknown tab")
+    doc = _json_object()
+    actor, revision, run_id, goal = (doc.get(k) for k in ("actor", "expected_revision", "run_id", "goal"))
+    errors = []
+    if not isinstance(actor, str) or not actor.strip():
+        errors.append("actor: non-empty string")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        errors.append("expected_revision: integer >= 0")
+    if "run_id" not in doc or run_id is not None and not (isinstance(run_id, str) and UUID4_RE.fullmatch(run_id)):
+        errors.append("run_id: a run id or null")
+    if goal is not None and (isinstance(goal, bool) or not isinstance(goal, (int, float))
+                             or not (0 < goal <= GOAL_MAX)):
+        errors.append(f"goal: a number above 0 and at most {GOAL_MAX:g}, or null")
+    elif goal is not None and run_id is None:
+        errors.append("goal: needs a run_id")
+    if errors:
+        return _errors(400, *errors)
+    store = store_for(_cfg())
+    if run_id is not None:
+        row = store.get(run_id)
+        if row is None:
+            raise _UnknownRun
+        problem = _target_problem(row, sf, codec)
+        if problem:
+            return _errors(400, f"run_id: {problem}")
+    status, state = store.set_target(sf, codec, run_id, None if goal is None else float(goal), actor.strip(),
+                                     revision)
+    if status == "conflict":
+        return _errors(409, "the target changed meanwhile: reload and try again", current=_pin(state, sf, codec))
+    if status == "withdrawn":
+        return _errors(400, "run_id: withdrawn")
+    return jsonify(_pin(state, sf, codec))
+
+
 @bp.get("/api/leaderboard/board")
 def api_board():
     cfg = _cfg()
-    all_rows = store_for(cfg).list_runs()
+    store = store_for(cfg)
+    all_rows = store.list_runs()
     tab_list = tabs(cfg, [r["derived"] for r in all_rows])
     tab = _select_tab(tab_list)
     metric = request.args.get("metric") or "total"
@@ -463,6 +595,10 @@ def api_board():
     # The tab consumes the codec: it is not a filter of the board.
     for params in (flt, tokens):
         params.pop("codec", None)
+    pin = _pin(store.get_target(tab["sf"], tab["codec"]), tab["sf"], tab["codec"])
+    target, target_derived = _effective_target(store, tab["sf"], tab["codec"], pin,
+                                               {r["run_id"]: r for r in all_rows})
+    target_velox = None if target_derived is None else aggregate.metric_values(target_derived, metric)["velox_ms"]
     rows = [r for r in all_rows if aggregate.tab_of(r["derived"]) == (tab["sf"], tab["codec"])]
     chosen = _filtered(rows, flt, tokens)
     ranked = aggregate.rank(chosen, metric)
@@ -490,7 +626,9 @@ def api_board():
         "default_filter": default_filter(cfg),
         "facets": facets,
         "facets_truncated": facets_truncated,
-        "hero": _hero(hero),
+        "hero": _hero(hero, None if target_derived is None else target_derived["totals"]["velox_ms"]),
+        "target": target,
+        "target_pin": pin,
         "hero_fallback": hero_fallback,
         "hero_notice": (fallback_notice({**flt, **{k + "_t": t for k, t in tokens.items()}}, default_filter(cfg))
                         if hero_fallback else None),
@@ -499,7 +637,8 @@ def api_board():
         "shared_runs": [{"run_id": r["run_id"], "url": _url(r["run_id"]), "finished_at": r["derived"]["finished_at"],
                          "config_label": cut(r["derived"]["config_label"])} for r in shared[:top]],
         # A row carries its reproduce script so the board can copy it within the click.
-        "rows": [{"rank": i + 1, **_run_summary(r), "value": aggregate.metric_values(r["derived"], metric),
+        "rows": [{"rank": i + 1, **_run_summary(r),
+                  "value": _with_vs_target(aggregate.metric_values(r["derived"], metric), target_velox),
                   "repro": r["derived"]["repro"]["command"]}
                  for i, r in enumerate(ranked[:top])],
     })
@@ -655,6 +794,8 @@ def run_page(run_id):
     d = row["derived"]
     per_query = [{"q": q, **d["per_query"][str(q)]} for q in aggregate.QUERY_IDS]
     repeats = sorted(manifest["repeats"], key=lambda r: r["index"])
+    sf, codec = aggregate.tab_of(d)
+    pin = _pin(store.get_target(sf, codec), sf, codec)
     return render_template(
         "leaderboard_run.html",
         benchmark=cfg, row=row, d=d, meta=row["meta"] or {},
@@ -662,6 +803,10 @@ def run_page(run_id):
         # A6: the run page's notice for a shared-application run (stored and listed, never ranked).
         shared_reason=aggregate.SHARED_REASON if d["config"]["application_mode"] == "shared" else None,
         per_query=per_query,
+        # A8: whether this run is, or can be, its tab's target.
+        target={"sf": sf, "codec": codec, "label": tab_label(sf, codec), "revision": pin["revision"],
+                "goal": pin["goal"], "is_target": pin["run_id"] == run_id,
+                "problem": _target_problem(row, sf, codec)},
         # as_float: a median past float range is a JSON integer the chart would read as Infinity.
         chart={"run_id": run_id, "xflare": [as_float(p["xflare_ms"]) for p in per_query],
                "velox": [as_float(p["velox_ms"]) for p in per_query]},

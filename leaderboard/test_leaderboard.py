@@ -1990,8 +1990,58 @@ class StoreTests(unittest.TestCase):
         import sqlite3
         c = sqlite3.connect(os.path.join(self.tmp, "leaderboard.sqlite3"))
         self.assertEqual(c.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 2)
         c.close()
+
+    def test_v1_database_gains_the_target_tables(self):
+        """A database written before A8 (user_version 1, runs only) opens with the target tables added and its runs
+        intact: the live service's upgrade path."""
+        run_id = self.store.put(self.env())[1]["run_id"]
+        import sqlite3
+        c = sqlite3.connect(os.path.join(self.tmp, "leaderboard.sqlite3"))
+        c.executescript("DROP TABLE target_events; DROP TABLE targets; PRAGMA user_version = 1;")
+        c.close()
+        s = Store(self.tmp)
+        self.assertEqual(s.get(run_id)["run_id"], run_id)
+        self.assertIsNone(s.get_target("100", "snappy"))
+        self.assertEqual(s.set_target("100", "snappy", run_id, None, "a", 0)[0], "set")
+        c = sqlite3.connect(os.path.join(self.tmp, "leaderboard.sqlite3"))
+        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 2)
+        c.close()
+
+    def test_target_history_keeps_the_latest_50(self):
+        """The history read lists at most 50 changes, newest first; every change stays stored."""
+        s = self.store
+        ids = [s.put(self.env(n))[1]["run_id"] for n in (1, 2)]
+        for revision in range(55):
+            self.assertEqual(s.set_target("100", "snappy", ids[revision % 2], None, "a", revision)[0], "set")
+        pin, events = s.target_history("100", "snappy")
+        self.assertEqual((len(events), events[0]["revision"], events[-1]["revision"], pin["revision"]), (50, 55, 6, 55))
+
+    def test_target_revisions_and_history(self):
+        """A8: a target change applies only at the revision the caller saw and only to a stored, non-withdrawn run;
+        a repeat of the stored state writes nothing; every change is one event, newest first."""
+        s = self.store
+        r1, r2 = (s.put(self.env(n))[1]["run_id"] for n in (1, 2))
+        self.assertIsNone(s.get_target("100", "snappy"))
+        self.assertEqual(s.set_target("100", "snappy", r1, 2.0, "a", 1), ("conflict", None))
+        self.assertEqual(s.set_target("100", "snappy", mf.fixture_uuid(9), 2.0, "a", 0), ("withdrawn", None))
+        status, state = s.set_target("100", "snappy", r1, 2.0, "a", 0)
+        self.assertEqual((status, state["run_id"], state["goal"], state["revision"], state["updated_by"]),
+                         ("set", r1, 2.0, 1, "a"))
+        self.assertEqual(s.set_target("100", "snappy", r1, 2.0, "b", 1)[0], "unchanged")
+        self.assertEqual(s.set_target("100", "snappy", r1, 3.0, "b", 1)[1]["revision"], 2)      # the goal alone
+        s.withdraw(r2, "x", "y")
+        self.assertEqual(s.set_target("100", "snappy", r2, None, "b", 2)[0], "withdrawn")
+        self.assertEqual(s.set_target("100", "snappy", None, None, "c", 1)[0], "conflict")
+        self.assertEqual(s.set_target("100", "snappy", None, None, "c", 2)[1]["run_id"], None)
+        pin, events = s.target_history("100", "snappy")
+        self.assertEqual([(e["revision"], e["before_run_id"], e["after_run_id"], e["before_goal"], e["after_goal"],
+                           e["actor"]) for e in events],
+                         [(3, r1, None, 3.0, None, "c"), (2, r1, r1, 2.0, 3.0, "b"), (1, None, r1, None, 2.0, "a")])
+        self.assertEqual(pin["revision"], events[0]["revision"])        # read together: the newest change listed
+        self.assertIsNone(s.get_target("1000", "snappy"))
+        self.assertEqual(s.target_history("1000", "snappy"), (None, []))
 
     def test_reuse_finishes_durability_barriers(self):
         """Crash after os.replace but before the raw-dir fsync; the retry fsyncs file and dir before the row."""

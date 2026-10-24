@@ -1,6 +1,6 @@
 {#- Submitted values are printed through Jinja autoescape only, every uploaded
     scalar through v (cut); _params (web.py) caps the uploaded lists. -#}
-{%- from "leaderboard_macros.html" import v, pct, badge -%}
+{%- from "leaderboard_macros.html" import v, pct, badge, topbar -%}
 <!doctype html>
 <html lang="ko">
 <head>
@@ -11,11 +11,12 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body data-page="compare">
-<header class="lb-header">
-  <h1><a href="{{ url_for('leaderboard.board_page') }}">{{ benchmark.title }}</a> / compare</h1>
-</header>
+{{ topbar([(benchmark.title, url_for('leaderboard.board_page')), ('compare', none)]) }}
 
 <main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
+  <div class="lb-page-head">
+    <h1>Compare {{ runs | length }} runs</h1>
+  </div>
   <section class="lb-panel">
     <h3>Runs</h3>
     <p class="lb-note">Δ 는 첫 번째 run 대비 xflare median 변화 (음수 = 빨라짐).</p>
@@ -23,7 +24,7 @@
       <table class="cmp-table lb-table">
         <thead><tr>
           <th></th>
-          {% for r in runs %}<th><a href="{{ r.summary.url }}">{{ r.row.run_id[:8] }}</a>{% if loop.first %} (base){% endif %}</th>{% endfor %}
+          {% for r in runs %}<th><a class="lb-id" href="{{ r.summary.url }}">{{ r.row.run_id[:8] }}</a>{% if loop.first %} (base){% endif %}</th>{% endfor %}
         </tr></thead>
         <tbody>
           <tr><td>SF</td>{% for r in runs %}<td>SF-{{ v(r.d.sf) }}</td>{% endfor %}</tr>
@@ -50,7 +51,7 @@
       <table class="cmp-table lb-table">
         <thead><tr>
           <th>Query</th>
-          {% for r in runs %}<th class="num">{{ r.row.run_id[:8] }} xflare</th><th class="num">velox</th>{% endfor %}
+          {% for r in runs %}<th class="num"><span class="lb-id">{{ r.row.run_id[:8] }}</span> xflare</th><th class="num">velox</th>{% endfor %}
         </tr></thead>
         <tbody>
         {% for q in queries %}
@@ -72,7 +73,7 @@
     <label class="lb-toggle"><input type="checkbox" id="params-only-diff" checked> 다른 것만 보기</label>
     <div class="cmp-scroll">
       <table class="cmp-table lb-table only-diff" id="params-table">
-        <thead><tr><th>Key</th>{% for r in runs %}<th>{{ r.row.run_id[:8] }}</th>{% endfor %}</tr></thead>
+        <thead><tr><th>Key</th>{% for r in runs %}<th><span class="lb-id">{{ r.row.run_id[:8] }}</span></th>{% endfor %}</tr></thead>
         <tbody>
         {% for p in params %}
           <tr class="{{ 'lb-differs' if p.differs else 'lb-same' }}">

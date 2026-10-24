@@ -6,7 +6,7 @@ server:
 
 leaderboard:
   title: XFLARE TPC-H Leaderboard
-  description: Submitted spark-tpch.sh runs ranked by xflare total (sum of per-query medians) with the same-run Velox speedup
+  description: Submitted spark-tpch.sh runs ranked by xflare total (sum of per-query medians) with the Velox speedup (same run, or the tab's target)
   color: "#14B8A6"
   storage:
     # Local disk, created once by the operator (see README); never inside this checkout.
