@@ -3072,7 +3072,7 @@ class TestBasisContract(A9Case):
                 self.assertTrue(any(error in e for e in out["errors"]), out["errors"])
 
     def test_an_identical_retry_never_changes_the_stored_basis(self):
-        """pr2-01: submit {P,Q}, add R through the edit, replay the original envelope: still {P,Q,R}, same receipt."""
+        """Submit {P,Q}, add R through the edit, replay the original envelope: still {P,Q,R}, same receipt."""
         m = build_manifest(run_id=rid())
         env = build_envelope(m, basis=prs(P, Q))
         first = self.post(env)
@@ -3101,7 +3101,7 @@ class TestBasisContract(A9Case):
         self.assertEqual(same["revision"], 2)                                       # an exact no-op adds no event
         gone = self.edit(run, "basis", {"actor": "d@x", "expected_revision": 2, "basis": None})
         self.assertIsNone(gone["basis"])
-        page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)               # pr2-02: restorable from the run
+        page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)               # restorable from the run
         events = self.history(run)["history"]
         self.assertEqual([e["revision"] for e in events], [3, 2, 1])
         self.assertEqual(page.count('class="lb-btn lb-restore"'), 2)                # every value but the current one
@@ -3219,7 +3219,8 @@ class TestPrUrls(A9Case):
 
 
 class TestBasisFilters(A9Case):
-    """A9: `pr` (membership), `prset` (exact set) and `basis` filters, literal and token, on /board and /runs."""
+    """A9: `pr` (membership) literals and `basis` literals and tokens (a PR set as `basis=prset:<key>`), on /board and
+    /runs."""
 
     def setUp(self):
         super().setUp()
@@ -3430,7 +3431,7 @@ class TestHeroHistory(A9Case):
         return self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()["finished_at"][:10]
 
     def test_per_query_series(self):
-        """q3's history: a run with q3 ineligible is no point there (but is on the Total of q5); ties as the board."""
+        """q3's history: a run with q3 ineligible is no point there (but is on q5); ties as the board."""
         def elapsed(base, q3=None):
             return lambda q, r, e: (q3 if q == 3 and q3 is not None and e == "xflare" else base + q)
         a = self.submit(elapsed=elapsed(500), started_at=at(0))
@@ -3581,7 +3582,7 @@ class TestA9BoardScript(WebCase):
         self.assertLessEqual(len(chip[0]["title"]), 512 + 10)
 
     def test_a_panel_answer_for_another_script_after_a_new_board_empties_the_panel(self):
-        """Round 2: the board moved on (a PR chip), the history's answer comes from another script: nothing of the
+        """The board moved on (a PR chip), the history's answer comes from another script: nothing of the
         old context stays in the panel."""
         picked = self.c.get(f"/api/leaderboard/board?pr={quote('apache/gluten#88')}").get_data(as_text=True)
         out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"},
@@ -3719,7 +3720,7 @@ class TestA9BoardScript(WebCase):
         self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
 
     def test_an_entering_hero_is_drawn_where_the_window_starts(self):
-        """Round 6: with `from`, the x axis starts at the window, not at the entering hero's old finish; without a
+        """With `from`, the x axis starts at the window, not at the entering hero's old finish; without a
         window it starts at the first point as before."""
         old = self.submit(basis=prs(P), elapsed=flat_elapsed(100), started_at=at(-1440 * 300))
         newer = self.submit(elapsed=flat_elapsed(900), started_at=at(1440 * 30))
@@ -3739,7 +3740,7 @@ class TestA9BoardScript(WebCase):
         self.assertEqual(chart["xMin"], min(p["t"] for p in json.loads(self.responses["hist"])["points"]))
 
     def test_a_failed_history_draw_never_blocks_the_next(self):
-        """Round 8: a draw that throws inside Chart.js leaves its chart on the canvas; the next draw destroys it first
+        """A draw that throws inside Chart.js leaves its chart on the canvas; the next draw destroys it first
         (Chart.getChart) instead of failing with "Canvas is already in use"."""
         out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"},
                           {"click": "Q3"}, {"answer": 2, "with": "hist3"}], self.responses, chart_throws=1)
@@ -3748,7 +3749,7 @@ class TestA9BoardScript(WebCase):
         self.assertEqual(out["rejections"], ["draw failed"])                         # the first draw only
 
     def test_the_chart_start_survives_a_bad_from_and_a_cut(self):
-        """Round 7: an impossible `from` (2026-10-00) never reaches the chart as NaN, and after a budget cut the chart
+        """An impossible `from` (2026-10-00) never reaches the chart as NaN, and after a budget cut the chart
         starts at the first shown point even with `from` set."""
         hist = json.loads(self.responses["hist"])
         first = min(p["t"] for p in hist["points"])
@@ -3762,11 +3763,14 @@ class TestA9BoardScript(WebCase):
                                  {**self.responses, "x": json.dumps(answer)})
                 [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
                 self.assertEqual(chart["xMin"], first)
+                # The note counts the shown runs that were best, not the entering hero from before them.
+                self.assertIn(f"best 였던 run {len(answer['heroes']) - 1}개", out["historyNote"])
+                self.assertIn("(표시 구간 이전부터)", out["historyRows"][-1]["text"][0])   # newest first
 
     def test_a_board_reload_drops_a_set_selection_at_once(self):
         out = self.drive(self.SETS_PICKED + [{"tab": ["lb-metric-tabs", "Q3"]}], self.responses)
         self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
-        # Round 3: nothing of the old list can be ticked while the new board is pending, selected or not.
+        # nothing of the old list can be ticked while the new board is pending, selected or not.
         out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-prsets"}, {"answer": 1, "with": "sets"},
                           {"tab": ["lb-metric-tabs", "Q3"]}], self.responses)
         self.assertEqual(out["prsetRows"], [])
@@ -3902,10 +3906,10 @@ class TestA9Styles(unittest.TestCase):
         # ...to two lines at most: a chip past 170 px is cut there, never "+N".
         cap = self.rules[".lb-board td.lb-basis-cell .lb-chip:not(.lb-chip-more)"]
         self.assertEqual((cap["max-width"], cap["white-space"], cap["text-overflow"]), ("170px", "nowrap", "ellipsis"))
-        # Round 4: in an inline-flex chip the label is a flex item that break-word never breaks (a 100-character name
+        # in an inline-flex chip the label is a flex item that break-word never breaks (a 100-character name
         # ran past a 390 px page); the chip must be a block box for break-word to apply.
         self.assertEqual(chip["display"], "inline-block")
-        # Round 5: an edit history line (a grid item) may hold one long actor or chip: it may shrink and break.
+        # an edit history line (a grid item) may hold one long actor or chip: it may shrink and break.
         events = self.rules[".lb-target-events > li"]
         self.assertEqual((events["min-width"], events["overflow-wrap"]), ("0", "anywhere"))
         self.assertEqual(self.rules[".lb-chips"]["max-width"], "100%")
@@ -3998,10 +4002,9 @@ class TestA9EditScript(A9Case):
 
 
 class TestA9ReviewFixes(A9Case):
-    """Round-1 review findings on the server side, each pinned."""
 
     def test_only_ascii_digits_name_an_event_or_a_pr(self):
-        """F1: '²' passes str.isdigit() but not int(); '٣' passes both as 3. Neither is an event id or a PR number."""
+        """'²' passes str.isdigit() but not int(); '٣' passes both as 3. Neither is an event id or a PR number."""
         run = self.submit(basis=prs(P))
         for value in ("%C2%B2", "%D9%A3", "1%C2%B2"):
             with self.subTest(before=value):
@@ -4013,7 +4016,7 @@ class TestA9ReviewFixes(A9Case):
                 self.assertEqual(r.status_code, 404)
 
     def test_run_page_shows_and_edits_one_snapshot(self):
-        """F2: an edit that lands while the page is built never pairs the new revision with the old value."""
+        """An edit that lands while the page is built never pairs the new revision with the old value."""
         run = self.submit(basis=prs(P))
         real_get = lb_store.Store.get
 
@@ -4032,7 +4035,7 @@ class TestA9ReviewFixes(A9Case):
         self.assertIn("velox#12", basis_section)
 
     def test_meta_never_holds_a_basis(self):
-        """F5: the run's basis is kept apart; a retry carrying another basis shows it nowhere."""
+        """The run's basis is kept apart; a retry carrying another basis shows it nowhere."""
         m = build_manifest(run_id=rid())
         self.post(build_envelope(m, basis=prs(P)))
         self.post(build_envelope(m, basis=prs(R)), status=200)
@@ -4044,7 +4047,7 @@ class TestA9ReviewFixes(A9Case):
         self.assertIn("$.basis.'x': unknown property (ignored, not stored)", warned)
 
     def test_basis_option_labels_are_bounded(self):
-        """F6: a PR set option names at most BASIS_CHIPS PRs plus +N and is cut like any label."""
+        """A PR set option names at most BASIS_CHIPS PRs plus +N and is cut like any label."""
         long = [{"repo": f"o{n}/" + "r" * 98, "number": n} for n in range(1, 17)]
         self.submit(basis=prs(*long))
         label = next(o["label"] for o in self.board()["facets"]["basis"] if o["label"].startswith("PR set"))
@@ -4052,7 +4055,7 @@ class TestA9ReviewFixes(A9Case):
         self.assertLessEqual(len(label), 512)
 
     def test_filter_literals_echo_the_canonical_key(self):
-        """F7: the board echoes a pr / basis=prset: literal as its canonical key, so its option and chip select."""
+        """The board echoes a pr / basis=prset: literal as its canonical key, so its option and chip select."""
         self.submit(basis=prs(P, Q))
         board = self.board(f"?pr={quote('XCENA-dev/xflare-analytics#1561')}&basis={quote('prset:XCENA-dev/xflare-analytics#1561+apache/gluten#88')}")
         self.assertEqual(board["filter"], {**board["filter"], "pr": "xcena-dev/xflare-analytics#1561", "basis": "prset:" + PQ})
@@ -4060,7 +4063,7 @@ class TestA9ReviewFixes(A9Case):
         self.assertEqual(len(board["rows"]), 1)
 
     def test_a_check_counts_each_run_once_and_replaces_the_last(self):
-        """F12 (and F8 over HTTP): duplicates count once; a later check of the PR replaces the earlier one."""
+        """Also over HTTP: duplicates count once; a later check of the PR replaces the earlier one."""
         run = self.submit(basis=prs(P))
         post = lambda ids: self.c.post("/api/leaderboard/prs/xcena-dev/xflare-analytics/1561/check",
                                        json={"actor": "s", "run_ids": ids}).get_json()
@@ -4072,7 +4075,7 @@ class TestA9ReviewFixes(A9Case):
                                      json={"actor": "s", "run_ids": [], "source": ""}).status_code, 400)
 
     def test_a_sets_report_reaches_its_runs(self):
-        """F14: a run without a Report of its own shows its PR set's on the board, the hero, the history and its page."""
+        """A run without a Report of its own shows its PR set's on the board, the hero, the history and its page."""
         run = self.submit(basis=prs(P, Q), elapsed=flat_elapsed(100), started_at=at(0))
         other = self.submit(basis=prs(R), elapsed=flat_elapsed(900), started_at=at(1440))
         r = self.c.post(f"/api/leaderboard/prset?prset={quote(PQ)}",
@@ -4099,7 +4102,7 @@ class TestA9ReviewFixes(A9Case):
         self.assertIn('href="https://x.example/set"', runs_table)                # the runs table falls back too
 
     def test_run_page_shows_the_report_of_the_set_it_shows(self):
-        """Round 2: a basis change while the page is built shows the new set's Report, never the old set's."""
+        """A basis change while the page is built shows the new set's Report, never the old set's."""
         run = self.submit(basis=prs(P))
         for key, url in (("xcena-dev/xflare-analytics#1561", "https://x.example/OLD"),
                          ("facebookincubator/velox#12", "https://x.example/NEW")):
@@ -4119,7 +4122,7 @@ class TestA9ReviewFixes(A9Case):
         self.assertNotIn("https://x.example/OLD", page)
 
     def test_the_prset_list_stops_at_its_budget(self):
-        """Round 2: the PR-set list keeps its first FACET_VALUES sets in its order and says it was cut."""
+        """The PR-set list keeps its first FACET_VALUES sets in its order and says it was cut."""
         from leaderboard import web as lb_web
         for n in (1, 2, 3):
             self.submit(basis=prs({"repo": "a/b", "number": n}), elapsed=flat_elapsed(100 * n))
@@ -4129,7 +4132,7 @@ class TestA9ReviewFixes(A9Case):
         self.assertFalse(self.c.get("/api/leaderboard/prsets").get_json()["truncated"])
 
     def test_a_cut_history_starts_once_with_its_entering_hero(self):
-        """F15: past the hero budget the series starts at the oldest kept hero, which enters it; no point is older."""
+        """Past the hero budget the series starts at the oldest kept hero, which enters it; no point is older."""
         from leaderboard import web as lb_web
         ids = [self.submit(elapsed=flat_elapsed(900 - 100 * n), started_at=at(1440 * n)) for n in range(5)]
         with mock.patch.object(lb_web, "HISTORY_HEROES", 3):
@@ -4145,7 +4148,7 @@ class TestA9ReviewFixes(A9Case):
         self.assertEqual(out["heroes"][0]["entering"], True)
 
     def test_report_url_ports_are_real_ports(self):
-        """F16: a port outside 1..65535 is no URL."""
+        """A port outside 1..65535 is no URL."""
         run = self.submit()
         for revision, (url, status) in enumerate((("https://x.example:65535/r", 200), ("https://x.example:65536/r", 400),
                                                   ("https://x.example:0/r", 400), ("https://x.example:99999/r", 400))):
@@ -4155,12 +4158,11 @@ class TestA9ReviewFixes(A9Case):
 
 
 class TestA9Round2(A9Case):
-    """Round-2 review findings, each pinned."""
 
     drive = TestBoardScript.drive
 
     def test_panels_and_compare_follow_the_board_filter_tokens(self):
-        """doc2-2: the history, the PR-set list and compare by set take the board's <key>_t tokens as /board does."""
+        """The history, the PR-set list and compare by set take the board's <key>_t tokens as /board does."""
         four = self.submit(basis=prs(P), elapsed=flat_elapsed(500), started_at=at(0))
         eight = self.submit(basis=prs(Q), elapsed=flat_elapsed(400), executors=8, started_at=at(1440))
         token = f"executors=&executor_cores=&executors_t={quote(facet_token('8'))}"
@@ -4176,7 +4178,7 @@ class TestA9Round2(A9Case):
         self.assertEqual(page.status_code, 404)                                     # #1561 has no 8×6 run
 
     def test_a_withdrawn_eligible_run_has_no_place(self):
-        """doc2-9: places count the ranked runs only (total-eligible, not withdrawn)."""
+        """Places count the ranked runs only (total-eligible, not withdrawn)."""
         fast = self.submit(basis=prs(P), elapsed=flat_elapsed(100))
         slow = self.submit(basis=prs(P), elapsed=flat_elapsed(200))
         self.c.post(f"/api/leaderboard/runs/{fast}/withdraw", json={"actor": "a", "reason": "b"})
@@ -4184,7 +4186,7 @@ class TestA9Round2(A9Case):
         self.assertEqual([(r["run_id"], r["place"]) for r in runs], [(slow, 1), (fast, None)])
 
     def test_check_and_key_limits(self):
-        """doc2-10: the PR check's actor, number and hash limits, and the 16-member key limit."""
+        """The PR check's actor, number and hash limits, and the 16-member key limit."""
         ok = {"actor": "s", "run_ids": []}
         post = lambda path, body: self.c.post(f"/api/leaderboard/prs/{path}/check", json=body).status_code
         self.assertEqual(post("a/b/2147483647", ok), 200)
@@ -4199,7 +4201,7 @@ class TestA9Round2(A9Case):
         self.assertEqual(self.c.get(f"{LB}/prset?prset={quote(sixteen + '+a/b#17')}").status_code, 404)
 
     def test_restore_takes_only_this_runs_events(self):
-        """doc2-10: an event of another run's same field is not a change of this run's."""
+        """An event of another run's same field is not a change of this run's."""
         a, b = self.submit(), self.submit()
         self.edit(b, "report_url", {"actor": "x", "expected_revision": 0, "report_url": "https://x.example/b"})
         event = self.history(b)["history"][0]["event_id"]
@@ -4207,7 +4209,7 @@ class TestA9Round2(A9Case):
         self.assertEqual(out["errors"], ["restore: not a change of this report_url"])
 
     def test_a_hero_on_the_from_day_is_shown_not_entering(self):
-        """doc2-10: the window starts at `from` inclusive; the entering hero finished before it."""
+        """The window starts at `from` inclusive; the entering hero finished before it."""
         before = self.submit(elapsed=flat_elapsed(500), started_at=at(0))
         on = self.submit(elapsed=flat_elapsed(400), started_at=at(1440))
         day = self.c.get(f"/api/leaderboard/runs/{on}").get_json()["finished_at"][:10]
@@ -4215,7 +4217,7 @@ class TestA9Round2(A9Case):
         self.assertEqual([(h["run_id"], h["entering"]) for h in heroes], [(before, True), (on, False)])
 
     def test_run_page_workflow_follows_the_shown_basis(self):
-        """doc2-10: the PR workflow line uses the same snapshot as the shown basis."""
+        """The PR workflow line uses the same snapshot as the shown basis."""
         run = self.submit(basis=prs(P))
         self.c.post("/api/leaderboard/prs/facebookincubator/velox/12/check", json={"actor": "s", "run_ids": [run]})
         real_get = lb_store.Store.get
@@ -4231,7 +4233,7 @@ class TestA9Round2(A9Case):
         self.assertIn(">complete<", page)                                           # R's body lists it; P's never did
 
     def test_submission_actor_is_trimmed(self):
-        """doc2-6: a blank submitter email names the claim "submission"."""
+        """A blank submitter email names the claim "submission"."""
         m = build_manifest(run_id=rid())
         env = build_envelope(m, basis=prs(P))
         env["submitter"]["email"] = "   "
@@ -4239,7 +4241,7 @@ class TestA9Round2(A9Case):
         self.assertEqual(self.history(m["run_id"])["history"][0]["actor"], "submission")
 
     def test_meta_from_an_older_binary_shows_no_basis(self):
-        """doc2-7: a basis an older binary kept in the stored metadata is not shown as metadata."""
+        """A basis an older binary kept in the stored metadata is not shown as metadata."""
         import sqlite3
         run = self.submit()
         with sqlite3.connect(os.path.join(self.data, "leaderboard.sqlite3")) as c:
@@ -4250,7 +4252,7 @@ class TestA9Round2(A9Case):
         self.assertIsNone(detail["basis"])
 
     def test_a_bad_before_on_a_page_is_an_html_400(self):
-        """doc2-8: pages answer HTML."""
+        """Pages answer HTML."""
         run = self.submit(basis=prs(P))
         for url in (f"{LB}/run/{run}?before=x", f"{LB}/prset?prset={quote('xcena-dev/xflare-analytics#1561')}&before=x"):
             with self.subTest(url):
@@ -4259,7 +4261,6 @@ class TestA9Round2(A9Case):
 
 
 class TestA9Round3(A9Case):
-    """Round-3 review: checks the suite did not pin yet."""
 
     def test_history_of_an_unknown_run_is_404(self):
         self.assertEqual(self.c.get(f"/api/leaderboard/runs/{rid()}/history").status_code, 404)
@@ -4301,27 +4302,27 @@ class TestA9Round3(A9Case):
         self.assertEqual(self.c.get(f"/api/leaderboard/prset?prset={quote('a/b#1+A/B#1')}").status_code, 400)
 
     def test_the_prset_pages_board_link_lifts_the_default_filter(self):
-        """doc3-2: "only this set" shows the set's runs in any resources."""
+        """The "only this set" view shows the set's runs in any resources."""
         self.submit(basis=prs(Q), executors=8)
         page = self.c.get(f"{LB}/prset?prset={quote('apache/gluten#88')}").get_data(as_text=True)
         href = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1))
         query = href.split("?", 1)[1]
         self.assertEqual(len(self.board("?" + query)["rows"]), 1)
-        # Round 4: on the set's own tab, wherever the first tab is.
+        # on the set's own tab, wherever the first tab is.
         self.submit(basis=prs(R), sf="1000")
         self.submit()                                                                   # SF-100 has other runs
         page = self.c.get(f"{LB}/prset?prset={quote('facebookincubator/velox#12')}").get_data(as_text=True)
         query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
         board = self.board("?" + query)
         self.assertEqual((board["sf"], len(board["rows"])), ("1000", 1))
-        # Round 5: a withdrawn run on an earlier tab does not take the link there.
+        # a withdrawn run on an earlier tab does not take the link there.
         gone = self.submit(basis=prs({"repo": "a/b", "number": 7}))
         kept = self.submit(basis=prs({"repo": "a/b", "number": 7}), sf="1000")
         self.c.post(f"/api/leaderboard/runs/{gone}/withdraw", json={"actor": "a", "reason": "b"})
         page = self.c.get(f"{LB}/prset?prset={quote('a/b#7')}").get_data(as_text=True)
         query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
         self.assertEqual([r["run_id"] for r in self.board("?" + query)["rows"]], [kept])
-        # Round 6: a ranked run wins over an earlier tab's run that is listed but not ranked (shared application).
+        # a ranked run wins over an earlier tab's run that is listed but not ranked (shared application).
         self.submit(basis=prs({"repo": "a/b", "number": 8}), application_mode="shared")
         ranked = self.submit(basis=prs({"repo": "a/b", "number": 8}), sf="1000")
         page = self.c.get(f"{LB}/prset?prset={quote('a/b#8')}").get_data(as_text=True)
@@ -4329,7 +4330,7 @@ class TestA9Round3(A9Case):
         self.assertEqual([r["run_id"] for r in self.board("?" + query)["rows"]], [ranked])
 
     def test_a_default_filter_on_basis_keeps_the_prset_page(self):
-        """Round 4: a configured default filter naming `basis` does not break the PR-set page's board link."""
+        """A configured default filter naming `basis` does not break the PR-set page's board link."""
         self.app.extensions["leaderboard_cfg"]["default_filter"] = {"executors": 4, "executor_cores": 6, "basis": "main"}
         self.submit(basis=prs(P))
         r = self.c.get(f"{LB}/prset?prset={quote('xcena-dev/xflare-analytics#1561')}")
@@ -4339,7 +4340,7 @@ class TestA9Round3(A9Case):
 
 class TestA9Round7(A9Case):
     def test_a_date_no_calendar_has_narrows_nothing(self):
-        """Round 7: 2026-02-30 or 2026-10-00 is not a date: like a half-typed one it narrows nothing and is not echoed."""
+        """2026-02-30 or 2026-10-00 is not a date: like a half-typed one it narrows nothing and is not echoed."""
         self.submit()
         for bad in ("2026-02-30", "2026-10-00", "2026-13-01"):
             with self.subTest(bad):
@@ -4350,7 +4351,7 @@ class TestA9Round7(A9Case):
 
 
 class TestA9Round4(A9Case):
-    """Round-4 review: compare by set from one read, and PR-set tab boundaries, orphaned Reports, 2-4 sets."""
+    """Compare by set from one read, and PR-set tab boundaries, orphaned Reports, 2-4 sets."""
 
     def test_compare_by_set_shows_the_rows_it_chose(self):
         a = self.submit(basis=prs({"repo": "a/b", "number": 1}), elapsed=flat_elapsed(100))

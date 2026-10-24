@@ -2071,7 +2071,7 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_one_run_reads_only_its_own_sets_report(self):
-        """Round 3: reading one run looks up the Report of its own PR set only, however many other sets have one."""
+        """Reading one run looks up the Report of its own PR set only, however many other sets have one."""
         env = self.env()
         env["basis"] = {"kind": "pr", "prs": [{"repo": "a/b", "number": 1}]}
         run = self.store.put(env)[1]["run_id"]

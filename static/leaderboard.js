@@ -840,7 +840,7 @@
       const t = data.target && !data.target.problem && data.target.velox_ms != null ? data.target : null;
       document.getElementById('lb-history-col').textContent = `Xflare ${name}`;
       document.getElementById('lb-history-note').textContent =
-        `${name}: 지금 순위에 오르는 run ${data.points.length}개 중 끝난 시점에 best 였던 run ${data.heroes.length}개 ` +
+        `${name}: 지금 순위에 오르는 run ${data.points.length}개 중 끝난 시점에 best 였던 run ${data.heroes.filter(h => !h.entering).length}개 ` +
         '(지금의 eligible run 으로 다시 계산; withdraw 나 basis 변경이 반영됩니다)' +
         (data.truncated ? ` · 최근 것만 보입니다` : '') +
         (t ? ` · speedup vs target (오른쪽 축)${t.goal ? `, 목표 ${fmtX(t.goal)}` : ''}` : '');
@@ -859,7 +859,7 @@
         a.title = h.run_id;
         const first = tr.insertCell();
         first.appendChild(a);
-        if (h.entering) first.appendChild(el('span', 'lb-dim', ' (기간 이전부터)'));
+        if (h.entering) first.appendChild(el('span', 'lb-dim', ' (표시 구간 이전부터)'));
         for (const [text, cls] of [[fmtMs(h.xflare_ms), 'num'], [fmtPct(h.delta_pct), 'num'],
                                    [fmtX(h.vs_target), t && t.goal && h.vs_target >= t.goal ? 'num lb-goal-met' : 'num']]) {
           const td = tr.insertCell();
@@ -1011,7 +1011,7 @@
           updateSetCompare();
         });
         tr.insertCell().appendChild(box);
-        // The set's own page; its chips filter the board as elsewhere.
+        // The set's own page.
         const setTd = tr.insertCell();
         setTd.className = 'lb-wrap-cell';
         const page = el('a', 'lb-set-label', shortBasis(x.basis, cfg.basis_chips));

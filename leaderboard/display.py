@@ -142,7 +142,8 @@ def facet_token(value: str) -> str:
 
 def facet_option(value: str, key: str | None = None) -> dict:
     """A selectable facet value of filter ``key``: the token selects it, the
-    label (FACET_LABELS, else the value cut for display) names it."""
+    label (FACET_LABELS, else the value cut for display; a PR-set Basis option
+    is named by its short basis) names it."""
     label = FACET_LABELS.get(key, {}).get(value)
     members = parse_prset_key(value[len("prset:"):]) if key == "basis" and value.startswith("prset:") else None
     if members:
