@@ -1,0 +1,92 @@
+{#- A9: one PR set. Submitted values are printed through Jinja autoescape only, every uploaded scalar through v (cut). -#}
+{%- from "leaderboard_macros.html" import v, badge, topbar, basis, report, edit_history -%}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>PR set {{ detail.label | lb_cut }} — {{ benchmark.title }}</title>
+  <link rel="stylesheet" href="{{ lb_static('style.css') }}">
+  <link rel="stylesheet" href="{{ lb_static('leaderboard.css') }}">
+</head>
+<body data-page="prset">
+{{ topbar([(benchmark.title, url_for('leaderboard.board_page')), ('PR set', none)]) }}
+
+<main class="detail-wrap lb-wrap" style="--bench-color: {{ benchmark.color or '#6366F1' }};">
+  <div class="lb-page-head">
+    <h1>PR set {{ detail.label }}</h1>
+    <div class="lb-meta">
+      <a class="lb-btn" href="{{ url_for('leaderboard.board_page', basis='prset:' ~ key) }}">board 에서 이 set 만 보기</a>
+    </div>
+  </div>
+
+  <section class="lb-panel">
+    <h3>PRs</h3>
+    <p class="lb-note">PR workflow 는 모든 PR 의 본문이 run 을 나열할 때 완료됩니다 (skill 이 본문을 읽고 기록; 순위에는 영향이 없습니다).</p>
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table" id="prset-members">
+        <thead><tr><th>PR</th><th>Repository</th><th>Last body check</th><th class="num">Runs listed</th><th>Checked by</th></tr></thead>
+        <tbody>
+        {% for p in detail.prs %}
+          <tr>
+            <td><a class="lb-chip" href="{{ p.url }}" rel="noopener noreferrer" title="{{ p.key }}">{{ p.label }}</a></td>
+            <td><code>{{ p.repo }}</code></td>
+            {% if p.check %}
+            <td>{{ v(p.check.checked_at) }}{% if p.check.source %} · {{ v(p.check.source) }}{% endif %}{% if p.check.body_sha256 %} · <code>{{ p.check.body_sha256[:12] }}</code>{% endif %}</td>
+            <td class="num">{{ p.check.listed_count }}</td><td>{{ v(p.check.checked_by) }}</td>
+            {% else %}
+            <td class="lb-dim" colspan="3">not checked</td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="lb-panel" id="basis">
+    <h3>Report</h3>
+    <p class="lb-note">이 PR set 의 효과를 설명하는 페이지 (artifact, Claude Doc, Confluence …). 선택 사항입니다.</p>
+    <dl class="lb-kv">
+      <dt>Report</dt><dd>{{ report(attribution.report_url) }}
+        <button id="lb-report-edit" class="lb-btn lb-btn-sm" type="button">Report {{ '바꾸기' if attribution.report_url else '지정' }}…</button></dd>
+      <dt>Last change</dt><dd>{% if attribution.revision %}{{ v(attribution.updated_by) }} · {{ v(attribution.updated_at) }}{% else %}<span class="lb-dim">—</span>{% endif %}</dd>
+    </dl>
+    {{ edit_history(attribution, url_for('leaderboard.prset_page', prset=key, before=attribution.history[-1].event_id if attribution.history else none)) }}
+  </section>
+
+  <section class="lb-panel">
+    <h3>Runs ({{ detail.runs | length }})</h3>
+    <p class="lb-note">탭마다 total-eligible run 을 board 순서로 (# = 이 set 안의 순위, 모든 config), 그 밖의 run 은 아래에.
+      board 의 PR set 목록과 비교는 탭의 필터 아래 best run 을 씁니다.</p>
+    {% if detail.runs %}
+    <div class="cmp-scroll">
+      <table class="cmp-table lb-table" id="prset-runs">
+        <thead><tr><th>Tab</th><th class="num">#</th><th>Run (finished, UTC)</th><th class="num">Xflare</th><th class="num">Velox</th>
+          <th class="num">Speedup</th><th>Config</th><th>Report</th><th>PR workflow</th><th>Badges</th></tr></thead>
+        <tbody>
+        {% for r in detail.runs %}
+          <tr class="{{ 'lb-ineligible' if r.place is none else '' }}">
+            <td>SF-{{ r.tab.label }}</td>
+            <td class="num">{{ r.place or '—' }}</td>
+            <td><a class="lb-run" href="{{ r.url }}" title="{{ r.run_id }}">{{ v(r.finished_at) }}</a>{% if r.withdrawn %} <span class="lb-badge b-bad">withdrawn</span>{% endif %}</td>
+            <td class="num">{{ r.totals.xflare_ms | lb_ms }}</td><td class="num">{{ r.totals.velox_ms | lb_ms }}</td>
+            <td class="num">{{ r.totals.speedup | lb_x }}</td>
+            <td class="lb-wrap-cell">{{ v(r.config_label) }}</td>
+            <td>{{ report(r.report_url) }}</td>
+            <td>{% if r.completion.complete %}<span class="lb-badge b-good">complete</span>{% else %}<span class="lb-badge b-warn" title="{% for m in r.completion.members %}{{ m.key }}: {{ m.status }}{% if not loop.last %}&#10;{% endif %}{% endfor %}">pending</span>{% endif %}</td>
+            <td class="lb-wrap-cell">{% for b in r.badges %}{{ badge(b) }}{% endfor %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="lb-empty">이 PR set 을 basis 로 가진 run 이 없습니다 (Report 와 이력은 남습니다).</p>
+    {% endif %}
+  </section>
+</main>
+
+<script type="application/json" id="lb-edit-data">{{ edit_data | tojson }}</script>
+<script src="{{ lb_static('leaderboard.js') }}"></script>
+</body>
+</html>

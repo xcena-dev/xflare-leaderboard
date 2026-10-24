@@ -45,3 +45,36 @@
   {%- if view.count > limit -%}<p class="lb-more">{{ view.count - limit }} more — see raw JSON</p>{%- endif -%}
   {%- endif -%}
 {%- endmacro -%}
+{#- A9: a basis as display.basis_view built it: PR chips (each to its GitHub PR), "main · latest #N", or unknown. Every
+    part is escaped; the URLs were built from parsed parts. -#}
+{%- macro basis(view, unknown='unknown') -%}
+  {%- if view is none -%}<span class="lb-dim">{{ unknown }}</span>
+  {%- elif view.kind == 'main' -%}<a class="lb-chip lb-chip-main" href="{{ view.url }}" rel="noopener noreferrer" title="{{ view.repo }}#{{ view.latest_pr }}">{{ view.label }}</a>
+  {%- else -%}<span class="lb-chips">{% for p in view.prs %}<a class="lb-chip" href="{{ p.url }}" rel="noopener noreferrer" title="{{ p.key }}">{{ p.label }}</a>{% endfor %}</span>
+  {%- endif -%}
+{%- endmacro -%}
+{#- A9: a stored report URL (an http(s) URL the validator accepted) as a plain link "↗ Report", the URL in its tooltip. -#}
+{%- macro report(url) -%}
+  {%- if url -%}<a class="lb-report" href="{{ url }}" rel="noopener noreferrer" target="_blank" title="{{ url }}">↗ Report</a>{%- else -%}<span class="lb-dim">—</span>{%- endif -%}
+{%- endmacro -%}
+{#- A9: one value of an edit event (a basis view or a report URL). -#}
+{%- macro field_value(field, value) -%}
+  {%- if field == 'basis' -%}{{ basis(value, 'none') }}{%- else -%}{{ report(value) }}{%- endif -%}
+{%- endmacro -%}
+{#- A9: a subject's edit history (web._history: the newest 50 changes, older ones a page away), newest first; any
+    value other than the current one can be set again (restore, a new change). -#}
+{%- macro edit_history(att, older_url) -%}
+<details class="lb-target-history" id="edit-history"{% if request.args.get('before') %} open{% endif %}>
+  <summary>변경 이력{% if att.revision %} (revision {{ att.revision }}){% endif %}</summary>
+  <ol class="lb-target-events" id="edit-events">
+  {%- for e in att.history %}
+    <li>{{ v(e.at) }} · {{ v(e.actor) }} · {{ e.field }}: {{ field_value(e.field, e.before) }} → {{ field_value(e.field, e.after) }}
+      {%- if e.restored_from %} <span class="lb-dim">(restore of #{{ e.restored_from }})</span>{% endif %}
+      {%- if e.after != att[e.field] %} <button class="lb-btn lb-restore" type="button" data-event="{{ e.event_id }}" data-field="{{ e.field }}">이 값으로 되돌리기…</button>{% endif %}</li>
+  {%- else %}
+    <li class="lb-dim">아직 바뀐 적이 없습니다.</li>
+  {%- endfor %}
+  </ol>
+  {%- if att.more %}<p class="lb-more"><a href="{{ older_url }}">더 오래된 변경 →</a></p>{% endif %}
+</details>
+{%- endmacro -%}

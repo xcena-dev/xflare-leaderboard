@@ -57,6 +57,27 @@
     </div>
   </section>
 
+  <!-- A9: loads when opened, then with every board load while open. -->
+  <section class="lb-panel lb-fold" aria-label="Hero history">
+    <details id="lb-history">
+      <summary>Hero history — best so far</summary>
+      <nav class="lb-tabs lb-metric-tabs" id="lb-history-metrics" aria-label="History metric"></nav>
+      <p class="lb-note" id="lb-history-note"></p>
+      <div class="chart-tools">
+        <label><input type="checkbox" id="history-log"> log scale</label>
+        <span class="chart-note">x: run 이 끝난 시각 (UTC) · 점: 순위에 오른 run · 계단: 그때까지의 best · 라벨: hero 의 basis</span>
+      </div>
+      <div class="lb-chart"><canvas id="history-chart"></canvas></div>
+      <div class="cmp-scroll">
+        <table class="cmp-table lb-table" id="lb-history-table">
+          <thead><tr><th>Hero since (UTC)</th><th class="num" id="lb-history-col">Xflare</th><th class="num">Δ vs previous</th>
+            <th class="num">vs target</th><th>Basis</th><th>Report</th><th>Config</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
   <section class="controls lb-filters" id="lb-filters" aria-label="Filters">
     <span class="lb-filter-slot" data-key="executors" data-label="executors"></span>
     <span class="lb-filter-slot" data-key="executor_cores" data-label="cores"></span>
@@ -71,6 +92,9 @@
     <span class="lb-filter-slot" data-key="device" data-label="device"></span>
     <span class="lb-filter-slot" data-key="submitter" data-label="submitter"></span>
     <span class="lb-filter-slot" data-key="badge" data-label="badge"></span>
+    <span class="lb-filter-slot" data-key="basis" data-label="basis"></span>
+    <!-- A9: one PR (pr=<key>), set by clicking a PR chip; removable here. -->
+    <span class="lb-pr-filter" id="lb-pr-filter" hidden></span>
     <label class="date-range">기간:
       <input type="date" id="lb-from" title="finished_at 이 날짜부터 (포함)">
       <span class="range-sep">~</span>
@@ -94,7 +118,7 @@
       <table class="cmp-table lb-board" id="lb-board">
         <thead>
           <tr>
-            <th class="num">#</th><th>Run (finished, UTC)</th><th class="num">Xflare</th><th class="num">Velox</th>
+            <th class="num">#</th><th>Run (finished, UTC)</th><th>Basis</th><th>Report</th><th class="num">Xflare</th><th class="num">Velox</th>
             <th class="num" id="lb-col-speedup">Speedup</th><th class="num">Repeats</th><th>Config</th><th>Mode</th><th>Engines</th><th>Device</th>
             <th>Submitter</th><th>Badges</th><th>Repro</th><th>Compare</th>
           </tr>
@@ -110,9 +134,36 @@
       <button type="button" id="lb-compare" class="lb-btn lb-btn-primary" disabled>선택한 run 비교 (2–4)</button>
     </div>
   </section>
+
+  <!-- A9: the tab's PR sets under the board's filter; loads when opened, then with every board load while open. -->
+  <section class="lb-panel lb-fold" aria-label="PR sets">
+    <details id="lb-prsets">
+      <summary>PR sets on this tab</summary>
+      <div class="chart-tools">
+        <label>정렬:
+          <select id="lb-prsets-sort">
+            <option value="best" selected>best run</option>
+            <option value="number">PR number</option>
+            <option value="recent">recent run</option>
+          </select>
+        </label>
+        <span class="chart-note" id="lb-prsets-note"></span>
+      </div>
+      <div class="cmp-scroll">
+        <table class="cmp-table lb-table" id="lb-prsets-table">
+          <thead><tr><th>Compare</th><th>PR set</th><th>Report</th><th class="num">Best xflare</th><th class="num">vs hero</th>
+            <th class="num">vs target</th><th class="num">Eligible / runs</th><th>Last run (UTC)</th><th>Best run</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="lb-compare-bar">
+        <button type="button" id="lb-prsets-compare" class="lb-btn lb-btn-primary" disabled>선택한 PR set 비교 (2–4)</button>
+      </div>
+    </details>
+  </section>
 </main>
 
-<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars, "badge_class": lb_badge_classes, "script": lb_script_version()} | tojson }}</script>
+<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars, "badge_class": lb_badge_classes, "script": lb_script_version(), "basis_chips": lb_budget.basis_chips, "default_repo": lb_default_repo} | tojson }}</script>
 <script src="{{ lb_static('leaderboard.js') }}"></script>
 </body>
 </html>

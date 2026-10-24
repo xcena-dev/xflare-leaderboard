@@ -92,7 +92,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 
 .lb-chart { position: relative; height: 320px; }
 
-/* Wider than the platform's 1320px content column: these pages have no sidebar and the board is 14 columns. */
+/* Wider than the platform's 1320px content column: these pages have no sidebar and the board is 16 columns. */
 .lb-wrap { max-width: 1400px; }
 
 /* ---- board -------------------------------------------------------------- */
@@ -101,21 +101,22 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 
 /* Column widths for the fixed layout (cells are border-box: padding included); Submitter takes what is left.
    A narrower page scrolls the table. */
-.lb-board { min-width: 1324px; }
+.lb-board { min-width: 1564px; }
 .lb-board th, .lb-board td { padding-left: 8px; padding-right: 8px; }
 .lb-board th:nth-child(1) { width: 52px; }
 .lb-board th:nth-child(2) { width: 172px; }
-.lb-board th:nth-child(3), .lb-board th:nth-child(4) { width: 80px; }
-.lb-board th:nth-child(5) { width: 94px; }
-.lb-board th:nth-child(6) { width: 84px; }
-.lb-board th:nth-child(7) { width: 92px; }
-.lb-board th:nth-child(8) { width: 86px; }
-.lb-board th:nth-child(9) { width: 108px; }
-.lb-board th:nth-child(10) { width: 72px; }
-.lb-board th:nth-child(12) { width: 136px; }
-.lb-board th:nth-child(13) { width: 68px; }
-.lb-board th:nth-child(14) { width: 100px; }
-.lb-board td:nth-child(12) { white-space: normal; }
+.lb-board th:nth-child(3) { width: 160px; }
+.lb-board th:nth-child(4), .lb-board th:nth-child(5), .lb-board th:nth-child(6) { width: 80px; }
+.lb-board th:nth-child(7) { width: 94px; }
+.lb-board th:nth-child(8) { width: 84px; }
+.lb-board th:nth-child(9) { width: 92px; }
+.lb-board th:nth-child(10) { width: 86px; }
+.lb-board th:nth-child(11) { width: 108px; }
+.lb-board th:nth-child(12) { width: 72px; }
+.lb-board th:nth-child(14) { width: 136px; }
+.lb-board th:nth-child(15) { width: 68px; }
+.lb-board th:nth-child(16) { width: 100px; }
+.lb-board td:nth-child(3), .lb-board td:nth-child(14) { white-space: normal; }
 .lb-board td a.lb-run { font-weight: 550; }
 .lb-board .lb-btn { height: 26px; padding: 0 9px; font-size: var(--text-xs); }
 .lb-table { table-layout: auto; }
@@ -166,3 +167,28 @@ details summary { cursor: pointer; font-size: var(--text-sm); font-weight: 600; 
 #params-table.only-diff tr.lb-same { display: none; }
 #params-table tr.lb-differs td { color: var(--warn-text); }
 .lb-board td.lb-copy { cursor: pointer; }
+
+/* ---- A9: basis chips, reports, folded panels, edit histories ----------- */
+.lb-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; vertical-align: middle; }
+.lb-chip {
+  display: inline-flex; align-items: center; padding: 0 7px; border-radius: var(--radius-sm);
+  font: 600 var(--text-xs)/1.7 var(--mono); white-space: nowrap; text-decoration: none;
+  background: var(--accent-soft); color: var(--accent-text); border: 1px solid transparent;
+}
+a.lb-chip:hover { border-color: var(--accent); }
+.lb-chip-main { background: var(--surface-3); color: var(--text-2); font-family: var(--font); }
+.lb-chip-more { background: transparent; color: var(--text-3); }
+.lb-report { white-space: nowrap; font-weight: 550; }
+button.lb-chip { cursor: pointer; }
+.lb-chip-gh { margin: 0 4px 0 -2px; text-decoration: none; font-size: var(--text-xs); color: var(--text-3); }
+.lb-chip-gh:hover { color: var(--accent-text); }
+.lb-pr-filter { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-sm); }
+.lb-pr-filter[hidden] { display: none; }
+.lb-btn-sm { height: 24px; margin-left: var(--space-2); padding: 0 8px; font-size: var(--text-xs); }
+.lb-fold { padding-top: 12px; padding-bottom: 12px; }
+.lb-fold > details > summary { margin: 0; font-size: var(--text-md); color: var(--text); }
+.lb-fold > details[open] > summary { margin-bottom: var(--space-3); }
+.lb-fold .cmp-scroll { margin-top: var(--space-3); }
+.lb-checks { margin: var(--space-1) 0 0; padding-left: 20px; }
+.lb-set-label { font-weight: 650; overflow-wrap: anywhere; }
+.lb-hero-mark { color: var(--ok-text); font-weight: 650; }

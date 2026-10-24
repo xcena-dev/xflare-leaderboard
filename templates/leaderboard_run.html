@@ -2,7 +2,7 @@
     autoescape; nothing here is marked safe. Uploaded scalars go through v (cut
     to SCALAR_CHARS), long-form texts through lb_text (`chars`), lists are cut to
     `limit` items; the raw JSON download has the rest. -#}
-{%- from "leaderboard_macros.html" import v, more, badge, settings_table, topbar -%}
+{%- from "leaderboard_macros.html" import v, more, badge, settings_table, topbar, basis, report, edit_history -%}
 {%- set limit, chars = lb_budget.preview_items, lb_budget.preview_chars -%}
 {%- set run = m.run -%}
 {%- set env = meta.environment or {} -%}
@@ -86,6 +86,24 @@
       <dt>Answers</dt><dd>{{ v((run.answers or {}).path) }} · sha256 {{ v((run.answers or {}).sha256) }}</dd>
       <dt>Dataset</dt><dd>{{ v((run.dataset or {}).uri) }} · marker {{ v((run.dataset or {}).marker) }}</dd>
     </dl>
+  </section>
+
+  <section class="lb-panel" id="basis">
+    <h3>Basis &amp; report (A9)</h3>
+    <dl class="lb-kv">
+      <dt>Basis</dt><dd>{{ basis(summary.basis) }}
+        <button id="lb-basis-edit" class="lb-btn lb-btn-sm" type="button">basis 바꾸기…</button></dd>
+      {% if summary.basis and summary.basis.kind == 'pr' %}
+      <dt>PR set</dt><dd><a href="{{ url_for('leaderboard.prset_page', prset=summary.basis.prset) }}">PR set 페이지 →</a></dd>
+      <dt>PR workflow</dt><dd>{% if completion.complete %}<span class="lb-badge b-good">complete</span>{% else %}<span class="lb-badge b-warn">pending</span>{% endif %}
+        <span class="lb-dim">— 모든 PR 본문에 이 run 이 있어야 완료 (순위와 무관)</span>
+        <ul class="lb-checks">{% for m in completion.members %}<li><span title="{{ m.key }}">{{ m.label }}</span> · {{ m.status }}{% if m.checked_at %} <span class="lb-dim">({{ m.checked_at }})</span>{% endif %}</li>{% endfor %}</ul></dd>
+      {% endif %}
+      <dt>Report</dt><dd>{{ report(summary.report_url) }}
+        <button id="lb-report-edit" class="lb-btn lb-btn-sm" type="button">Report {{ '바꾸기' if summary.report_url else '지정' }}…</button></dd>
+      <dt>Last change</dt><dd>{% if attribution.revision %}{{ v(attribution.updated_by) }} · {{ v(attribution.updated_at) }}{% else %}<span class="lb-dim">—</span>{% endif %}</dd>
+    </dl>
+    {{ edit_history(attribution, url_for('leaderboard.run_page', run_id=row.run_id, before=attribution.history[-1].event_id if attribution.history else none)) }}
   </section>
 
   <section class="lb-panel">
@@ -340,6 +358,7 @@
 </main>
 
 <script type="application/json" id="lb-run-data">{{ chart | tojson }}</script>
+<script type="application/json" id="lb-edit-data">{{ edit_data | tojson }}</script>
 <script src="{{ lb_static('leaderboard.js') }}"></script>
 </body>
 </html>

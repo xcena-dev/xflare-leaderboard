@@ -23,20 +23,27 @@ from fractions import Fraction
 from flask import Blueprint, Response, abort, current_app, jsonify, redirect, render_template, request, url_for
 
 from . import aggregate, repro
-from .display import (BADGE_CLASS, BENCH_ID, BUDGET, DEFAULT_CODEC, EFFECTIVE_ITEMS, FACET_VALUES, MATRIX_REPEATS,
-                      PREVIEW_CHARS, PREVIEW_ITEMS, SCALAR_CHARS, as_float, badge_class, cut, default_filter,
-                      facet_option, facet_token, fallback_notice, norm_date, tab_label, tab_note, tabs)
-from .schema import (APPLICATION_SETTINGS, CODECS, MANIFEST_SCHEMA, MAX_BODY_BYTES, SCALE_FACTOR_RE, UUID4_RE, BadJSON,
-                     parse_json_strict, validate_envelope, validate_manifest)
+from .display import (BADGE_CLASS, BENCH_ID, BUDGET, DEFAULT_CODEC, EFFECTIVE_ITEMS, FACET_VALUES, HISTORY_EVENTS,
+                      HISTORY_HEROES, HISTORY_POINTS, MATRIX_REPEATS, PREVIEW_CHARS, PREVIEW_ITEMS, SCALAR_CHARS,
+                      as_float, badge_class, basis_view, cut, default_filter, facet_option, facet_token,
+                      fallback_notice, norm_date, pr_label, pr_url, short_basis, tab_label, tab_note, tabs)
+from .schema import (APPLICATION_SETTINGS, CODECS, DEFAULT_REPO, MANIFEST_SCHEMA, MAX_BODY_BYTES,
+                     MAX_REPORT_URL_CHARS, SCALE_FACTOR_RE, UUID4_RE, BadJSON, normalize_basis, parse_json_strict, parse_prset_key,
+                     parse_repo, parse_report_url, pr_key, prset_key, validate_basis, validate_envelope,
+                     validate_manifest)
 from .store import StorageUnavailable, store_for
 
 TOP_CHOICES = (5, 10, 25)
-# query parameter -> aggregate.matches_filter key
+# A9: one Basis filter, `basis` = main | pr (every PR-based run) | prset:<canonical key> (exactly that PR set) | "-"
+# (no basis), and `pr=<owner/name#N>` (a run whose PR set contains that PR; the board's PR chips set it, a literal with
+# no facet). Both read the run's basis, which lives beside the run (Store "attribution"), not in its derived data.
+_BASIS_PARAMS = ("basis", "pr")
+# query parameter -> aggregate.matches_filter key (the A9 ones are matched here, by _values_of)
 _FILTER_PARAMS = {**{k: k for k in aggregate.CONFIG_KEYS},
                   "device": "device", "submitter": "submitter", "badge": "badge",
-                  "from": "date_from", "to": "date_to"}
+                  "from": "date_from", "to": "date_to", **{k: k for k in _BASIS_PARAMS}}
 # Facet filters; each also takes a token in `<key>_t` (display.facet_token).
-_FACET_PARAMS = aggregate.CONFIG_KEYS + ("device", "submitter", "badge")
+_FACET_PARAMS = aggregate.CONFIG_KEYS + ("device", "submitter", "badge", "basis")
 # difflib is quadratic on adversarial text and the diff runs on every view.
 _DIFF_MAX_LINES = 1000
 
@@ -67,6 +74,7 @@ def init_app(app, cfg: dict):
 # (through the board page's data block) its script.
 bp.record_once(lambda state: state.app.add_template_global(BUDGET, "lb_budget"))
 bp.record_once(lambda state: state.app.add_template_global(BADGE_CLASS, "lb_badge_classes"))
+bp.record_once(lambda state: state.app.add_template_global(DEFAULT_REPO, "lb_default_repo"))
 
 
 _ASSETS = ("style.css", "leaderboard.css", "leaderboard.js")
@@ -258,6 +266,8 @@ def api_submit():
             "warnings": warnings,
             "badges": derived["badges"],
             "ineligible_reasons": {k: _capped(v) for k, v in derived["ineligible_reasons"].items()},
+            # A9: the basis as it would be stored, so a client can tell this service takes one.
+            "basis": basis_view(normalize_basis(envelope["basis"])) if envelope and "basis" in envelope else None,
         })
     outcome, row = store_for(cfg).put(envelope, warnings)
     if outcome == "conflict":
@@ -310,6 +320,9 @@ def _run_summary(row: dict) -> dict:
         "ineligible_reasons": {"common": _capped([cut(x) for x in d["ineligible_reasons"].get("common", [])])},
         "withdrawn": bool(row["withdrawn"]),
         "withdrawal": _withdrawal(row),
+        # A9: bounded by the validator (MAX_PRS members, MAX_REPORT_URL_CHARS), so never cut: a cut URL would lead elsewhere.
+        "basis": basis_view(row["attribution"]["basis"]),
+        "report_url": row["attribution"]["report_url"],
     }
 
 
@@ -363,9 +376,18 @@ def _tokens() -> dict:
     return {k: request.args[k + "_t"] for k in _FACET_PARAMS if request.args.get(k + "_t")}
 
 
-def _values_of(d: dict, key: str) -> set:
+def _values_of(row: dict, key: str) -> set:
     """The full values one run takes for a facet filter. A null config value
-    is spelled "-", as matches_filter compares it."""
+    is spelled "-", as matches_filter compares it; so is a run without a basis
+    (A9), or without a PR set for `pr` / `prset`."""
+    d = row["derived"]
+    if key in _BASIS_PARAMS:
+        basis = row["attribution"]["basis"]
+        if basis is None or basis["kind"] == "main" and key == "pr":
+            return {"-"}
+        if key == "pr":
+            return {pr_key(m["repo"], m["number"]) for m in basis["prs"]}
+        return {"main"} if basis["kind"] == "main" else {"pr", PRSET_PREFIX + prset_key(basis["prs"])}
     if key in aggregate.CONFIG_KEYS:
         v = d["config"][key]
         return {"-" if v is None else str(v)}
@@ -376,18 +398,29 @@ def _values_of(d: dict, key: str) -> set:
     return set(d["badges"])
 
 
+PRSET_PREFIX = "prset:"
+
+
+def _prset_of(row: dict) -> str | None:
+    """The canonical key of the run's PR set, or None (no basis, or main)."""
+    basis = row["attribution"]["basis"]
+    return prset_key(basis["prs"]) if basis and basis["kind"] == "pr" else None
+
+
 def _facet_values(rows: list[dict]) -> dict[str, set]:
     """Every full value each facet filter takes over ``rows``."""
-    return {k: set().union(*(_values_of(r["derived"], k) for r in rows)) for k in _FACET_PARAMS}
+    return {k: set().union(*(_values_of(r, k) for r in rows)) for k in _FACET_PARAMS}
 
 
 def _filtered(rows: list[dict], flt: dict, tokens: dict) -> list[dict]:
     """Rows matching the literal filter (exact full values) and every token
     (a run matches when one of its values hashes to it); both apply when a
     request gives a literal and a token for the same key."""
-    agg = {_FILTER_PARAMS[k]: v for k, v in flt.items()}
+    agg = {_FILTER_PARAMS[k]: v for k, v in flt.items() if k not in _BASIS_PARAMS}
+    basis = {k: v for k, v in flt.items() if k in _BASIS_PARAMS}
     return [r for r in rows if aggregate.matches_filter(r["derived"], agg)
-            and all(any(facet_token(v) == t for v in _values_of(r["derived"], k)) for k, t in tokens.items())]
+            and all(v in _values_of(r, k) for k, v in basis.items())
+            and all(any(facet_token(v) == t for v in _values_of(r, k)) for k, t in tokens.items())]
 
 
 @bp.get("/api/leaderboard/runs")
@@ -428,9 +461,15 @@ def _facets(values: dict[str, set]) -> tuple[dict, bool]:
     filter, as {token, label} (``display.facet_option``); the flag says some
     were left out."""
     truncated = any(len(v) > FACET_VALUES for v in values.values())
-    return {k: [facet_option(x, k) for x in sorted(v, key=lambda s: (len(s), s) if s.isdigit() else (1 << 30, s))
-                [:FACET_VALUES]]
+    return {k: [facet_option(x, k) for x in sorted(v, key=lambda s: _facet_order(k, s))[:FACET_VALUES]]
             for k, v in values.items()}, truncated
+
+
+def _facet_order(key: str, value: str) -> tuple:
+    """Numbers in numeric order, the rest by text; the Basis options (A9) read main, every PR set, each set, none."""
+    if key == "basis":
+        return {"main": 0, "pr": 1, "-": 3}.get(value, 2), value
+    return (len(value), value) if value.isdigit() else (1 << 30, value)
 
 
 def _hero(row: dict | None, target_velox) -> dict | None:
@@ -575,13 +614,376 @@ def api_set_target(sf, codec):
     return jsonify(_pin(state, sf, codec))
 
 
+# --- basis, reports and checks (amendment A9) ---------------------------------------------------------------------
+# A run's basis (a PR set, or main with its latest PR) and report URL, and a PR set's report URL, change only through these
+# versioned edits (an identical submission retry never does): each applies at the revision the caller saw (else 409
+# with the current state), is kept as an event with its claimed actor, and any earlier value can be set again by
+# naming its event (restore). Edits come from this site's pages or a script, like the target's.
+
+ACTOR_CHARS = 256
+CHECK_RUN_IDS = 1000
+_EVENT_ID_MAX = 2 ** 63 - 1
+
+
+def _event_id(value) -> int | None:
+    return value if type(value) is int and 1 <= value <= _EVENT_ID_MAX else None
+
+
+def _edit_request(doc: dict, field: str, parse) -> tuple[list[str], dict]:
+    """The common edit body: {actor, expected_revision} and exactly one of ``field`` (its value, or null to clear)
+    and ``restore`` (an event id). ``parse`` turns a value into (stored value, errors)."""
+    actor, revision = doc.get("actor"), doc.get("expected_revision")
+    errors, out = [], {"value": None, "restore": None}
+    if not isinstance(actor, str) or not actor.strip() or len(actor.strip()) > ACTOR_CHARS:
+        errors.append(f"actor: non-empty string of at most {ACTOR_CHARS} characters")
+    else:
+        out["actor"] = actor.strip()
+    if type(revision) is not int or revision < 0:
+        errors.append("expected_revision: integer >= 0")
+    out["revision"] = revision
+    if (field in doc) == ("restore" in doc):
+        errors.append(f"{field}, restore: exactly one of them")
+    elif "restore" in doc:
+        out["restore"] = _event_id(doc["restore"])
+        if out["restore"] is None:
+            errors.append("restore: an event id")
+    elif doc[field] is not None:
+        out["value"], more = parse(doc[field])
+        errors += more
+    return errors, out
+
+
+def _parse_basis(value) -> tuple[dict | None, list[str]]:
+    errors = validate_basis(value)
+    return (None if errors else normalize_basis(value)), errors
+
+
+def _parse_report_url(value) -> tuple[str | None, list[str]]:
+    url = parse_report_url(value)
+    return url, ([] if url else [f"report_url: an http(s) URL of at most {MAX_REPORT_URL_CHARS} characters"])
+
+
+def _state_view(kind: str, subject: str, state: dict) -> dict:
+    """An A9 subject's state as the API shows it (full values: the edit forms start from them)."""
+    out = {"run_id" if kind == "run" else "prset": subject, "revision": state["revision"],
+           "report_url": state["report_url"],
+           "updated_by": state["updated_by"] and cut(state["updated_by"]), "updated_at": state["updated_at"]}
+    if kind == "run":
+        out["basis"] = basis_view(state["basis"])
+    return out
+
+
+def _event_view(e: dict) -> dict:
+    show = basis_view if e["field"] == "basis" else (lambda x: x)
+    return {"event_id": e["event_id"], "field": e["field"], "revision": e["revision"], "before": show(e["before"]),
+            "after": show(e["after"]), "restored_from": e["restored_from"], "actor": cut(e["actor"]), "at": e["at"]}
+
+
+def _edit(kind: str, subject: str, field: str, parse):
+    """POST handler body shared by the A9 edits."""
+    refused = _same_site_json()
+    if refused:
+        return refused
+    errors, req = _edit_request(_json_object(), field, parse)
+    if errors:
+        return _errors(400, *errors)
+    status, state = store_for(_cfg()).edit(kind, subject, field, req["value"], req["actor"], req["revision"],
+                                           req["restore"])
+    if status == "unknown":
+        raise _UnknownRun
+    if status == "conflict":
+        return _errors(409, "changed meanwhile: reload and try again", current=_state_view(kind, subject, state))
+    if status == "bad restore":
+        return _errors(400, f"restore: not a change of this {field}")
+    return jsonify(_state_view(kind, subject, state))
+
+
+def _before_param() -> int | None:
+    """``?before=<event id>``: the next older page of an edit history."""
+    raw = request.args.get("before")
+    if not raw:
+        return None
+    before = _event_id(int(raw)) if raw.isdigit() and len(raw) <= 19 else None
+    if before is None:
+        raise _BadBody("before: an event id")
+    return before
+
+
+def _history(kind: str, subject: str) -> dict:
+    state, events, more = store_for(_cfg()).attribution_history(kind, subject, _before_param(), HISTORY_EVENTS)
+    return {**_state_view(kind, subject, state), "history": [_event_view(e) for e in events], "more": more}
+
+
+@bp.post("/api/leaderboard/runs/<run_id>/basis")
+def api_set_basis(run_id):
+    _api_run_id(run_id)
+    return _edit("run", run_id, "basis", _parse_basis)
+
+
+@bp.post("/api/leaderboard/runs/<run_id>/report_url")
+def api_set_run_report(run_id):
+    _api_run_id(run_id)
+    return _edit("run", run_id, "report_url", _parse_report_url)
+
+
+@bp.get("/api/leaderboard/runs/<run_id>/history")
+def api_run_history(run_id):
+    _api_run_id(run_id)
+    if store_for(_cfg()).get(run_id) is None:
+        raise _UnknownRun
+    return jsonify(_history("run", run_id))
+
+
+def _prset_param() -> str:
+    """``?prset=<key>`` as its canonical key; any order or case of the members names the same set."""
+    members = parse_prset_key(request.args.get("prset"))
+    if members is None:
+        raise _BadBody("prset: a PR set key (owner/name#N joined by '+', at most 16)")
+    return prset_key(members)
+
+
+@bp.get("/api/leaderboard/prset")
+def api_prset():
+    key = _prset_param()
+    return jsonify({**_history("prset", key), **_prset_detail(key)})
+
+
+@bp.post("/api/leaderboard/prset")
+def api_set_prset_report():
+    refused = _same_site_json()
+    return refused or _edit("prset", _prset_param(), "report_url", _parse_report_url)
+
+
+def _prset_detail(key: str) -> dict:
+    """A PR set's members with their latest body checks, and every run that claims exactly this set (withdrawn ones
+    flagged), tab by tab in the tabs' order, each tab's total-eligible runs first in board order with their place."""
+    cfg, store = _cfg(), store_for(_cfg())
+    members = parse_prset_key(key)
+    rows = [r for r in store.list_runs(include_withdrawn=True) if _prset_of(r) == key]
+    checks = store.checks((m["repo"], m["number"]) for m in members)
+    view = basis_view({"kind": "pr", "prs": members})
+    runs = []
+    for tab in tabs(cfg, [r["derived"] for r in rows]):
+        here = [r for r in rows if aggregate.tab_of(r["derived"]) == (tab["sf"], tab["codec"])]
+        ranked = aggregate.rank(here, "total")
+        rest = [r for r in here if r["run_id"] not in {x["run_id"] for x in ranked}]
+        for place, r in enumerate(ranked + rest, 1):
+            runs.append({**_run_summary(r), "tab": tab, "place": place if place <= len(ranked) else None,
+                         "completion": _completion(r, checks)})
+    return {"label": view["label"], "prs": [{**p, "check": _check_view(checks.get((p["repo"], p["number"])))}
+                                            for p in view["prs"]], "runs": runs}
+
+
+def _delta_pct(v, b):
+    """Exact Δ% of v against b; None without both, +inf past float range (lb_pct prints "out of range")."""
+    if v is None or not b:
+        return None
+    try:
+        return float((Fraction(v) - Fraction(b)) * 100 / Fraction(b))
+    except OverflowError:
+        return math.inf
+
+
+def _board_view(cfg, store) -> dict:
+    """What the board and its panels (A9 PR sets, hero history) read from one request: the tab list and the tab it
+    names, the filter (default applied) and tokens, the tab's non-withdrawn runs, the stored target and the one in
+    effect with its derived data (None when it cannot serve)."""
+    all_rows = store.list_runs()
+    tab_list = tabs(cfg, [r["derived"] for r in all_rows])
+    tab = _select_tab(tab_list)
+    flt, tokens = _filter(default_filter(cfg)), _tokens()
+    # The tab consumes the codec: it is not a filter of the board.
+    for params in (flt, tokens):
+        params.pop("codec", None)
+    pin = _pin(store.get_target(tab["sf"], tab["codec"]), tab["sf"], tab["codec"])
+    target, target_derived = _effective_target(store, tab["sf"], tab["codec"], pin, {r["run_id"]: r for r in all_rows})
+    return {"tabs": tab_list, "tab": tab, "filter": flt, "tokens": tokens, "pin": pin, "target": target,
+            "target_derived": target_derived,
+            "rows": [r for r in all_rows if aggregate.tab_of(r["derived"]) == (tab["sf"], tab["codec"])]}
+
+
+def _total_velox(target_derived: dict | None):
+    return None if target_derived is None else target_derived["totals"]["velox_ms"]
+
+
+def _best_view(r: dict, target_velox) -> dict:
+    d = r["derived"]
+    return {"run_id": r["run_id"], "url": _url(r["run_id"]), "finished_at": d["finished_at"],
+            "config_label": cut(d["config_label"]), "repeats": d["repeats_completed"],
+            **_with_vs_target(aggregate.metric_values(d, "total"), target_velox)}
+
+
+PRSET_SORTS = ("best", "number", "recent")
+
+
+@bp.get("/api/leaderboard/prsets")
+def api_prsets():
+    """A9: the PR sets of the tab's runs under the board's filter, each with its representative: its best
+    total-eligible run in board order (aggregate.rank), the same run compare resolves the set to."""
+    cfg, store = _cfg(), store_for(_cfg())
+    sort = request.args.get("sort") or "best"
+    if sort not in PRSET_SORTS:
+        return _errors(400, "sort: best, number or recent")
+    view = _board_view(cfg, store)
+    tab, flt, target_velox = view["tab"], view["filter"], _total_velox(view["target_derived"])
+    chosen = _filtered(view["rows"], flt, view["tokens"])
+    hero = aggregate.hero(chosen, {})
+    groups: dict[str, list[dict]] = {}
+    for r in chosen:
+        key = _prset_of(r)
+        if key is not None:
+            groups.setdefault(key, []).append(r)
+    reports = store.prset_states()
+    sets = []
+    for key, members in groups.items():
+        ranked = aggregate.rank(members, "total")
+        best = ranked[0] if ranked else None
+        last = max(members, key=lambda r: aggregate.utc_key(r["derived"]["finished_at"]))
+        sets.append({"prset": key, "basis": basis_view(members[0]["attribution"]["basis"]),
+                     "report_url": (reports.get(key) or {}).get("report_url"), "run_count": len(members),
+                     "eligible_count": len(ranked), "last_finished_at": last["derived"]["finished_at"],
+                     "best": best and _best_view(best, target_velox), "is_hero": best is not None and best is hero,
+                     "vs_hero_pct": best and hero and _delta_pct(best["derived"]["totals"]["xflare_ms"],
+                                                                 hero["derived"]["totals"]["xflare_ms"]),
+                     "_order": (best is None, best and aggregate.order_key(best["derived"], "total")),
+                     "_recent": aggregate.utc_key(last["derived"]["finished_at"])})
+    if sort == "best":
+        sets.sort(key=lambda x: x["prset"])
+        sets.sort(key=lambda x: (x["_order"][0], x["_order"][1] or ()))
+    elif sort == "number":
+        sets.sort(key=lambda x: (-max(p["number"] for p in x["basis"]["prs"]), x["prset"]))
+    else:
+        sets.sort(key=lambda x: x["prset"])
+        sets.sort(key=lambda x: x["_recent"], reverse=True)
+    for x in sets:
+        del x["_order"], x["_recent"]
+    return jsonify({"sf": tab["sf"], "codec": tab["codec"], "sort": sort, "filter": flt,
+                    "hero_run_id": hero and hero["run_id"], "prsets": sets[:FACET_VALUES],
+                    "truncated": len(sets) > FACET_VALUES})
+
+
+def _epoch_ms(ts: str) -> int:
+    dt, ns = aggregate.utc_key(ts)
+    return int(dt.timestamp()) * 1000 + ns // 1_000_000
+
+
+@bp.get("/api/leaderboard/history")
+def api_history():
+    """A9: the tab's hero over time for one metric (the Total or one query) under the board's filter (no fallback):
+    every run ranked on that board as a point, and the runs that led it when they finished, recomputed from today's
+    eligible runs. A from/to window keeps the hero it entered with; the newest points and heroes of the window are
+    kept. vs_target compares with the target's velox for the same metric; the goal applies to the Total only."""
+    cfg, store = _cfg(), store_for(_cfg())
+    view = _board_view(cfg, store)
+    metric = request.args.get("metric") or "total"
+    if metric not in aggregate.METRICS:
+        return _errors(400, "metric: total or q1..q22")
+    tab, flt, target, target_derived = view["tab"], view["filter"], view["target"], view["target_derived"]
+    target_velox = None if target_derived is None else aggregate.metric_values(target_derived, metric)["velox_ms"]
+    window = {k: flt.pop(k) for k in ("from", "to") if k in flt}
+    timeline, heroes = aggregate.best_so_far(_filtered(view["rows"], flt, view["tokens"]), metric)
+    day = lambda r: r["derived"]["finished_at"][:10]
+    inside = lambda r: window.get("from", "") <= day(r) and ("to" not in window or day(r) <= window["to"])
+    points = [r for r in timeline if inside(r)]
+    entering = [h for h in heroes if "from" in window and day(h) < window["from"]][-1:]
+    shown = entering + [h for h in heroes if inside(h)]
+    hero_ids = {h["run_id"] for h in heroes}
+
+    def values_of(r):
+        return _with_vs_target(aggregate.metric_values(r["derived"], metric), target_velox)
+
+    out_heroes, previous = [], None
+    for h in shown:
+        values = values_of(h)
+        out_heroes.append({"run_id": h["run_id"], "url": _url(h["run_id"]), "finished_at": h["derived"]["finished_at"],
+                           "t": _epoch_ms(h["derived"]["finished_at"]), "xflare_ms": values["xflare_ms"],
+                           "y": as_float(values["xflare_ms"]), "vs_target": values["vs_target"],
+                           "config_label": cut(h["derived"]["config_label"]),
+                           "basis": basis_view(h["attribution"]["basis"]),
+                           "basis_short": short_basis(basis_view(h["attribution"]["basis"])),
+                           "report_url": h["attribution"]["report_url"], "entering": bool(entering) and h is entering[0],
+                           "delta_pct": previous and _delta_pct(
+                               values["xflare_ms"], aggregate.metric_values(previous["derived"], metric)["xflare_ms"])})
+        previous = h
+    point_ms = lambda r: aggregate.metric_values(r["derived"], metric)["xflare_ms"]
+    return jsonify({
+        "sf": tab["sf"], "codec": tab["codec"], "metric": metric, "filter": {**flt, **window},
+        # What vs_target compares with: the target's velox for this metric; its goal speaks of the Total only.
+        "target": target and {"run_id": target["run_id"], "url": target["url"], "source": target["source"],
+                              "problem": target["problem"], "velox_ms": target_velox,
+                              "goal": target["goal"] if metric == "total" else None},
+        "points": [{"run_id": r["run_id"], "url": _url(r["run_id"]), "finished_at": r["derived"]["finished_at"],
+                    "t": _epoch_ms(r["derived"]["finished_at"]), "xflare_ms": point_ms(r),
+                    "y": as_float(point_ms(r)), "hero": r["run_id"] in hero_ids}
+                   for r in points[-HISTORY_POINTS:]],
+        "heroes": out_heroes[-HISTORY_HEROES:],
+        "truncated": len(points) > HISTORY_POINTS or len(out_heroes) > HISTORY_HEROES,
+    })
+
+
+@bp.post("/api/leaderboard/prs/<owner>/<name>/<number>/check")
+def api_pr_check(owner, name, number):
+    """A9: the PR workflow's evidence, sent by the skill after it read the PR body: which run ids the body lists."""
+    refused = _same_site_json()
+    if refused:
+        return refused
+    repo = parse_repo(f"{owner}/{name}")
+    n = int(number) if number.isdigit() and len(number) <= 10 else 0
+    if repo is None or not 1 <= n <= 2 ** 31 - 1:
+        return _errors(404, "unknown PR")
+    doc = _json_object()
+    actor, run_ids, sha, source = (doc.get(k) for k in ("actor", "run_ids", "body_sha256", "source"))
+    errors = []
+    if not isinstance(actor, str) or not actor.strip() or len(actor.strip()) > ACTOR_CHARS:
+        errors.append(f"actor: non-empty string of at most {ACTOR_CHARS} characters")
+    if not (isinstance(run_ids, list) and len(run_ids) <= CHECK_RUN_IDS
+            and all(isinstance(x, str) and UUID4_RE.fullmatch(x) for x in run_ids)):
+        errors.append(f"run_ids: a list of at most {CHECK_RUN_IDS} run ids")
+    if sha is not None and not (isinstance(sha, str) and len(sha) == 64 and all(c in "0123456789abcdef" for c in sha)):
+        errors.append("body_sha256: 64 lowercase hex or null")
+    if source is not None and not (isinstance(source, str) and 0 < len(source) <= 64):
+        errors.append("source: a string of at most 64 characters or null")
+    if errors:
+        return _errors(400, *errors)
+    check = store_for(_cfg()).record_check(repo, n, sorted(set(run_ids)), sha, source, actor.strip())
+    return jsonify(_check_view(check))
+
+
+def _check_view(check: dict | None) -> dict | None:
+    if check is None:
+        return None
+    return {"repo": check["repo"], "number": check["number"], "listed_count": len(check["run_ids"]),
+            "body_sha256": check["body_sha256"], "source": check["source"] and cut(check["source"]),
+            "checked_by": cut(check["checked_by"]), "checked_at": check["checked_at"]}
+
+
+def _completion(row: dict, checks: dict) -> dict | None:
+    """A9: the PR workflow of a run with a PR set is complete when every current member's latest body check lists
+    the run; a member never checked or not listing it keeps it pending. Status only: it never gates."""
+    basis = row["attribution"]["basis"]
+    if basis is None or basis["kind"] != "pr":
+        return None
+    members = []
+    for m in basis["prs"]:
+        check = checks.get((m["repo"], m["number"]))
+        status = "not checked" if check is None else "listed" if row["run_id"] in check["run_ids"] else "not listed"
+        members.append({"key": pr_key(m["repo"], m["number"]), "label": pr_label(m["repo"], m["number"]),
+                        "status": status, "checked_at": check and check["checked_at"]})
+    return {"complete": all(m["status"] == "listed" for m in members), "members": members}
+
+
+def _member_checks(store, rows: list[dict]) -> dict:
+    return store.checks((m["repo"], m["number"]) for r in rows for m in
+                        ((r["attribution"]["basis"] or {}).get("prs") or []))
+
+
 @bp.get("/api/leaderboard/board")
 def api_board():
     cfg = _cfg()
     store = store_for(cfg)
-    all_rows = store.list_runs()
-    tab_list = tabs(cfg, [r["derived"] for r in all_rows])
-    tab = _select_tab(tab_list)
+    view = _board_view(cfg, store)
+    tab, tab_list, flt, tokens, pin = view["tab"], view["tabs"], view["filter"], view["tokens"], view["pin"]
+    target, target_derived, rows = view["target"], view["target_derived"], view["rows"]
     metric = request.args.get("metric") or "total"
     if metric not in aggregate.METRICS:
         return _errors(400, "metric: total or q1..q22")
@@ -591,15 +993,7 @@ def api_board():
         top = 10
     if top not in TOP_CHOICES:
         top = 10
-    flt, tokens = _filter(default_filter(cfg)), _tokens()
-    # The tab consumes the codec: it is not a filter of the board.
-    for params in (flt, tokens):
-        params.pop("codec", None)
-    pin = _pin(store.get_target(tab["sf"], tab["codec"]), tab["sf"], tab["codec"])
-    target, target_derived = _effective_target(store, tab["sf"], tab["codec"], pin,
-                                               {r["run_id"]: r for r in all_rows})
     target_velox = None if target_derived is None else aggregate.metric_values(target_derived, metric)["velox_ms"]
-    rows = [r for r in all_rows if aggregate.tab_of(r["derived"]) == (tab["sf"], tab["codec"])]
     chosen = _filtered(rows, flt, tokens)
     ranked = aggregate.rank(chosen, metric)
     facets, facets_truncated = _facets(_facet_values(rows))
@@ -626,7 +1020,7 @@ def api_board():
         "default_filter": default_filter(cfg),
         "facets": facets,
         "facets_truncated": facets_truncated,
-        "hero": _hero(hero, None if target_derived is None else target_derived["totals"]["velox_ms"]),
+        "hero": _hero(hero, _total_velox(target_derived)),
         "target": target,
         "target_pin": pin,
         "hero_fallback": hero_fallback,
@@ -647,7 +1041,7 @@ def api_board():
 @bp.after_request
 def _name_script(resp):
     # Every board answer, errors included: a stale page must not act on a 400 or 503 either.
-    if request.endpoint == "leaderboard.api_board":
+    if request.endpoint in ("leaderboard.api_board", "leaderboard.api_history", "leaderboard.api_prsets"):
         resp.headers[_SCRIPT_HEADER] = _asset_version(_BOARD_SCRIPT)
     return resp
 
@@ -796,10 +1190,15 @@ def run_page(run_id):
     repeats = sorted(manifest["repeats"], key=lambda r: r["index"])
     sf, codec = aggregate.tab_of(d)
     pin = _pin(store.get_target(sf, codec), sf, codec)
+    history = _history("run", run_id)
     return render_template(
         "leaderboard_run.html",
         benchmark=cfg, row=row, d=d, meta=row["meta"] or {},
         m=manifest, summary=_run_summary(row),
+        # A9: basis, report URL, the PR workflow's status and the edit history (with restore) of this run.
+        attribution=history, completion=_completion(row, _member_checks(store, [row])),
+        edit_data={"run_id": run_id, "revision": history["revision"], "basis": row["attribution"]["basis"],
+                   "report_url": history["report_url"], "default_repo": DEFAULT_REPO},
         # A6: the run page's notice for a shared-application run (stored and listed, never ranked).
         shared_reason=aggregate.SHARED_REASON if d["config"]["application_mode"] == "shared" else None,
         per_query=per_query,
@@ -890,10 +1289,50 @@ def _params(manifest: dict, meta: dict, derived: dict, maps: dict[str, dict]) ->
     return {k: v if isinstance(v, tuple) else (text[k], text[k]) for k, v in p.items()}
 
 
+@bp.get(f"/b/{BENCH_ID}/prset")
+def prset_page():
+    """A9: one PR set: its members (GitHub links, body checks), its report URL with edit and history, and its runs."""
+    members = parse_prset_key(request.args.get("prset"))
+    if members is None:
+        abort(404)
+    key = prset_key(members)
+    detail, history = _prset_detail(key), _history("prset", key)
+    return render_template("leaderboard_prset.html", benchmark=_cfg(), key=key, detail=detail, attribution=history,
+                           edit_data={"prset": key, "revision": history["revision"],
+                                      "report_url": history["report_url"]})
+
+
+def _prset_runs(keys: list[str]) -> list[tuple[str, str]]:
+    """Compare by PR set (A9): each set's representative, its best total-eligible run under the board's tab and
+    filter (as the PR-set list shows it), as (run id, set label). 404 names a set without one."""
+    cfg = _cfg()
+    view = _board_view(cfg, store_for(cfg))
+    chosen = _filtered(view["rows"], view["filter"], view["tokens"])
+    out = []
+    for key in keys:
+        best = aggregate.rank([r for r in chosen if _prset_of(r) == key], "total")
+        if not best:
+            abort(404, description=f"no total-eligible run of PR set {cut(key)} on SF-{view['tab']['label']} "
+                                   "under this filter")
+        out.append((best[0]["run_id"], basis_view(best[0]["attribution"]["basis"])["label"]))
+    return out
+
+
 @bp.get(f"/b/{BENCH_ID}/compare")
 def compare_page():
     cfg = _cfg()
-    ids = list(dict.fromkeys(x for x in (request.args.get("runs") or "").split(",") if x))
+    labels = {}
+    if request.args.get("prsets") is not None:
+        if request.args.get("runs") is not None:
+            abort(400, description="compare takes ?runs= or ?prsets=, not both")
+        sets = [parse_prset_key(x) for x in request.args["prsets"].split(",") if x]
+        keys = list(dict.fromkeys(prset_key(m) for m in sets if m is not None))
+        if None in sets or not 2 <= len(keys) <= 4:
+            abort(400, description="compare takes 2 to 4 distinct PR set keys: ?prsets=k1,k2[,k3,k4]")
+        resolved = _prset_runs(keys)
+        ids, labels = [run_id for run_id, _ in resolved], dict(resolved)
+    else:
+        ids = list(dict.fromkeys(x for x in (request.args.get("runs") or "").split(",") if x))
     if not 2 <= len(ids) <= 4 or not all(UUID4_RE.fullmatch(x) for x in ids):
         abort(400, description="compare takes 2 to 4 distinct run ids: ?runs=a,b[,c,d]")
     store = store_for(cfg)
@@ -905,19 +1344,11 @@ def compare_page():
         manifest = store.load_manifest(run_id)
         maps = _effective_maps(manifest)
         runs.append({"row": row, "d": row["derived"], "summary": _run_summary(row), "maps": maps,
+                     "set_label": labels.get(run_id),
                      "params": _params(manifest, row["meta"] or {}, row["derived"], maps)})
     base = runs[0]["d"]
 
-    def delta(v, b):
-        """Exact Δ% of v against b; +inf when it is past float range, which
-        lb_pct prints as "out of range"."""
-        if v is None or not b:
-            return None
-        try:
-            return float((Fraction(v) - Fraction(b)) * 100 / Fraction(b))
-        except OverflowError:
-            return math.inf
-
+    delta = _delta_pct
     queries = []
     for q in aggregate.QUERY_IDS:
         cells = [r["d"]["per_query"][str(q)] for r in runs]
