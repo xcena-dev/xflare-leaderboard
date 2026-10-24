@@ -175,9 +175,10 @@ details summary { cursor: pointer; font-size: var(--text-sm); font-weight: 600; 
 .lb-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; vertical-align: middle; max-width: 100%; }
 /* A chip's label may be a 100-character repository name: it breaks where it would run past its cell or row (the
    tooltip keeps it whole), but a short label like "gluten#88" never shrinks to one character a line (break-word keeps
-   a table cell's minimum at the whole word, where "anywhere" would not). */
+   a table cell's minimum at the whole word, where "anywhere" would not). inline-block, not inline-flex: in a flex box
+   the label is a flex item whose minimum is its whole word, so break-word would never break it. */
 .lb-chip {
-  display: inline-flex; align-items: center; padding: 0 7px; border-radius: var(--radius-sm);
+  display: inline-block; vertical-align: middle; padding: 0 7px; border-radius: var(--radius-sm);
   font: 600 var(--text-xs)/1.7 var(--mono); white-space: normal; overflow-wrap: break-word; text-decoration: none;
   max-width: 100%; min-width: 0; text-align: left;
   background: var(--accent-soft); color: var(--accent-text); border: 1px solid transparent;

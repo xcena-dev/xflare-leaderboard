@@ -3824,6 +3824,9 @@ class TestA9Styles(unittest.TestCase):
         # break-word, not anywhere: a table cell keeps whole short labels on one line (the demo's PR-set members).
         self.assertEqual((chip["white-space"], chip["overflow-wrap"], chip["max-width"]), ("normal", "break-word", "100%"))
         self.assertEqual(self.rules[".lb-chip-pair"]["display"], "inline-flex")      # a chip and its ↗ wrap as one
+        # Round 4: in an inline-flex chip the label is a flex item that break-word never breaks (a 100-character name
+        # ran past a 390 px page); the chip must be a block box for break-word to apply.
+        self.assertEqual(chip["display"], "inline-block")
         self.assertEqual(self.rules[".lb-chips"]["max-width"], "100%")
         pr = self.rules[".lb-pr-filter"]
         self.assertEqual((pr["flex-wrap"], pr["max-width"]), ("wrap", "100%"))
@@ -4223,6 +4226,76 @@ class TestA9Round3(A9Case):
         href = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1))
         query = href.split("?", 1)[1]
         self.assertEqual(len(self.board("?" + query)["rows"]), 1)
+        # Round 4: on the set's own tab, wherever the first tab is.
+        self.submit(basis=prs(R), sf="1000")
+        self.submit()                                                                   # SF-100 has other runs
+        page = self.c.get(f"{LB}/prset?prset={quote('facebookincubator/velox#12')}").get_data(as_text=True)
+        query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
+        board = self.board("?" + query)
+        self.assertEqual((board["sf"], len(board["rows"])), ("1000", 1))
+
+    def test_a_default_filter_on_basis_keeps_the_prset_page(self):
+        """Round 4: a configured default filter naming `basis` does not break the PR-set page's board link."""
+        self.app.extensions["leaderboard_cfg"]["default_filter"] = {"executors": 4, "executor_cores": 6, "basis": "main"}
+        self.submit(basis=prs(P))
+        r = self.c.get(f"{LB}/prset?prset={quote('xcena-dev/xflare-analytics#1561')}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("basis=prset:xcena-dev/xflare-analytics%231561", r.get_data(as_text=True))
+
+
+class TestA9Round4(A9Case):
+    """Round-4 review: compare by set from one read, and PR-set tab boundaries, orphaned Reports, 2-4 sets."""
+
+    def test_compare_by_set_shows_the_rows_it_chose(self):
+        a = self.submit(basis=prs({"repo": "a/b", "number": 1}), elapsed=flat_elapsed(100))
+        self.submit(basis=prs({"repo": "a/b", "number": 2}), elapsed=flat_elapsed(200))
+        real = lb_store.Store.list_runs
+
+        def list_then_edit(store, *args, **kw):
+            rows = real(store, *args, **kw)
+            store.edit("run", a, "basis", MAIN, "other@x", 1)                         # lands after the choice
+            lb_store.Store.list_runs = real
+            return rows
+
+        with mock.patch.object(lb_store.Store, "list_runs", list_then_edit):
+            page = self.c.get(f"{LB}/compare?prsets=a%2Fb%231,a%2Fb%232").get_data(as_text=True)
+        self.assertNotIn("main · latest #1564", page)                               # the basis it was chosen by
+        self.assertIn("b#1", page)
+
+    def test_prset_tabs_are_separate(self):
+        on100 = self.submit(basis=prs(P), elapsed=flat_elapsed(300))
+        on1000 = self.submit(basis=prs(P), elapsed=flat_elapsed(900), sf="1000")
+        other = self.submit(basis=prs(Q), elapsed=flat_elapsed(400), sf="1000")
+        key = "xcena-dev/xflare-analytics#1561"
+        lst = lambda q: {x["prset"]: x["best"]["run_id"] for x in self.c.get(f"/api/leaderboard/prsets?{q}").get_json()["prsets"]}
+        self.assertEqual(lst("sf=100"), {key: on100})
+        self.assertEqual(lst("sf=1000"), {key: on1000, "apache/gluten#88": other})
+        runs = self.c.get(f"/api/leaderboard/prset?prset={quote(key)}").get_json()["runs"]
+        self.assertEqual([(r["run_id"], r["tab"]["sf"], r["place"]) for r in runs], [(on100, "100", 1), (on1000, "1000", 1)])
+        page = self.c.get(f"{LB}/compare?prsets={quote(key)},{quote('apache/gluten#88')}&sf=1000").get_data(as_text=True)
+        self.assertIn(on1000[:8], page)
+        self.assertNotIn(on100[:8], page)
+
+    def test_an_orphaned_sets_report_stays_restorable(self):
+        run = self.submit(basis=prs(P))
+        key = quote("xcena-dev/xflare-analytics#1561")
+        post = lambda body: self.c.post(f"/api/leaderboard/prset?prset={key}", json={"actor": "a", **body})
+        self.assertEqual(post({"expected_revision": 0, "report_url": "https://x.example/set"}).status_code, 200)
+        self.edit(run, "basis", {"actor": "a", "expected_revision": 1, "basis": None})  # no run claims it now
+        self.assertEqual(post({"expected_revision": 1, "report_url": None}).status_code, 200)
+        api = self.c.get(f"/api/leaderboard/prset?prset={key}").get_json()
+        self.assertEqual((api["runs"], api["report_url"], len(api["history"])), ([], None, 2))
+        r = post({"expected_revision": 2, "restore": api["history"][1]["event_id"]})
+        self.assertEqual((r.get_json()["report_url"], r.get_json()["revision"]), ("https://x.example/set", 3))
+        self.assertIn('href="https://x.example/set"', self.c.get(f"{LB}/prset?prset={key}").get_data(as_text=True))
+
+    def test_compare_takes_two_to_four_sets(self):
+        keys = []
+        for n in range(1, 6):
+            self.submit(basis=prs({"repo": "a/b", "number": n}), elapsed=flat_elapsed(100 * n))
+            keys.append(quote(f"a/b#{n}"))
+        status = lambda k: self.c.get(f"{LB}/compare?prsets={','.join(keys[:k])}").status_code
+        self.assertEqual([status(k) for k in range(1, 6)], [400, 200, 200, 200, 400])
 
 
 if __name__ == "__main__":

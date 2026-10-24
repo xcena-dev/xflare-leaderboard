@@ -30,7 +30,7 @@ _END = object()
 # ASCII digits only: \d would also accept e.g. U+0661, which later time parsing rejects.
 _TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z")
 _HEX40 = re.compile(r"[0-9a-f]{40}")
-_HEX64 = re.compile(r"[0-9a-f]{64}")
+_HEX64 = HEX64_RE = re.compile(r"[0-9a-f]{64}")  # use fullmatch
 UUID4_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")  # use fullmatch
 SCALE_FACTOR_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 # A9: a run's basis (a PR set, or main) and the report URLs kept beside runs and PR sets.

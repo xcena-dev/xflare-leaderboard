@@ -29,7 +29,7 @@ from .display import (BADGE_CLASS, BENCH_ID, BUDGET, DEFAULT_CODEC, EFFECTIVE_IT
                       as_float, badge_class, basis_view, cut, default_filter, facet_option, facet_token,
                       fallback_notice, norm_date, pr_label, tab_label, tab_note, tabs)
 from .schema import (APPLICATION_SETTINGS, CODECS, DEFAULT_REPO, MANIFEST_SCHEMA, MAX_BODY_BYTES,
-                     MAX_REPORT_URL_CHARS, SCALE_FACTOR_RE, UUID4_RE, BadJSON, normalize_basis, parse_json_strict, parse_prset_key,
+                     HEX64_RE, MAX_REPORT_URL_CHARS, PR_NUMBER_MAX, SCALE_FACTOR_RE, UUID4_RE, BadJSON, normalize_basis, parse_json_strict, parse_prset_key,
                      parse_repo, parse_report_url, pr_key, prset_key, validate_basis, validate_envelope,
                      validate_manifest)
 from .store import StorageUnavailable, store_for
@@ -985,7 +985,7 @@ def api_pr_check(owner, name, number):
         return refused
     repo = parse_repo(f"{owner}/{name}")
     n = int(number) if _DIGITS.fullmatch(number) else 0
-    if repo is None or not 1 <= n <= 2 ** 31 - 1:
+    if repo is None or not 1 <= n <= PR_NUMBER_MAX:
         return _errors(404, "unknown PR")
     doc = _json_object()
     actor, run_ids, sha, source = (doc.get(k) for k in ("actor", "run_ids", "body_sha256", "source"))
@@ -995,7 +995,7 @@ def api_pr_check(owner, name, number):
     if not (isinstance(run_ids, list) and len(run_ids) <= CHECK_RUN_IDS
             and all(isinstance(x, str) and UUID4_RE.fullmatch(x) for x in run_ids)):
         errors.append(f"run_ids: a list of at most {CHECK_RUN_IDS} run ids")
-    if sha is not None and not (isinstance(sha, str) and len(sha) == 64 and all(c in "0123456789abcdef" for c in sha)):
+    if sha is not None and not (isinstance(sha, str) and HEX64_RE.fullmatch(sha)):
         errors.append("body_sha256: 64 lowercase hex or null")
     if source is not None and not (isinstance(source, str) and 0 < len(source) <= 64):
         errors.append("source: a string of 1 to 64 characters or null")
@@ -1357,17 +1357,20 @@ def prset_page():
         abort(404)
     key = prset_key(members)
     detail, history = _prset_detail(key), _page_history("prset", key)[1]
-    # "Only this set" on the board: the default filter lifted (sent empty), as the board's own reset does.
-    board = url_for("leaderboard.board_page", basis=PRSET_PREFIX + key, **{k: "" for k in default_filter(_cfg())})
+    # "Only this set" on the board: on the tab of its first listed run, the default filter lifted (sent empty).
+    tab = {"sf": detail["runs"][0]["tab"]["sf"], "codec": detail["runs"][0]["tab"]["codec"]} if detail["runs"] else {}
+    board = url_for("leaderboard.board_page",
+                    **{**{k: "" for k in default_filter(_cfg())}, **tab, "basis": PRSET_PREFIX + key})
     return render_template("leaderboard_prset.html", benchmark=_cfg(), key=key, detail=detail, attribution=history,
                            board_url=board,
                            edit_data={"prset": key, "revision": history["revision"],
                                       "report_url": history["report_url"]})
 
 
-def _prset_runs(keys: list[str]) -> list[tuple[str, str]]:
+def _prset_runs(keys: list[str]) -> list[tuple[dict, str]]:
     """Compare by PR set (A9): each set's representative, its best total-eligible run under the board's tab and
-    filter (as the PR-set list shows it), as (run id, set label). 404 names a set without one."""
+    filter (as the PR-set list shows it), as (row, set label): the page shows these rows, so a column's heading, basis
+    and numbers come from the read that chose it. 404 names a set without one."""
     cfg = _cfg()
     try:
         view = _board_view(cfg, store_for(cfg))
@@ -1380,14 +1383,14 @@ def _prset_runs(keys: list[str]) -> list[tuple[str, str]]:
         if not best:
             abort(404, description=f"no total-eligible run of PR set {cut(key)} on SF-{view['tab']['label']} "
                                    "under this filter")
-        out.append((best[0]["run_id"], basis_view(best[0]["attribution"]["basis"])["label"]))
+        out.append((best[0], basis_view(best[0]["attribution"]["basis"])["label"]))
     return out
 
 
 @bp.get(f"/b/{BENCH_ID}/compare")
 def compare_page():
     cfg = _cfg()
-    labels = {}
+    labels, chosen_rows = {}, {}
     if request.args.get("prsets") is not None:
         if request.args.get("runs") is not None:
             abort(400, description="compare takes ?runs= or ?prsets=, not both")
@@ -1396,7 +1399,9 @@ def compare_page():
         if None in sets or not 2 <= len(keys) <= 4:
             abort(400, description="compare takes 2 to 4 distinct PR set keys: ?prsets=k1,k2[,k3,k4]")
         resolved = _prset_runs(keys)
-        ids, labels = [run_id for run_id, _ in resolved], dict(resolved)
+        ids = [row["run_id"] for row, _ in resolved]
+        labels = {row["run_id"]: label for row, label in resolved}
+        chosen_rows = {row["run_id"]: row for row, _ in resolved}
     else:
         ids = list(dict.fromkeys(x for x in (request.args.get("runs") or "").split(",") if x))
     if not 2 <= len(ids) <= 4 or not all(UUID4_RE.fullmatch(x) for x in ids):
@@ -1404,7 +1409,7 @@ def compare_page():
     store = store_for(cfg)
     runs = []
     for run_id in ids:
-        row = store.get(run_id)
+        row = chosen_rows.get(run_id) or store.get(run_id)
         if row is None:
             abort(404)
         manifest = store.load_manifest(run_id)
