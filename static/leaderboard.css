@@ -101,25 +101,30 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 .lb-filters .lb-filter-slot:empty { display: none; }
 .lb-filters select { max-width: 220px; }
 
-/* Column widths for the fixed layout (cells are border-box: padding included); Submitter takes what is left.
+/* Column widths for the fixed layout (cells are border-box: padding included); Submitter takes what is left and
+   cuts a long address (its tooltip keeps it whole).
    A narrower page scrolls the table. */
-.lb-board { min-width: 1580px; }
+.lb-board { min-width: 1334px; }
 .lb-board th, .lb-board td { padding-left: 8px; padding-right: 8px; }
-.lb-board th:nth-child(1) { width: 52px; }
-.lb-board th:nth-child(2) { width: 172px; }
-.lb-board th:nth-child(3) { width: 160px; }
+/* 11 columns that fit a 1440 px screen (≈1334 px for the table): compare box in the rank cell, devices under the
+   run, mode and engines under the config, repeats as the xN badge. The first and last cells carry the panel's
+   wider edge padding. */
+.lb-board th:nth-child(1) { width: 70px; }
+.lb-board th:nth-child(2) { width: 148px; }
+.lb-board th:nth-child(3) { width: 248px; }  /* two chips with their ↗ and "+N" on one line */
 .lb-board th:nth-child(4) { width: 96px; }   /* "↗ Report" whole, not cut to "↗ Rep…" */
-.lb-board th:nth-child(5), .lb-board th:nth-child(6) { width: 80px; }
+.lb-board th:nth-child(5), .lb-board th:nth-child(6) { width: 75px; }
 .lb-board th:nth-child(7) { width: 94px; }
-.lb-board th:nth-child(8) { width: 84px; }
-.lb-board th:nth-child(9) { width: 92px; }
-.lb-board th:nth-child(10) { width: 86px; }
-.lb-board th:nth-child(11) { width: 108px; }
-.lb-board th:nth-child(12) { width: 72px; }
-.lb-board th:nth-child(14) { width: 136px; }
-.lb-board th:nth-child(15) { width: 68px; }
-.lb-board th:nth-child(16) { width: 100px; }
-.lb-board td:nth-child(3), .lb-board td:nth-child(14) { white-space: normal; }
+.lb-board th:nth-child(8) { width: 170px; }  /* "per-engine · velox, xflare" on one line */
+.lb-board th:nth-child(10) { width: 170px; } /* "x3 reproducible", then "offload:offloaded": two lines */
+.lb-board th:nth-child(11) { width: 88px; }
+.lb-board td:nth-child(10) { white-space: normal; }
+.lb-board td.lb-rank { white-space: nowrap; }
+.lb-board td.lb-rank input { margin: 0 8px 0 0; vertical-align: -2px; }
+.lb-board td.lb-basis-cell .lb-chips { flex-wrap: nowrap; }
+.lb-board td.lb-config-cell { white-space: normal; }
+.lb-board .lb-sub { overflow: hidden; text-overflow: ellipsis; }   /* the run cell does not wrap */
+.lb-sub { display: block; font-size: var(--text-xs); color: var(--text-3); }
 .lb-board td a.lb-run { font-weight: 550; }
 .lb-board .lb-btn { height: 26px; padding: 0 9px; font-size: var(--text-xs); }
 .lb-table { table-layout: auto; }
@@ -187,7 +192,7 @@ details summary { cursor: pointer; font-size: var(--text-sm); font-weight: 600; 
 }
 a.lb-chip:hover { border-color: var(--accent); }
 .lb-chip-main { background: var(--surface-3); color: var(--text-2); font-family: var(--font); }
-.lb-chip-more { background: transparent; color: var(--text-3); }
+.lb-chip-more { background: transparent; color: var(--text-3); white-space: nowrap; flex: none; }
 .lb-report { white-space: nowrap; font-weight: 550; }
 button.lb-chip { cursor: pointer; }
 /* A filtering chip and its GitHub arrow wrap as one. */

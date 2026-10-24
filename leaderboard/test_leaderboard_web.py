@@ -2262,11 +2262,12 @@ class TestApplicationMode(WebCase):
                                  [run_id], query)
         page = self.c.get(LB).get_data(as_text=True)
         self.assertIn('data-key="application_mode"', page)
-        self.assertIn("<th>Mode</th>", page)
+        self.assertNotIn("<th>Mode</th>", page)                            # shown under the config instead
         fetch = self.c.get("/api/leaderboard/board").get_data(as_text=True)
         out = run_page_js("board", data=self.page_data(), fetch=fetch, slots=["application_mode"])
-        # one Mode cell for the one row, plus one filter option per mode
-        self.assertEqual((out["texts"].count("shared"), out["texts"].count("per-engine")), (1, 2))
+        self.assertIn("per-engine · velox, xflare", out["texts"])
+        # one filter option per mode
+        self.assertEqual((out["texts"].count("shared"), out["texts"].count("per-engine")), (1, 1))
         self.assertIn(facet_token("per-engine"), out["values"])
         self.assertIn(facet_token("shared"), out["values"])
 
@@ -2896,11 +2897,12 @@ class TestTabs(WebCase):
                          [(both, "velox,xflare"), (alone, "xflare")])
         self.assertEqual([r["run_id"] for r in self.board("?engines=xflare")["rows"]], [alone])
         self.assertEqual([o["label"] for o in b["facets"]["engines"]], ["velox,xflare", "xflare"])
-        self.assertIn("<th>Engines</th>", self.c.get(LB).get_data(as_text=True))
+        self.assertNotIn("<th>Engines</th>", self.c.get(LB).get_data(as_text=True))   # under the config instead
         with self.subTest("page script"):
             out = run_page_js("board", data=self.page_data(), fetch=json.dumps(b))
-            self.assertIn("velox, xflare", out["texts"])
-            self.assertIn("xflare", out["texts"])
+            self.assertIn("per-engine · velox, xflare", out["texts"])
+            self.assertIn("per-engine · xflare", out["texts"])
+            self.assertEqual(sum(t.startswith("device ") for t in out["texts"]), 2)   # under each run
         self.assertEqual(b["rows"][1]["value"]["velox_ms"], None)
 
     def test_dry_run_says_which_runs_create_their_tab(self):
@@ -3523,11 +3525,12 @@ class TestA9BoardScript(WebCase):
         out = self.drive([{"answer": 0, "with": "board"}], self.responses)
         texts = [r["text"][2] for r in out["boardRows"]]
         self.assertIn("main · latest #1564", texts)
-        five = next(r for r in out["boardRows"] if "+2" in r["text"][2])
-        self.assertEqual(five["text"][2:4], ["b#1 ↗ b#2 ↗ b#3 ↗ +2", "↗ Report"])   # three chips, the rest counted
+        five = next(r for r in out["boardRows"] if "+3" in r["text"][2])
+        self.assertEqual(five["text"][2:4], ["b#1 ↗ b#2 ↗ +3", "↗ Report"])   # two chips on one line, the rest counted
         self.assertIn("https://claude.ai/artifact/x", five["hrefs"])
         self.assertEqual([h for h in five["hrefs"] if "github" in h],
-                         [f"https://github.com/a/b/pull/{n}" for n in (1, 2, 3)])    # each chip's ↗
+                         [f"https://github.com/a/b/pull/{n}" for n in (1, 2)])    # each chip's ↗
+        self.assertIn("a/b#3\na/b#4\na/b#5", five["titles"])                       # "+3" names the rest
         self.assertEqual([r["text"][3] for r in out["boardRows"]].count("—"), 2)
 
     def test_only_github_pr_urls_become_hrefs(self):
@@ -3831,7 +3834,7 @@ class TestA9BoardScript(WebCase):
         hist["heroes"][0]["prset_report_url"] = "https://example.com/pq"
         out = self.drive(self.HISTORY_OPEN, {**self.responses, "board": json.dumps(board), "hist": json.dumps(hist)})
         rows = {r["text"][2]: r for r in out["boardRows"]}
-        five = next(r for k, r in rows.items() if "+2" in k)
+        five = next(r for k, r in rows.items() if "+3" in k)
         pq = next(r for k, r in rows.items() if "gluten" in k)
         main = rows["main · latest #1564"]
         self.assertEqual((five["text"][3], pq["text"][3], main["text"][3]), ("↗ Report", "↗ Report", "—"))
@@ -3899,7 +3902,7 @@ class TestA9Styles(unittest.TestCase):
             if m and "width" in decls:
                 widths[int(m.group(1))] = int(decls["width"].removesuffix("px"))
         self.assertGreaterEqual(widths[4], 96)
-        self.assertNotIn(13, widths)
+        self.assertNotIn(12, widths)                                   # 11 columns: devices sit under the run
         self.assertEqual(int(self.rules[".lb-board"]["min-width"].removesuffix("px")) - sum(widths.values()), 100)
 
     def test_wrap_cells_keep_a_width_in_auto_tables(self):

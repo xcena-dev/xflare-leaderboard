@@ -282,9 +282,9 @@ Computed on the server, never taken from the client.
   `offload:<status>` (the evidence status of the completed repeats, whole; `offload:mixed` when they disagree),
   `spark conf` (A5: the Spark settings state is `custom`), `shared application` (A6: informational; the gate is the
   rule above). Bundle and resources are columns and filters, never separate boards.
-- A4: the application mode is part of the config label, a board column (Mode) and a filter, never a board split,
-  and the default filter does not narrow it. (A4's "both modes rank together" is superseded by A6: only
-  `per-engine` runs rank, so the Mode column shows `per-engine`; filtering to `shared` leaves the board empty and
+- A4: the application mode is part of the config label, shown on the board under each run's config, and a filter,
+  never a board split, and the default filter does not narrow it. (A4's "both modes rank together" is superseded by A6:
+  only `per-engine` runs rank, so the board shows `per-engine` there; filtering to `shared` leaves the board empty and
   the page lists those runs below it.)
 - A5: every run has a Spark settings state, `custom` when `run.spark_conf` is a non-empty object and `default` when
   it is `{}`. It never gates (§4 eligibility, order and hero are unchanged) and never splits a board: a `custom` run
@@ -393,9 +393,12 @@ passes 65,536 characters (a cut command would run something else), or argv canno
 (`repro.py`) and stored with its derived data; the run page shows that stored copy and the board's Repro column
 copies it on click (a run without one links to its page). Copying also works on a plain-http origin.
 
-On the board, the Run column shows when each run finished (UTC) and links to its page; the config cell shows only
+On the board, the Run column shows when each run finished (UTC) and links to its page, with its devices on a second
+line; the config cell shows only
 the resources (e.g. `4×6 64g`, plus `sp…`/`d…` when set, and ` +conf` for custom Spark settings) and its tooltip
-spells out every config field; the Mode column shows the application mode (always `per-engine` since A6). The Engines column shows the run's engines (A7: `velox, xflare` or `xflare`). Badge
+spells out every config field; a second line under it shows the application mode (always `per-engine` since A6)
+and the run's engines (A7: `velox, xflare` or `xflare`). Repeats are the `xN` badge, and each row's compare box sits in
+its rank cell. Badge
 colours come from one fixed map (`display.BADGE_CLASS`, sent to the board script in the page's data block):
 `reproducible` green; `partial`, `dev bundle`, `spark conf` and `shared application` amber; `booking overlap` red;
 `overlap unknown` and `offload:*` dim. The run and compare pages colour badges the same way.

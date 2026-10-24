@@ -224,6 +224,7 @@
   // A basis as chips: at most `max` PRs plus "+N" (the full set is in the tooltip); with `pick`, each chip is a button
   // that filters by its PR with a small "↗" to it on GitHub beside it, else a link to it on GitHub; main is one chip
   // to its latest PR on GitHub; none is "—".
+  const BOARD_CHIPS = 2;   // board rows show at most this many PRs on one line, then "+N"
   function basisNode(basis, max, pick) {
     const wrap = el('span', 'lb-chips');
     if (!basis) { wrap.appendChild(el('span', 'lb-dim', '—')); return wrap; }
@@ -246,7 +247,11 @@
       pair.appendChild(githubLink(p.url, 'lb-chip-gh', '↗', `${p.key} (GitHub)`));
       wrap.appendChild(pair);
     }
-    if (basis.prs.length > max) wrap.appendChild(el('span', 'lb-chip lb-chip-more', `+${basis.prs.length - max}`));
+    if (basis.prs.length > max) {
+      const more = el('span', 'lb-chip lb-chip-more', `+${basis.prs.length - max}`);
+      more.title = basis.prs.slice(max).map(p => p.key).join('\n');
+      wrap.appendChild(more);
+    }
     return wrap;
   }
   function shortBasis(basis, max) {
@@ -584,7 +589,7 @@
       if (!data.rows.length) {
         const tr = tbody.insertRow();
         const td = tr.insertCell();
-        td.colSpan = 16;
+        td.colSpan = 11;
         td.className = 'lb-empty';
         td.textContent = '이 필터에 순위에 오를 run 이 없습니다.' +
           (data.shared_count ? ' shared application run 은 순위에 오르지 않습니다 — 아래 목록을 보세요.' : '');
@@ -592,34 +597,9 @@
       }
       for (const r of data.rows) {
         const tr = tbody.insertRow();
+        // The rank cell holds the compare box: the board fits a 1440 px screen without a column of its own.
         const rank = tr.insertCell();
-        rank.className = 'num';
-        rank.textContent = r.rank;
-        // A run is told apart by when it finished; the id stays in the link and tooltip.
-        const a = el('a', 'lb-run', fmtTs(r.finished_at));
-        a.href = runHref(cfg.board, r.run_id);
-        a.title = `${r.run_id}\nfinished ${r.finished_at}`;
-        tr.insertCell().appendChild(a);
-        // A9: the basis chips (a click filters by that PR) and the run's Report, else its PR set's.
-        tr.insertCell().appendChild(basisNode(r.basis, cfg.basis_chips, pickPr));
-        tr.insertCell().appendChild(reportLink(r.report_url, r.prset_report_url));
-        for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
-                                          t ? [fmtX(r.value.vs_target),
-                                               t.goal && r.value.vs_target >= t.goal ? 'num lb-goal-met' : 'num',
-                                               `같은 run 의 velox 기준 ${fmtX(r.value.speedup)}`]
-                                            : [fmtX(r.value.speedup), 'num'], [`x${r.repeats}`, 'num'],
-                                          [compactConfig(r.config), null, configText(r.config)],
-                                          [r.config.application_mode ?? '—', null],
-                                          [(r.config.engines ?? '—').replace(',', ', '), null],
-                                          [fmtDevices(r), null],
-                                          [r.submitter ?? '—', null]]) {
-          const td = tr.insertCell();
-          td.textContent = text;
-          if (cls) td.className = cls;
-          if (title) td.title = title;
-        }
-        tr.insertCell().appendChild(badgeList(r.badges, cfg.badge_class));
-        reproCell(tr.insertCell(), r);
+        rank.className = 'num lb-rank';
         const box = el('input');
         box.type = 'checkbox';
         box.checked = selected.has(r.run_id);
@@ -628,7 +608,44 @@
           if (box.checked) selected.add(r.run_id); else selected.delete(r.run_id);
           updateCompare();
         });
-        tr.insertCell().appendChild(box);
+        rank.appendChild(box);
+        rank.appendChild(el('span', null, String(r.rank)));
+        // A run is told apart by when it finished; the id stays in the link and tooltip. Its devices go under it.
+        const a = el('a', 'lb-run', fmtTs(r.finished_at));
+        a.href = runHref(cfg.board, r.run_id);
+        a.title = `${r.run_id}\nfinished ${r.finished_at}`;
+        const runTd = tr.insertCell();
+        runTd.appendChild(a);
+        const dev = el('span', 'lb-sub', `device ${fmtDevices(r)}`);
+        dev.title = dev.textContent;
+        runTd.appendChild(dev);
+        // A9: the basis chips (a click filters by that PR) and the run's Report, else its PR set's.
+        const basisTd = tr.insertCell();
+        basisTd.className = 'lb-basis-cell';
+        basisTd.appendChild(basisNode(r.basis, BOARD_CHIPS, pickPr));
+        tr.insertCell().appendChild(reportLink(r.report_url, r.prset_report_url));
+        for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
+                                          t ? [fmtX(r.value.vs_target),
+                                               t.goal && r.value.vs_target >= t.goal ? 'num lb-goal-met' : 'num',
+                                               `같은 run 의 velox 기준 ${fmtX(r.value.speedup)}`]
+                                            : [fmtX(r.value.speedup), 'num']]) {
+          const td = tr.insertCell();
+          td.textContent = text;
+          if (cls) td.className = cls;
+          if (title) td.title = title;
+        }
+        // The config, and under it the application mode and engines (repeats are the xN badge).
+        const conf = tr.insertCell();
+        conf.className = 'lb-config-cell';
+        conf.title = configText(r.config);
+        conf.appendChild(el('span', null, compactConfig(r.config)));
+        conf.appendChild(el('span', 'lb-sub',
+                            `${r.config.application_mode ?? '—'} · ${(r.config.engines ?? '—').split(',').join(', ')}`));
+        const who = tr.insertCell();
+        who.textContent = r.submitter ?? '—';
+        who.title = who.textContent;
+        tr.insertCell().appendChild(badgeList(r.badges, cfg.badge_class));
+        reproCell(tr.insertCell(), r);
       }
     }
 
