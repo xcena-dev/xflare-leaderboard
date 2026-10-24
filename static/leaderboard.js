@@ -262,7 +262,7 @@
   // The basis as typed into the edit prompt: PRs as `N` (the default repository), `#N`, `owner/name#N` or a GitHub PR
   // URL, separated by spaces or commas; `main <PR>` for a run measured on main (the PR is its latest merged one);
   // empty for none. Returns {value} or {error}.
-  const PR_TOKEN = /^(?:https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/([1-9][0-9]{0,9})\/?|(?:([^#\s/]+\/[^#\s/]+))?#?([1-9][0-9]{0,9}))$/;
+  const PR_TOKEN = /^(?:https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/([1-9][0-9]{0,9})\/?|(?:([^#\s/]+\/[^#\s/]+)#|#)?([1-9][0-9]{0,9}))$/;
   function parseBasis(text, defaultRepo) {
     const tokens = String(text).trim().split(/[\s,]+/).filter(Boolean);
     if (!tokens.length) return { value: null };
@@ -436,9 +436,9 @@
       prBox.hidden = !data.filter.pr;
       if (data.filter.pr) {
         prBox.appendChild(el('span', null, 'PR:'));
-        const chip = el('button', 'lb-chip', `${prLabel(data.filter.pr, cfg.default_repo)} ×`);
+        const chip = el('button', 'lb-chip', `${cutLabel(prLabel(data.filter.pr, cfg.default_repo), cfg.scalar_chars)} ×`);
         chip.type = 'button';
-        chip.title = `${data.filter.pr} — 필터 해제`;
+        chip.title = `${cutLabel(data.filter.pr, cfg.scalar_chars)} — 필터 해제`;
         chip.addEventListener('click', () => { delete state.filter.pr; load(); });
         prBox.appendChild(chip);
       }
@@ -598,7 +598,7 @@
         a.href = runHref(cfg.board, r.run_id);
         a.title = `${r.run_id}\nfinished ${r.finished_at}`;
         tr.insertCell().appendChild(a);
-        // A9: the basis chips (a click filters by that PR) and the run's report.
+        // A9: the basis chips (a click filters by that PR) and the run's Report, else its PR set's.
         tr.insertCell().appendChild(basisNode(r.basis, cfg.basis_chips, pickPr));
         tr.insertCell().appendChild(reportLink(r.report_url, r.prset_report_url));
         for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
@@ -665,9 +665,11 @@
     let generation = 0;
     async function load() {
       const mine = ++generation;
-      // A9: the panels' answers in flight belong to the context this load leaves; none of them may draw.
+      // A9: the panels' answers in flight belong to the context this load leaves; none of them may draw, and a PR-set
+      // selection made there cannot be compared here (the list comes back with the board).
       heroHistoryGen++;
       prsetsGen++;
+      if (selectedSets.size) clearPrsets('');
       // Another tab: the shown history (and its buttons) belongs to the old one.
       if (targetPin && (state.sf !== targetPin.sf || state.codec !== targetPin.codec)) forgetHistory();
       renderTabs();
@@ -762,6 +764,9 @@
     }
     // A board load that draws no new board: the tabs and filter moved on, so the panels' old answers are not theirs.
     function clearPanels() {
+      // A panel request started while the failed load was pending (reopened, re-sorted) belonged to it too.
+      heroHistoryGen++;
+      prsetsGen++;
       clearHistory('board 를 불러오지 못했습니다.');
       clearPrsets('board 를 불러오지 못했습니다.');
     }
@@ -783,8 +788,9 @@
       if (!isCurrent()) return null;
       const served = resp.headers.get('X-Leaderboard-Script');
       if (served ? served !== cfg.script : resp.ok) {
+        // As for the board: draw nothing from it, and leave nothing of this panel's last context either.
         showStatus('서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요.');
-        return null;
+        return { error: '서버가 다른 버전으로 바뀌었습니다.' };
       }
       try { data = await resp.json(); } catch (e) { return isCurrent() ? { error: '불러오지 못했습니다.' } : null; }
       if (!isCurrent()) return null;
@@ -932,7 +938,7 @@
           plugins: {
             legend: { align: 'end', labels: { color: colors.legend, font, boxWidth: 10, boxHeight: 10 } },
             tooltip: { callbacks: { label: c => (c.datasetIndex === 1 && data.heroes[c.dataIndex]
-              ? `${shortBasis(data.heroes[c.dataIndex].basis, 3)} · ${fmtMs(data.heroes[c.dataIndex].xflare_ms)}`
+              ? `${shortBasis(data.heroes[c.dataIndex].basis, cfg.basis_chips)} · ${fmtMs(data.heroes[c.dataIndex].xflare_ms)}`
               : `${new Date(c.parsed.x).toISOString().slice(0, 16)} · ${c.parsed.y}`) } },
           },
         },

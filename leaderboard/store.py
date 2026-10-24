@@ -295,7 +295,7 @@ class Store:
                     if basis is not None:
                         # The claim's actor is the submitter as the envelope names them.
                         self._write_field(conn, "run", manifest["run_id"], "basis", None, _enc(basis),
-                                          envelope["submitter"]["email"] or "submission", 0, now)
+                                          envelope["submitter"]["email"].strip() or "submission", 0, now)
                     status = "created"
                 elif old["content_id"] != cid:
                     status = "conflict"
@@ -344,6 +344,9 @@ class Store:
             derived, meta, receipt = (json.loads(r[k]) for k in ("derived_json", "meta_json", "receipt_json"))
         except ValueError:
             raise StorageUnavailable(f"leaderboard database row is not valid JSON in {self.db_path}") from None
+        # A9: an older binary kept an envelope's basis in the metadata; the run's basis is run_attribution's.
+        if isinstance(meta, dict):
+            meta.pop("basis", None)
         return {
             "run_id": r["run_id"], "content_id": r["content_id"], "sf": r["sf"], "finished_at": r["finished_at"],
             "submitted_at": r["submitted_at"], "updated_at": r["updated_at"], "submitter_email": r["submitter_email"],

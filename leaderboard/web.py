@@ -734,6 +734,14 @@ def _history_with_state(kind: str, subject: str) -> tuple[dict, dict]:
     return state, {**_state_view(kind, subject, state), "history": [_event_view(e) for e in events], "more": more}
 
 
+def _page_history(kind: str, subject: str) -> tuple[dict, dict]:
+    """``_history_with_state`` for a page: a bad ``?before=`` is an HTML 400 there."""
+    try:
+        return _history_with_state(kind, subject)
+    except _BadBody as e:
+        abort(400, description=str(e))
+
+
 def _history(kind: str, subject: str) -> dict:
     return _history_with_state(kind, subject)[1]
 
@@ -780,15 +788,19 @@ def api_set_prset_report():
 
 def _prset_detail(key: str) -> dict:
     """A PR set's members with their latest body checks, and every run that claims exactly this set (withdrawn ones
-    flagged), tab by tab in the tabs' order, each tab's total-eligible runs first in board order with their place."""
+    flagged), tab by tab in the tabs' order, each tab's ranked runs (total-eligible, not withdrawn) first in board order
+    with their place."""
     cfg, store = _cfg(), store_for(_cfg())
     members = parse_prset_key(key)
     rows = [r for r in store.list_runs(include_withdrawn=True) if _prset_of(r) == key]
     checks = store.checks((m["repo"], m["number"]) for m in members)
     view = basis_view({"kind": "pr", "prs": members})
+    by_tab: dict[tuple, list[dict]] = {}
+    for r in rows:
+        by_tab.setdefault(aggregate.tab_of(r["derived"]), []).append(r)
     runs = []
     for tab in tabs(cfg, [r["derived"] for r in rows]):
-        here = [r for r in rows if aggregate.tab_of(r["derived"]) == (tab["sf"], tab["codec"])]
+        here = by_tab.get((tab["sf"], tab["codec"]), [])
         ranked = aggregate.rank(here, "total")
         ranked_ids = {x["run_id"] for x in ranked}
         rest = [r for r in here if r["run_id"] not in ranked_ids]
@@ -807,6 +819,11 @@ def _delta_pct(v, b):
         return float((Fraction(v) - Fraction(b)) * 100 / Fraction(b))
     except OverflowError:
         return math.inf
+
+
+def _json_pct(pct):
+    """A Δ% for a JSON answer: None past float range (JSON has no Infinity; the pages print "—")."""
+    return pct if pct is None or math.isfinite(pct) else None
 
 
 def _board_view(cfg, store) -> dict:
@@ -868,8 +885,8 @@ def api_prsets():
                      "report_url": (reports.get(key) or {}).get("report_url"), "run_count": len(members),
                      "eligible_count": len(ranked), "last_finished_at": last["derived"]["finished_at"],
                      "best": best and _best_view(best, target_velox), "is_hero": best is not None and best is hero,
-                     "vs_hero_pct": best and hero and _delta_pct(best["derived"]["totals"]["xflare_ms"],
-                                                                 hero["derived"]["totals"]["xflare_ms"]),
+                     "vs_hero_pct": best and hero and _json_pct(_delta_pct(best["derived"]["totals"]["xflare_ms"],
+                                                                           hero["derived"]["totals"]["xflare_ms"])),
                      "_order": (best is None, best and aggregate.order_key(best["derived"], "total")),
                      "_recent": aggregate.utc_key(last["derived"]["finished_at"])})
     if sort == "best":
@@ -941,8 +958,8 @@ def api_history():
                            "report_url": h["attribution"]["report_url"],
                            "prset_report_url": h["attribution"]["prset_report_url"],
                            "entering": bool(entering) and h is entering[0],
-                           "delta_pct": previous and _delta_pct(
-                               values["xflare_ms"], aggregate.metric_values(previous["derived"], metric)["xflare_ms"])})
+                           "delta_pct": previous and _json_pct(_delta_pct(
+                               values["xflare_ms"], aggregate.metric_values(previous["derived"], metric)["xflare_ms"]))})
         previous = h
     point_ms = lambda r: aggregate.metric_values(r["derived"], metric)["xflare_ms"]
     return jsonify({
@@ -1230,8 +1247,10 @@ def run_page(run_id):
     sf, codec = aggregate.tab_of(d)
     pin = _pin(store.get_target(sf, codec), sf, codec)
     # One snapshot for what the page shows, the edit prompts' starting values and the revision they apply at.
-    state, history = _history_with_state("run", run_id)
-    row = {**row, "attribution": {**row["attribution"], **state}}
+    state, history = _page_history("run", run_id)
+    shown_set = _prset_of({"attribution": state})
+    row = {**row, "attribution": {**state, "prset_report_url": shown_set and (
+        store.prset_states().get(shown_set) or {}).get("report_url")}}
     return render_template(
         "leaderboard_run.html",
         benchmark=cfg, row=row, d=d, meta=row["meta"] or {},
@@ -1337,7 +1356,7 @@ def prset_page():
     if members is None:
         abort(404)
     key = prset_key(members)
-    detail, history = _prset_detail(key), _history("prset", key)
+    detail, history = _prset_detail(key), _page_history("prset", key)[1]
     return render_template("leaderboard_prset.html", benchmark=_cfg(), key=key, detail=detail, attribution=history,
                            edit_data={"prset": key, "revision": history["revision"],
                                       "report_url": history["report_url"]})

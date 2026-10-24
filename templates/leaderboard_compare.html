@@ -28,7 +28,7 @@
         </tr></thead>
         <tbody>
           <tr><td>Basis</td>{% for r in runs %}<td class="lb-wrap-cell">{{ basis(r.summary.basis) }}</td>{% endfor %}</tr>
-          <tr><td>Report</td>{% for r in runs %}<td>{{ report(r.summary.report_url) }}</td>{% endfor %}</tr>
+          <tr><td>Report</td>{% for r in runs %}<td>{{ report(r.summary.report_url or r.summary.prset_report_url) }}</td>{% endfor %}</tr>
           <tr><td>SF</td>{% for r in runs %}<td>SF-{{ v(r.d.sf) }}</td>{% endfor %}</tr>
           <tr><td>Finished</td>{% for r in runs %}<td>{{ v(r.d.finished_at) }}</td>{% endfor %}</tr>
           <tr><td>Submitter</td>{% for r in runs %}<td>{{ v(r.d.submitter) }}</td>{% endfor %}</tr>

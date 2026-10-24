@@ -56,7 +56,7 @@
 
   <section class="lb-panel">
     <h3>Runs ({{ detail.runs | length }})</h3>
-    <p class="lb-note">탭마다 total-eligible run 을 board 순서로 (# = 이 set 안의 순위, 모든 config), 그 밖의 run 은 아래에.
+    <p class="lb-note">탭마다 순위에 오르는 run (total-eligible, withdraw 되지 않은) 을 board 순서로 (# = 이 set 안의 순위, 모든 config), 그 밖의 run 은 아래에.
       board 의 PR set 목록과 비교는 탭의 필터 아래 best run 을 씁니다.</p>
     {% if detail.runs %}
     <div class="cmp-scroll">
@@ -72,7 +72,7 @@
             <td class="num">{{ r.totals.xflare_ms | lb_ms }}</td><td class="num">{{ r.totals.velox_ms | lb_ms }}</td>
             <td class="num">{{ r.totals.speedup | lb_x }}</td>
             <td class="lb-wrap-cell">{{ v(r.config_label) }}</td>
-            <td>{{ report(r.report_url) }}</td>
+            <td>{{ report(r.report_url or r.prset_report_url) }}</td>
             <td>{% if r.completion.complete %}<span class="lb-badge b-good">complete</span>{% else %}<span class="lb-badge b-warn" title="{% for m in r.completion.members %}{{ m.key }}: {{ m.status }}{% if not loop.last %}&#10;{% endif %}{% endfor %}">pending</span>{% endif %}</td>
             <td class="lb-wrap-cell">{% for b in r.badges %}{{ badge(b) }}{% endfor %}</td>
           </tr>
