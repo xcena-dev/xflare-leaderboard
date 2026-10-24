@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "xflare-bench-submission-1.schema.json",
   "title": "xflare-bench-submission/1",
-  "description": "README §2 envelope, POSTed to /api/leaderboard/submissions (8 MiB cap, duplicate keys and NaN/Infinity rejected, at most 64 objects/arrays deep). Documentation for producers; the service's stdlib validator (leaderboard/schema.py) is authoritative. note, isolation_claim, submitter, producer and environment are mutable metadata outside content_id. basis (A9, optional) is metadata outside content_id too, but only a new run stores it: an identical retry leaves the run's basis as first stored (later changes: POST /api/leaderboard/runs/<run_id>/basis).",
+  "description": "README §2 envelope, POSTed to /api/leaderboard/submissions (8 MiB cap, duplicate keys and NaN/Infinity rejected, at most 64 objects/arrays deep). Documentation for producers; the service's stdlib validator (leaderboard/schema.py) is authoritative. note, isolation_claim, submitter, producer and environment are mutable metadata outside content_id. basis (A9, optional) is metadata outside content_id too, but only a new run stores it: an identical retry never changes the run's basis (changes: POST /api/leaderboard/runs/<run_id>/basis).",
   "$defs": {
     "time": {
       "type": "string",

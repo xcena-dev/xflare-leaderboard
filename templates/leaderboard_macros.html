@@ -61,7 +61,7 @@
 {%- macro field_value(field, value) -%}
   {%- if field == 'basis' -%}{{ basis(value, 'none') }}{%- else -%}{{ report(value) }}{%- endif -%}
 {%- endmacro -%}
-{#- A9: a subject's edit history (web._history: the newest 50 changes, older ones a page away), newest first; any
+{#- A9: a subject's edit history (web._history_with_state: the newest 50 changes, older ones a page away), newest first; any
     value other than the current one can be set again (restore, a new change). -#}
 {%- macro edit_history(att, older_url) -%}
 <details class="lb-target-history" id="edit-history"{% if request.args.get('before') %} open{% endif %}>

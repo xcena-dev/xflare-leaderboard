@@ -3318,6 +3318,9 @@ class TestPrSets(A9Case):
         self.assertEqual(self.c.get(f"{LB}/compare?prsets={quote(PQ)},{quote(PQ)}").status_code, 400)
         self.assertEqual(self.c.get(f"{LB}/compare?prsets={quote(PQ)},nope").status_code, 400)
         self.assertEqual(self.c.get(f"{LB}/compare?prsets={quote(PQ)},a%2Fb%239&runs={self.main}").status_code, 400)
+        for bad in ("sf=999", "sf=abc", "target=nope"):                              # page errors are HTML
+            r = self.c.get(f"{LB}/compare?prsets={quote(PQ)},{quote('facebookincubator/velox#12')}&{bad}")
+            self.assertEqual((r.status_code, r.mimetype), (400, "text/html"), bad)
 
     def test_prset_page_and_api(self):
         reordered = quote("XCENA-dev/xflare-analytics#1561+apache/gluten#88")
@@ -3693,6 +3696,10 @@ class TestA9BoardScript(WebCase):
     def test_a_board_reload_drops_a_set_selection_at_once(self):
         out = self.drive(self.SETS_PICKED + [{"tab": ["lb-metric-tabs", "Q3"]}], self.responses)
         self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
+        # Round 3: nothing of the old list can be ticked while the new board is pending, selected or not.
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-prsets"}, {"answer": 1, "with": "sets"},
+                          {"tab": ["lb-metric-tabs", "Q3"]}], self.responses)
+        self.assertEqual(out["prsetRows"], [])
 
     def test_a_panel_reopened_during_a_failed_load_draws_nothing(self):
         responses = {**self.responses, "503": '{"errors": ["leaderboard storage unavailable"]}'}
@@ -3814,7 +3821,9 @@ class TestA9Styles(unittest.TestCase):
         """A chip label (a valid repository name runs to 100 characters) wraps in the hero, a table cell and the PR
         filter instead of running past the page."""
         chip = self.rules[".lb-chip"]
-        self.assertEqual((chip["white-space"], chip["overflow-wrap"], chip["max-width"]), ("normal", "anywhere", "100%"))
+        # break-word, not anywhere: a table cell keeps whole short labels on one line (the demo's PR-set members).
+        self.assertEqual((chip["white-space"], chip["overflow-wrap"], chip["max-width"]), ("normal", "break-word", "100%"))
+        self.assertEqual(self.rules[".lb-chip-pair"]["display"], "inline-flex")      # a chip and its ↗ wrap as one
         self.assertEqual(self.rules[".lb-chips"]["max-width"], "100%")
         pr = self.rules[".lb-pr-filter"]
         self.assertEqual((pr["flex-wrap"], pr["max-width"]), ("wrap", "100%"))
@@ -4163,6 +4172,57 @@ class TestA9Round2(A9Case):
             with self.subTest(url):
                 r = self.c.get(url)
                 self.assertEqual((r.status_code, r.mimetype), (400, "text/html"))
+
+
+class TestA9Round3(A9Case):
+    """Round-3 review: checks the suite did not pin yet."""
+
+    def test_history_of_an_unknown_run_is_404(self):
+        self.assertEqual(self.c.get(f"/api/leaderboard/runs/{rid()}/history").status_code, 404)
+
+    def test_more_means_older_changes_remain(self):
+        run = self.submit()
+        for revision in range(50):
+            self.edit(run, "report_url", {"actor": "a", "expected_revision": revision,
+                                          "report_url": f"https://x.example/{revision}"})
+        self.assertFalse(self.history(run)["more"])                                  # exactly 50: nothing older
+        self.edit(run, "report_url", {"actor": "a", "expected_revision": 50, "report_url": None})
+        self.assertTrue(self.history(run)["more"])
+
+    def test_the_to_day_is_inside_the_window(self):
+        first = self.submit(elapsed=flat_elapsed(500), started_at=at(0))
+        last = self.submit(elapsed=flat_elapsed(400), started_at=at(1440))
+        day = self.c.get(f"/api/leaderboard/runs/{last}").get_json()["finished_at"][:10]
+        out = self.c.get(f"/api/leaderboard/history?to={day}").get_json()
+        self.assertEqual([h["run_id"] for h in out["heroes"]], [first, last])
+
+    def test_before_must_be_an_event_id(self):
+        run = self.submit()
+        for value in ("0", "9999999999999999999", "-1"):
+            with self.subTest(value):
+                self.assertEqual(self.c.get(f"/api/leaderboard/runs/{run}/history?before={value}").status_code, 400)
+
+    def test_source_and_report_url_lengths(self):
+        run = self.submit()
+        post = lambda source: self.c.post("/api/leaderboard/prs/a/b/1/check",
+                                          json={"actor": "s", "run_ids": [], "source": source}).status_code
+        self.assertEqual((post("x" * 64), post("x" * 65)), (200, 400))
+        base = "https://x.example/"
+        self.edit(run, "report_url", {"actor": "a", "expected_revision": 0, "report_url": base + "a" * (2048 - len(base))})
+        self.edit(run, "report_url", {"actor": "a", "expected_revision": 1,
+                                      "report_url": base + "a" * (2049 - len(base))}, status=400)
+
+    def test_a_key_naming_a_pr_twice_is_no_key(self):
+        self.assertEqual(self.c.get(f"/api/leaderboard/prset?prset={quote('a/b#1+a/b#1')}").status_code, 400)
+        self.assertEqual(self.c.get(f"/api/leaderboard/prset?prset={quote('a/b#1+A/B#1')}").status_code, 400)
+
+    def test_the_prset_pages_board_link_lifts_the_default_filter(self):
+        """doc3-2: "only this set" shows the set's runs in any resources."""
+        self.submit(basis=prs(Q), executors=8)
+        page = self.c.get(f"{LB}/prset?prset={quote('apache/gluten#88')}").get_data(as_text=True)
+        href = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1))
+        query = href.split("?", 1)[1]
+        self.assertEqual(len(self.board("?" + query)["rows"]), 1)
 
 
 if __name__ == "__main__":

@@ -393,13 +393,26 @@ class Store:
         """Every row gains "attribution" (A9): its basis, report URL and their revision, as ``_state`` reads them,
         plus "prset_report_url", the report URL of the run's PR set."""
         found = {r["run_id"]: r for r in conn.execute(sql, args).fetchall()}
-        reports = {r["prset"]: self._dec(r["report_url_json"]) for r in conn.execute(
-            "SELECT prset, report_url_json FROM prset_attribution WHERE report_url_json IS NOT NULL")}
+        states = {row["run_id"]: self._state("run", found.get(row["run_id"])) for row in rows}
+        keys = {schema.prset_key(s["basis"]["prs"]) for s in states.values()
+                if s["basis"] and s["basis"]["kind"] == "pr"}
+        reports = self._prset_reports(conn, keys)
         for row in rows:
-            state = self._state("run", found.get(row["run_id"]))
-            basis = state["basis"]
-            key = schema.prset_key(basis["prs"]) if basis and basis["kind"] == "pr" else None
+            state = states[row["run_id"]]
+            key = schema.prset_key(state["basis"]["prs"]) if state["basis"] and state["basis"]["kind"] == "pr" else None
             row["attribution"] = {**state, "prset_report_url": reports.get(key)}
+
+    def _prset_reports(self, conn: sqlite3.Connection, keys: set) -> dict[str, str]:
+        """The report URLs of the PR sets ``keys`` that have one: looked up one by one for a few sets (a page, a single
+        run), read in one pass for many (a whole board, which reads every run anyway)."""
+        if len(keys) > 50:
+            rows = conn.execute("SELECT prset, report_url_json FROM prset_attribution"
+                                " WHERE report_url_json IS NOT NULL").fetchall()
+        else:
+            rows = [r for key in keys for r in conn.execute(
+                "SELECT prset, report_url_json FROM prset_attribution WHERE prset = ? AND report_url_json IS NOT NULL",
+                (key,))]
+        return {r["prset"]: self._dec(r["report_url_json"]) for r in rows if r["prset"] in keys}
 
     def _read_manifest(self, cid: str) -> dict:
         data = self._read_raw_file(cid)
@@ -500,7 +513,7 @@ class Store:
                 raise
         return "set", state
 
-    # --- A9: basis and report URLs, versioned like the target (A8) -----------------------------------------------------
+    # --- A9: basis and report URLs, versioned like the target (A8) ----------------------------------------------
 
     def _state(self, kind: str, r: sqlite3.Row | None) -> dict:
         """A subject's editable fields (None when never set) with revision (0 for a subject never edited),
@@ -537,9 +550,9 @@ class Store:
 
     def edit(self, kind: str, subject: str, field: str, value, actor: str, expected_revision: int,
              restore: int | None = None) -> tuple[str, dict | None]:
-        """Set ``field`` of a run ("basis", "report_url") or a PR set ("report_url") to ``value`` (None clears) -- or, with
-        ``restore``, to the value that event set -- when the subject's revision is still ``expected_revision`` (0 for
-        one never edited). "set": one event appended, revision + 1; "unchanged": already that value, no event;
+        """Set ``field`` of a run ("basis", "report_url") or a PR set ("report_url") to ``value`` (None clears) -- or,
+        with ``restore``, to the value that event set -- when the subject's revision is still ``expected_revision`` (0
+        for one never edited). "set": one event appended, revision + 1; "unchanged": already that value, no event;
         "conflict": the revision moved; "unknown": no such run; "bad restore": the event is not one of this
         subject's changes to this field. Returns the status and the state after (None for "unknown"). Withdrawn runs
         stay editable."""
@@ -597,10 +610,10 @@ class Store:
                    "restored_from": r["restored_from"], "actor": r["actor"], "at": r["at"]} for r in rows[:limit]]
         return self._state(kind, cur), events, len(rows) > limit
 
-    def prset_states(self) -> dict[str, dict]:
-        """Every PR set that was ever edited, {key: state}."""
+    def prset_reports(self, keys) -> dict[str, str]:
+        """{key: report URL} of the PR sets ``keys`` that have one."""
         with self._db("read") as conn:
-            return {r["prset"]: self._state("prset", r) for r in conn.execute("SELECT * FROM prset_attribution")}
+            return self._prset_reports(conn, set(keys))
 
     def record_check(self, repo: str, number: int, run_ids: list[str], body_sha256: str | None, source: str | None,
                      actor: str) -> dict:

@@ -173,11 +173,12 @@ details summary { cursor: pointer; font-size: var(--text-sm); font-weight: 600; 
 
 /* ---- A9: basis chips, reports, folded panels, edit histories ----------- */
 .lb-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; vertical-align: middle; max-width: 100%; }
-/* A chip's label may be a 100-character repository name: it wraps inside its cell or row (the tooltip keeps it
-   whole) instead of running past a narrow page. */
+/* A chip's label may be a 100-character repository name: it breaks where it would run past its cell or row (the
+   tooltip keeps it whole), but a short label like "gluten#88" never shrinks to one character a line (break-word keeps
+   a table cell's minimum at the whole word, where "anywhere" would not). */
 .lb-chip {
   display: inline-flex; align-items: center; padding: 0 7px; border-radius: var(--radius-sm);
-  font: 600 var(--text-xs)/1.7 var(--mono); white-space: normal; overflow-wrap: anywhere; text-decoration: none;
+  font: 600 var(--text-xs)/1.7 var(--mono); white-space: normal; overflow-wrap: break-word; text-decoration: none;
   max-width: 100%; min-width: 0; text-align: left;
   background: var(--accent-soft); color: var(--accent-text); border: 1px solid transparent;
 }
@@ -186,6 +187,8 @@ a.lb-chip:hover { border-color: var(--accent); }
 .lb-chip-more { background: transparent; color: var(--text-3); }
 .lb-report { white-space: nowrap; font-weight: 550; }
 button.lb-chip { cursor: pointer; }
+/* A filtering chip and its GitHub arrow wrap as one. */
+.lb-chip-pair { display: inline-flex; align-items: center; max-width: 100%; }
 .lb-chip-gh { margin: 0 4px 0 -2px; text-decoration: none; font-size: var(--text-xs); color: var(--text-3); }
 .lb-chip-gh:hover { color: var(--accent-text); }
 .lb-pr-filter { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-sm); flex-wrap: wrap; max-width: 100%; }

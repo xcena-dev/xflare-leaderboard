@@ -27,7 +27,7 @@ from . import aggregate, repro
 from .display import (BADGE_CLASS, BENCH_ID, BUDGET, DEFAULT_CODEC, EFFECTIVE_ITEMS, FACET_VALUES, HISTORY_EVENTS,
                       HISTORY_HEROES, HISTORY_POINTS, MATRIX_REPEATS, PREVIEW_CHARS, PREVIEW_ITEMS, SCALAR_CHARS,
                       as_float, badge_class, basis_view, cut, default_filter, facet_option, facet_token,
-                      fallback_notice, norm_date, pr_label, pr_url, tab_label, tab_note, tabs)
+                      fallback_notice, norm_date, pr_label, tab_label, tab_note, tabs)
 from .schema import (APPLICATION_SETTINGS, CODECS, DEFAULT_REPO, MANIFEST_SCHEMA, MAX_BODY_BYTES,
                      MAX_REPORT_URL_CHARS, SCALE_FACTOR_RE, UUID4_RE, BadJSON, normalize_basis, parse_json_strict, parse_prset_key,
                      parse_repo, parse_report_url, pr_key, prset_key, validate_basis, validate_envelope,
@@ -875,14 +875,14 @@ def api_prsets():
         key = _prset_of(r)
         if key is not None:
             groups.setdefault(key, []).append(r)
-    reports = store.prset_states()
+    reports = store.prset_reports(groups)
     sets = []
     for key, members in groups.items():
         ranked = aggregate.rank(members, "total")
         best = ranked[0] if ranked else None
         last = max(members, key=lambda r: aggregate.utc_key(r["derived"]["finished_at"]))
         sets.append({"prset": key, "basis": basis_view(members[0]["attribution"]["basis"]),
-                     "report_url": (reports.get(key) or {}).get("report_url"), "run_count": len(members),
+                     "report_url": reports.get(key), "run_count": len(members),
                      "eligible_count": len(ranked), "last_finished_at": last["derived"]["finished_at"],
                      "best": best and _best_view(best, target_velox), "is_hero": best is not None and best is hero,
                      "vs_hero_pct": best and hero and _json_pct(_delta_pct(best["derived"]["totals"]["xflare_ms"],
@@ -1250,7 +1250,7 @@ def run_page(run_id):
     state, history = _page_history("run", run_id)
     shown_set = _prset_of({"attribution": state})
     row = {**row, "attribution": {**state, "prset_report_url": shown_set and (
-        store.prset_states().get(shown_set) or {}).get("report_url")}}
+        store.prset_reports([shown_set]).get(shown_set))}}
     return render_template(
         "leaderboard_run.html",
         benchmark=cfg, row=row, d=d, meta=row["meta"] or {},
@@ -1357,7 +1357,10 @@ def prset_page():
         abort(404)
     key = prset_key(members)
     detail, history = _prset_detail(key), _page_history("prset", key)[1]
+    # "Only this set" on the board: the default filter lifted (sent empty), as the board's own reset does.
+    board = url_for("leaderboard.board_page", basis=PRSET_PREFIX + key, **{k: "" for k in default_filter(_cfg())})
     return render_template("leaderboard_prset.html", benchmark=_cfg(), key=key, detail=detail, attribution=history,
+                           board_url=board,
                            edit_data={"prset": key, "revision": history["revision"],
                                       "report_url": history["report_url"]})
 
@@ -1366,7 +1369,10 @@ def _prset_runs(keys: list[str]) -> list[tuple[str, str]]:
     """Compare by PR set (A9): each set's representative, its best total-eligible run under the board's tab and
     filter (as the PR-set list shows it), as (run id, set label). 404 names a set without one."""
     cfg = _cfg()
-    view = _board_view(cfg, store_for(cfg))
+    try:
+        view = _board_view(cfg, store_for(cfg))
+    except _BadBody as e:                                   # a page: an HTML 400 (a bad sf, codec or target)
+        abort(400, description=str(e))
     chosen = _filtered(view["rows"], view["filter"], view["tokens"])
     out = []
     for key in keys:

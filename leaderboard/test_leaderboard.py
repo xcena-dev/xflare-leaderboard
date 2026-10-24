@@ -2070,6 +2070,31 @@ class StoreTests(unittest.TestCase):
         with sqlite3.connect(db) as c:
             self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
 
+    def test_one_run_reads_only_its_own_sets_report(self):
+        """Round 3: reading one run looks up the Report of its own PR set only, however many other sets have one."""
+        env = self.env()
+        env["basis"] = {"kind": "pr", "prs": [{"repo": "a/b", "number": 1}]}
+        run = self.store.put(env)[1]["run_id"]
+        for n in range(2, 80):
+            self.store.edit("prset", f"a/b#{n}", "report_url", f"https://x.example/{n}", "a", 0)
+        self.store.edit("prset", "a/b#1", "report_url", "https://x.example/own", "a", 0)
+        statements, connect = [], Store._connect
+
+        def traced(store):
+            conn = connect(store)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        with mock.patch.object(Store, "_connect", traced):
+            self.assertEqual(self.store.get(run)["attribution"]["prset_report_url"], "https://x.example/own")
+        reads = [x for x in statements if "FROM prset_attribution" in x]
+        self.assertEqual(len(reads), 1)
+        self.assertIn("WHERE prset = 'a/b#1'", reads[0])             # its own set's row, not every Report
+        self.assertEqual(self.store.prset_reports(["a/b#5", "z/z#1"]), {"a/b#5": "https://x.example/5"})
+        many = [self.store.put(self.env(n))[1]["run_id"] for n in range(2, 4)]
+        self.assertEqual({r["run_id"]: r["attribution"]["prset_report_url"] for r in self.store.list_runs()},
+                         {run: "https://x.example/own", **{m: None for m in many}})
+
     def test_best_so_far(self):
         """A9: heroes are the record breakers in finish order under the board's order: an equal later run with the same
         repeats does not displace, one with more repeats does; withdrawn and ineligible runs are never points."""

@@ -241,8 +241,10 @@
       chip.type = 'button';
       chip.title = `${keys}\n— 이 PR 로 필터`;
       chip.addEventListener('click', () => pick(p.key));
-      wrap.appendChild(chip);
-      wrap.appendChild(githubLink(p.url, 'lb-chip-gh', '↗', `${p.key} (GitHub)`));
+      const pair = el('span', 'lb-chip-pair');
+      pair.appendChild(chip);
+      pair.appendChild(githubLink(p.url, 'lb-chip-gh', '↗', `${p.key} (GitHub)`));
+      wrap.appendChild(pair);
     }
     if (basis.prs.length > max) wrap.appendChild(el('span', 'lb-chip lb-chip-more', `+${basis.prs.length - max}`));
     return wrap;
@@ -665,11 +667,11 @@
     let generation = 0;
     async function load() {
       const mine = ++generation;
-      // A9: the panels' answers in flight belong to the context this load leaves; none of them may draw, and a PR-set
-      // selection made there cannot be compared here (the list comes back with the board).
+      // A9: the panels' answers in flight belong to the context this load leaves; none of them may draw, and the
+      // PR-set list (and anything ticked on it) cannot be compared here: it comes back with the board.
       heroHistoryGen++;
       prsetsGen++;
-      if (selectedSets.size) clearPrsets('');
+      clearPrsets(prsetsBox.open ? '불러오는 중…' : '');
       // Another tab: the shown history (and its buttons) belongs to the old one.
       if (targetPin && (state.sf !== targetPin.sf || state.codec !== targetPin.codec)) forgetHistory();
       renderTabs();

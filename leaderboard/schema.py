@@ -46,7 +46,8 @@ _PR_KEY = re.compile(r"([^#+]+)#([1-9][0-9]{0,9})")
 # A report URL: http(s), a host name (no credentials), RFC 3986 characters only (a pasted non-ASCII path arrives
 # percent-encoded); anything else is refused rather than repaired.
 _PORT = re.compile(r"https?://[^/?#]*:([0-9]+)")
-_REPORT_URL = re.compile(r"https?://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::[0-9]{1,5})?(?:[/?#][A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*)?")
+_REPORT_URL = re.compile(r"https?://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::[0-9]{1,5})?"
+                         r"(?:[/?#][A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*)?")
 
 
 class BadJSON(ValueError):
