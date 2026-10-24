@@ -1,6 +1,6 @@
 {#- Submitted values are printed through Jinja autoescape only, every uploaded
     scalar through v (cut); _params (web.py) caps the uploaded lists. -#}
-{%- from "leaderboard_macros.html" import v, pct, badge, topbar -%}
+{%- from "leaderboard_macros.html" import v, pct, badge, topbar, basis, report -%}
 <!doctype html>
 <html lang="ko">
 <head>
@@ -19,14 +19,16 @@
   </div>
   <section class="lb-panel">
     <h3>Runs</h3>
-    <p class="lb-note">Δ 는 첫 번째 run 대비 xflare median 변화 (음수 = 빨라짐).</p>
+    <p class="lb-note">Δ 는 첫 번째 run 대비 xflare median 변화 (음수 = 빨라짐).{% if runs[0].set_label %} PR set 은 각 set 의 best total-eligible run (같은 탭과 필터) 으로 비교합니다.{% endif %}</p>
     <div class="cmp-scroll">
       <table class="cmp-table lb-table">
         <thead><tr>
           <th></th>
-          {% for r in runs %}<th><a class="lb-id" href="{{ r.summary.url }}">{{ r.row.run_id[:8] }}</a>{% if loop.first %} (base){% endif %}</th>{% endfor %}
+          {% for r in runs %}<th>{% if r.set_label %}<span class="lb-set-label">{{ v(r.set_label) }}</span><br>{% endif %}<a class="lb-id" href="{{ r.summary.url }}">{{ r.row.run_id[:8] }}</a>{% if loop.first %} (base){% endif %}</th>{% endfor %}
         </tr></thead>
         <tbody>
+          <tr><td>Basis</td>{% for r in runs %}<td class="lb-wrap-cell">{{ basis(r.summary.basis) }}</td>{% endfor %}</tr>
+          <tr><td>Report</td>{% for r in runs %}<td>{{ report(r.summary.report_url or r.summary.prset_report_url) }}</td>{% endfor %}</tr>
           <tr><td>SF</td>{% for r in runs %}<td>SF-{{ v(r.d.sf) }}</td>{% endfor %}</tr>
           <tr><td>Finished</td>{% for r in runs %}<td>{{ v(r.d.finished_at) }}</td>{% endfor %}</tr>
           <tr><td>Submitter</td>{% for r in runs %}<td>{{ v(r.d.submitter) }}</td>{% endfor %}</tr>

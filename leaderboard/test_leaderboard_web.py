@@ -14,6 +14,7 @@ page-script checks instead, for the auto-updater's self-check).
 """
 from __future__ import annotations
 
+import datetime
 import errno
 import hashlib
 import html
@@ -92,12 +93,12 @@ class WebCase(unittest.TestCase):
         self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:500])
         return r.get_json()
 
-    def submit(self, argv=None, **kw):
+    def submit(self, argv=None, basis=None, **kw):
         kw.setdefault("run_id", rid())
         m = build_manifest(**kw)
         if argv is not None:
             m["run"]["argv"] = argv
-        self.post(build_envelope(m))
+        self.post(build_envelope(m, **({} if basis is None else {"basis": basis})))
         return m["run_id"]
 
     def pin_target(self, run_id, revision=0, goal=None, status=200, **headers):
@@ -437,7 +438,7 @@ class TestHostileStrings(WebCase):
         unsafe = re.compile(r"\|\s*safe\b|autoescape\s+false|Markup\(")
         files = [os.path.join(ROOT, "static", "leaderboard.js")] + [
             os.path.join(ROOT, "templates", n) for n in sorted(os.listdir(os.path.join(ROOT, "templates")))]
-        self.assertEqual(len(files), 5)
+        self.assertEqual(len(files), 6)
         for path in files:
             with open(path) as f:
                 text = f.read()
@@ -730,7 +731,11 @@ global.document = {
     return byId[id] = byId[id] || new Element('div', id);
   },
   querySelector(sel) { return byId[sel] = byId[sel] || new Element('div'); },
-  querySelectorAll() {
+  querySelectorAll(sel) {
+    // cfg.selectors: elements a page lists by class (the A9 restore buttons), each {id, dataset}.
+    if ((cfg.selectors || {})[sel]) {
+      return cfg.selectors[sel].map(x => { const e = byId[x.id] = new Element('button', x.id); Object.assign(e.dataset, x.dataset); return e; });
+    }
     return (cfg.slots || []).map(k => Object.assign(new Element('span'), { dataset: { key: k, label: k } }));
   },
   createElement(tag) { return new Element(tag); },
@@ -749,7 +754,7 @@ global.alert = m => { alerts.push(String(m)); };
 global.fetch = async (url, init) => {
   fetches.push({ url, method: (init && init.method) || 'GET', body: init && init.body ? JSON.parse(init.body) : null });
   if (cfg.rejectPost && init && init.method === 'POST') throw new TypeError('Failed to fetch');
-  return { ok: true, status: 200, json: async () => JSON.parse(cfg.fetch),
+  return { ok: (cfg.status || 200) < 300, status: cfg.status || 200, json: async () => JSON.parse(cfg.fetch),
            headers: { get: k => (cfg.headers || {})[k.toLowerCase()] || null } };
 };
 vm.runInThisContext(fs.readFileSync(cfg.js, 'utf8'));
@@ -790,13 +795,19 @@ def page_script_node() -> str:
     return node
 
 
+def json_blocks(html: str) -> dict:
+    """Every JSON data block of a page, {id: text}, as the page script reads them."""
+    return dict(re.findall(r'<script type="application/json" id="([^"]+)">(.*?)</script>', html, re.S))
+
+
 def run_page_js(page: str, ids=None, data=None, fetch=None, slots=None, click=None, click_class=None,
-                secure=False, check=0, headers=None, prompts=(), datasets=None, reject_post=False) -> dict:
+                secure=False, check=0, headers=None, prompts=(), datasets=None, reject_post=False,
+                selectors=None, status=200) -> dict:
     node = page_script_node()
     cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "page": page, "ids": ids,
            "data": data or {}, "fetch": fetch, "slots": slots, "click": click,
            "clickClass": click_class, "secure": secure, "check": check, "prompts": list(prompts),
-           "datasets": datasets or {}, "rejectPost": reject_post}
+           "datasets": datasets or {}, "rejectPost": reject_post, "selectors": selectors or {}, "status": status}
     if headers is None:
         # The answer names the page's own script, as the service that rendered the page does.
         script = json.loads((data or {}).get("lb-page-data") or "{}").get("script")
@@ -921,8 +932,7 @@ class TestPageBudgets(WebCase):
         """A lost connection while withdrawing re-enables the button and says the outcome is unknown."""
         run_id = self.submit()
         html = self.c.get(f"{LB}/run/{run_id}").get_data(as_text=True)
-        data = re.search(r'id="lb-run-data">(.*?)</script>', html, re.S).group(1)
-        out = run_page_js("run", ids=re.findall(r'id="([^"]+)"', html), data={"lb-run-data": data},
+        out = run_page_js("run", ids=re.findall(r'id="([^"]+)"', html), data=json_blocks(html),
                           click="lb-withdraw", prompts=["me@x", "why"], fetch="{}", reject_post=True)
         self.assertEqual((len(out["fetches"]), out["reloads"], out["disabled"]["lb-withdraw"]), (1, 0, False))
         self.assertIn("저장됐는지 알 수 없으니", out["alerts"][0])
@@ -935,8 +945,7 @@ class TestPageBudgets(WebCase):
         html = self.c.get(f"{LB}/run/{m['run_id']}").get_data(as_text=True)
         self.assertIn('id="lb-withdraw"', html)
         self.assertNotIn('id="repro-copy"', html)
-        data = re.search(r'id="lb-run-data">(.*?)</script>', html, re.S).group(1)
-        out = run_page_js("run", ids=re.findall(r'id="([^"]+)"', html), data={"lb-run-data": data})
+        out = run_page_js("run", ids=re.findall(r'id="([^"]+)"', html), data=json_blocks(html))
         self.assertEqual(out["listeners"].get("lb-withdraw"), ["click"])
 
     def test_board_script_says_out_of_range(self):
@@ -1154,8 +1163,10 @@ class TestWrongAnswersShown(WebCase):
 # answers it ({"answer": i, "with": key} resolves the i-th request with responses[key], with meta[key]'s status and
 # headers, else 200 and the default headers, or rejects it when meta[key] has "reject"); {"click": text} clicks the
 # last button made with that text (a detached one too); {"fire": id} clicks that element; {"open": id} opens a
-# <details>; {"toggle": id} flips a checkbox. cfg.search is the page's query string, cfg.prompts answers prompt() in
-# turn. Prints what the page ended up showing.
+# <details>, {"close": id} closes it; {"toggle": id} flips a checkbox. cfg.search is the page's query string,
+# cfg.prompts answers prompt() in turn. cfg.labelDraws ({width, height} each) runs the newest hero-history chart's
+# label plugin over a chart area that size, its hero points spread evenly across at mid-height, text 6 px a
+# character. Prints what the page ended up showing.
 _BOARD_HARNESS = r"""
 const fs = require('fs'), vm = require('vm');
 const cfg = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -1171,7 +1182,7 @@ class Element {
   }
   appendChild(c) { this.children.push(c); return c; }
   replaceChildren(...c) { this.children = c; }
-  setAttribute() {}
+  setAttribute(k, v) { (this.attrs = this.attrs || {})[k] = v; }
   addEventListener(t, f) { (this.on[t] = this.on[t] || []).push(f); }
   fire(t) { for (const f of this.on[t] || []) f({ target: this }); }
   insertRow() { return this.appendChild(new Element('tr')); }
@@ -1191,10 +1202,19 @@ global.fetch = (url, init) => new Promise((res, rej) => pending.push({ url, init
 const alerts = [], prompts = [...(cfg.prompts || [])];
 global.prompt = () => (prompts.length ? prompts.shift() : null);
 global.alert = m => { alerts.push(String(m)); };
+let throwsLeft = cfg.chartThrows || 0;
+// A browser logs an exception that ends an async handler; node would stop the process instead.
+const rejections = [];
+process.on('unhandledRejection', e => { rejections.push(String(e && e.message)); });
 global.Chart = class {
+  // As Chart.js: a chart registers on its canvas before it draws, and a canvas takes one chart until destroyed.
   constructor(canvas, conf) {
-    this.options = conf.options; this.datasets = conf.data.datasets; this.destroyed = false; charts.push(this);
+    if (Chart.getChart(canvas)) throw new Error('Canvas is already in use');
+    this.canvas = canvas; this.options = conf.options; this.datasets = conf.data.datasets; this.plugins = conf.plugins || [];
+    this.destroyed = false; charts.push(this);
+    if (conf.plugins && throwsLeft > 0) { throwsLeft--; throw new Error('draw failed'); }
   }
+  static getChart(canvas) { return charts.find(c => c.canvas === canvas && !c.destroyed); }
   update() { if (this.destroyed) problems.push('update on a destroyed chart'); }
   destroy() { this.destroyed = true; }
 };
@@ -1217,13 +1237,46 @@ const tick = () => new Promise(r => setTimeout(r, 5));
     } else if (step.open) {
       byId[step.open].open = true;
       byId[step.open].fire('toggle');
+    } else if (step.close) {
+      byId[step.close].open = false;
+      byId[step.close].fire('toggle');
     } else if (step.toggle) {
       const e = byId[step.toggle];
       e.checked = !e.checked;
       e.fire('change');
+    } else if (step.check) {
+      // A9: tick the checkbox of that PR set in the PR-set panel.
+      const box = all.find(e => e.tagName === 'input' && e.attrs && e.attrs['aria-label'] === `compare ${step.check}`);
+      box.checked = true;
+      box.fire('change');
+    } else if (step.tab) {
+      byId[step.tab[0]].children.find(b => b.textContent === step.tab[1]).fire('click');
+    } else if (step.select) {
+      byId[step.select[0]].value = step.select[1];
+      byId[step.select[0]].fire('change');
     }
   }
   await tick(); await tick();
+  const flat = e => [e.textContent, ...e.children.flatMap(flat)].filter(t => t !== '' && t !== undefined);
+  const hrefs = e => [e.href, ...e.children.flatMap(hrefs)].filter(Boolean);
+  const titles = e => [e.title, ...e.children.flatMap(titles)].filter(Boolean);
+  const inputs = e => [...(e.tagName === 'input' ? [{ checked: e.checked, disabled: !!e.disabled }] : []),
+                       ...e.children.flatMap(inputs)];
+  const rows = sel => (byId[sel] ? byId[sel].children : []).map(tr => ({ text: tr.children.map(td => flat(td).join(' ')),
+                                                                         hrefs: hrefs(tr), titles: titles(tr),
+                                                                         cls: tr.children.map(td => td.className),
+                                                                         inputs: inputs(tr) }));
+  const labelDraws = (cfg.labelDraws || []).map(({ width, height }) => {
+    const c = [...charts].reverse().find(c => c.plugins.some(p => p.id === 'heroLabels'));
+    const drawn = [], n = c.datasets[1].data.length;
+    const ctx = { save() {}, restore() {}, measureText: t => ({ width: 6 * t.length }),
+                  fillText: (text, x, y) => drawn.push({ text, x, y, w: 6 * text.length }) };
+    const pts = c.datasets[1].data.map((_, i) => ({ x: n > 1 ? width * i / (n - 1) : width / 2, y: height / 2 }));
+    c.plugins.find(p => p.id === 'heroLabels').afterDatasetsDraw(
+      { ctx, chartArea: { left: 0, right: width, top: 0, bottom: height }, getDatasetMeta: () => ({ data: pts }) });
+    return drawn;
+  });
+  const compareBtn = byId['lb-prsets-compare'] || {};
   const tabs = byId['lb-sf-tabs'].children;
   const links = e => [e.href, ...e.children.flatMap(links)].filter(Boolean);
   console.log(JSON.stringify({
@@ -1237,7 +1290,20 @@ const tick = () => new Promise(r => setTimeout(r, 5));
     requests: pending.map(p => p.url),
     posts: pending.filter(p => p.init && p.init.method === 'POST').map(p => ({ url: p.url, body: JSON.parse(p.init.body) })),
     alerts, events: byId['hero-target-events'].children.map(c => c.textContent),
-    target: byId['hero-target'].textContent, targetHidden: byId['hero-target'].hidden }));
+    target: byId['hero-target'].textContent, targetHidden: byId['hero-target'].hidden,
+    // A9: each table row's cell texts and links, the history panel's active metric, where a click navigated.
+    boardRows: rows('#lb-board tbody'), historyRows: rows('#lb-history-table tbody'),
+    prsetRows: rows('#lb-prsets-table tbody'), location: location.href || null,
+    historyNote: (byId['lb-history-note'] || {}).textContent, rejections,
+    buttons: all.filter(e => e.tagName === 'button').map(b => ({ text: String(b.textContent), title: String(b.title || '') })), prsetsNote: (byId['lb-prsets-note'] || {}).textContent,
+    heroMeta: byId['hero-meta'] ? { text: flat(byId['hero-meta']), hrefs: hrefs(byId['hero-meta']),
+                                    titles: titles(byId['hero-meta']) } : null,
+    setCompare: { disabled: !!compareBtn.disabled, text: compareBtn.textContent }, labelDraws,
+    historyMetric: ((byId['lb-history-metrics'] || { children: [] }).children.find(b => b.className.includes('active')) || {}).textContent,
+    charts_all: charts.map(c => c.datasets.map(d => ({ label: d.label, data: d.data }))),
+    chartInfo: charts.map(c => ({ destroyed: c.destroyed, x: c.options.scales.x.type, xMin: c.options.scales.x.min,
+                                  stepped: c.datasets.map(d => d.stepped ?? null),
+                                  plugins: c.plugins.map(p => p.id) })) }));
 })();
 """
 
@@ -1246,13 +1312,15 @@ class TestBoardScript(WebCase):
     """The board page script under controlled timing: stale answers never win, an answer for another script never
     renders, one log toggle drives the chart."""
 
-    def drive(self, steps, responses, meta=None, search="", prompts=()):
+    def drive(self, steps, responses, meta=None, search="", prompts=(), label_draws=(), chart_throws=0):
         """Answers name the page's own script unless meta[key] gives other headers (names in lower case)."""
         node = page_script_node()
         data = self.page_data()
         cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "data": data, "steps": steps,
+               "chartThrows": chart_throws,
                "responses": responses, "meta": meta or {}, "search": search, "prompts": list(prompts),
-               "headers": {"x-leaderboard-script": json.loads(data["lb-page-data"])["script"]}}
+               "headers": {"x-leaderboard-script": json.loads(data["lb-page-data"])["script"]},
+               "labelDraws": list(label_draws)}
         out = subprocess.run([node, "-e", _BOARD_HARNESS], input=json.dumps(cfg), capture_output=True, text=True,
                              timeout=30)
         if out.returncode:
@@ -1596,7 +1664,7 @@ class TestTarget(WebCase):
             if m:
                 datasets[m.group(1)] = {k: html.unescape(v) for k, v in re.findall(r'data-([a-z]+)="([^"]*)"', tag)}
         return {"ids": re.findall(r'id="([^"]+)"', page), "datasets": datasets,
-                "data": {"lb-run-data": re.search(r'id="lb-run-data">(.*?)</script>', page, re.S).group(1)}}
+                "data": json_blocks(page)}
 
     def test_run_page_goal_prompt(self):
         """A8: the goal must be a finite number above 0 and at most 1000 before anything is sent."""
@@ -1762,11 +1830,12 @@ class TestDisplayRound(WebCase):
             return json.loads(text, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
         import datetime
         t0 = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
-        a = self.submit(started_at=t0, elapsed=lambda q, r, e: 1)
+        a = self.submit(started_at=t0, elapsed=lambda q, r, e: 1, basis=prs(P))
         b = self.submit(started_at=t0 + datetime.timedelta(days=1),
-                        elapsed=lambda q, r, e: 5 * 10 ** 306 if e == "xflare" else 1)
+                        elapsed=lambda q, r, e: 5 * 10 ** 306 if e == "xflare" else 1, basis=prs(Q))
         for u in ("/api/leaderboard/board", "/api/leaderboard/runs", f"/api/leaderboard/runs/{a}",
-                  f"/api/leaderboard/runs/{b}"):
+                  f"/api/leaderboard/runs/{b}", "/api/leaderboard/prsets", "/api/leaderboard/history",
+                  f"/api/leaderboard/prset?prset={quote(PQ)}", f"/api/leaderboard/runs/{a}/history"):
             r = self.c.get(u)
             self.assertEqual(r.status_code, 200, u)
             strict(r.get_data(as_text=True))
@@ -2027,8 +2096,7 @@ class TestReproAndBoardLabels(WebCase):
     def test_copy_without_a_secure_context(self):
         _, page = self.run_with_argv(self.ARGV)
         script = self.script_of(page)
-        data = {"lb-run-data": re.search(r'id="lb-run-data">(.*?)</script>', page, re.S).group(1),
-                "repro-cmd": script}
+        data = {**json_blocks(page), "repro-cmd": script}
         ids = re.findall(r'id="([^"]+)"', page)
         plain = run_page_js("run", ids=ids, data=data, click="repro-copy")
         self.assertEqual((plain["execs"], plain["clipboard"]), (["copy"], []))
@@ -2169,7 +2237,7 @@ class TestLegacyApplicationMode(WebCase):
 
 
 class TestApplicationMode(WebCase):
-    """A4: the application mode is a board column, a filter with its facet and a compare parameter, never a board
+    """A4: the application mode is shown on the board under each run's config, a filter with its facet and a compare parameter, never a board
     split; a per-engine run's page lists every repeat's applications, a shared run's page has no such list. A6: only
     per-engine runs rank (TestSharedUnranked has the rest)."""
 
@@ -2177,7 +2245,7 @@ class TestApplicationMode(WebCase):
         kw.setdefault("run_id", rid())
         return build_manifest(application_mode="per-engine", **kw)
 
-    def test_mode_column_filter_and_facet(self):
+    def test_mode_under_config_filter_and_facet(self):
         shared = self.submit(elapsed=flat_elapsed(1000), application_mode=None)
         per_engine = self.per_engine(elapsed=flat_elapsed(2000))
         self.post(build_envelope(per_engine))
@@ -2194,11 +2262,12 @@ class TestApplicationMode(WebCase):
                                  [run_id], query)
         page = self.c.get(LB).get_data(as_text=True)
         self.assertIn('data-key="application_mode"', page)
-        self.assertIn("<th>Mode</th>", page)
+        self.assertNotIn("<th>Mode</th>", page)                            # shown under the config instead
         fetch = self.c.get("/api/leaderboard/board").get_data(as_text=True)
         out = run_page_js("board", data=self.page_data(), fetch=fetch, slots=["application_mode"])
-        # one Mode cell for the one row, plus one filter option per mode
-        self.assertEqual((out["texts"].count("shared"), out["texts"].count("per-engine")), (1, 2))
+        self.assertIn("per-engine · velox, xflare", out["texts"])
+        # one filter option per mode
+        self.assertEqual((out["texts"].count("shared"), out["texts"].count("per-engine")), (1, 1))
         self.assertIn(facet_token("per-engine"), out["values"])
         self.assertIn(facet_token("shared"), out["values"])
 
@@ -2820,7 +2889,7 @@ class TestTabs(WebCase):
         b = self.board("?sf=1000&codec=zstd")
         self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["rows"]), (other_shape, True, []))
 
-    def test_engines_is_a_filter_and_a_column(self):
+    def test_engines_is_a_filter_shown_under_the_config(self):
         both = self.submit(elapsed=flat_elapsed(1000))
         alone = self.submit(elapsed=flat_elapsed(2000), engines=("xflare",))
         b = self.board()
@@ -2828,11 +2897,12 @@ class TestTabs(WebCase):
                          [(both, "velox,xflare"), (alone, "xflare")])
         self.assertEqual([r["run_id"] for r in self.board("?engines=xflare")["rows"]], [alone])
         self.assertEqual([o["label"] for o in b["facets"]["engines"]], ["velox,xflare", "xflare"])
-        self.assertIn("<th>Engines</th>", self.c.get(LB).get_data(as_text=True))
+        self.assertNotIn("<th>Engines</th>", self.c.get(LB).get_data(as_text=True))   # under the config instead
         with self.subTest("page script"):
             out = run_page_js("board", data=self.page_data(), fetch=json.dumps(b))
-            self.assertIn("velox, xflare", out["texts"])
-            self.assertIn("xflare", out["texts"])
+            self.assertIn("per-engine · velox, xflare", out["texts"])
+            self.assertIn("per-engine · xflare", out["texts"])
+            self.assertEqual(sum(t.startswith("device ") for t in out["texts"]), 2)   # under each run
         self.assertEqual(b["rows"][1]["value"]["velox_ms"], None)
 
     def test_dry_run_says_which_runs_create_their_tab(self):
@@ -2916,6 +2986,1423 @@ class TestEffectiveSettings(WebCase):
         out = self.post(build_envelope(m), "?dry_run=1", status=200)
         self.assertFalse(out["ranked_total"])
         self.assertEqual(out["ineligible_reasons"]["common"], [aggregate.SPARK_SETTINGS_DIFFER])
+
+
+# --- amendment A9: basis, links, PR sets, hero history -------------------------------------------------------------
+
+P = {"repo": "xcena-dev/xflare-analytics", "number": 1561}
+Q = {"repo": "apache/gluten", "number": 88}
+R = {"repo": "facebookincubator/velox", "number": 12}
+MAIN = {"kind": "main", "repo": "xcena-dev/xflare-analytics", "latest_pr": 1564}
+PQ = "apache/gluten#88+xcena-dev/xflare-analytics#1561"
+
+
+def prs(*members) -> dict:
+    return {"kind": "pr", "prs": [dict(m) for m in members]}
+
+
+def at(minutes: int):
+    """A start time ``minutes`` after the fixtures' T0 (the run finishes about an hour later)."""
+    return make_fixtures_T0 + timedelta(minutes=minutes)
+
+
+from datetime import timedelta                                        # noqa: E402
+from make_fixtures import T0 as make_fixtures_T0                      # noqa: E402
+
+
+class A9Case(WebCase):
+    def edit(self, run_id, field, body, status=200, **headers):
+        r = self.c.post(f"/api/leaderboard/runs/{run_id}/{field}", json=body, headers=headers)
+        self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:500])
+        return r.get_json()
+
+    def history(self, run_id, query=""):
+        r = self.c.get(f"/api/leaderboard/runs/{run_id}/history{query}")
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True)[:300])
+        return r.get_json()
+
+    def basis_of(self, run_id):
+        return self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()["basis"]
+
+
+class TestBasisContract(A9Case):
+    """A9: the envelope's basis is the run's first claim; later changes go through the versioned edits only."""
+
+    def test_envelope_basis_is_validated_and_normalized(self):
+        m = build_manifest(run_id=rid())
+        mixed = prs({"repo": "XCENA-dev/xflare-analytics", "number": 1561}, {"repo": "apache/Gluten", "number": 88})
+        dry = self.post(build_envelope(m, basis=mixed), "?dry_run=1", status=200)
+        self.assertEqual(dry["basis"]["prset"], PQ)
+        self.assertEqual(dry["basis"]["label"], "gluten#88 + #1561")
+        self.assertEqual(self.c.get("/api/leaderboard/runs").get_json(), [])          # a dry run stores nothing
+        self.post(build_envelope(m, basis=mixed))
+        got = self.basis_of(m["run_id"])
+        self.assertEqual([(p["repo"], p["number"], p["url"]) for p in got["prs"]],
+                         [("apache/gluten", 88, "https://github.com/apache/gluten/pull/88"),
+                          ("xcena-dev/xflare-analytics", 1561, "https://github.com/xcena-dev/xflare-analytics/pull/1561")])
+        main = self.submit(basis=MAIN)
+        self.assertEqual(self.basis_of(main)["label"], "main · latest #1564")
+        plain = self.submit()
+        self.assertIsNone(self.basis_of(plain))                                         # absent = unknown
+        self.assertIsNone(self.post(build_envelope(build_manifest(run_id=rid())), "?dry_run=1", status=200)["basis"])
+
+    def test_bad_bases_are_refused(self):
+        many = prs(*({"repo": "a/b", "number": n} for n in range(1, 18)))
+        cases = {
+            "kind": ({"kind": "branch"}, "$.basis.kind"),
+            "null": (None, "$.basis: expected object"),
+            "empty": (prs(), "$.basis.prs: 1 to 16 PRs, got 0"),
+            "17": (many, "$.basis.prs: 1 to 16 PRs, got 17"),
+            "dup": (prs(P, {"repo": "XCENA-DEV/xflare-analytics", "number": 1561}), "duplicate PR"),
+            "dotdot": (prs({"repo": "xcena-dev/..", "number": 1}), "is not a GitHub owner/name"),
+            "dot": (prs({"repo": "xcena-dev/.", "number": 1}), "is not a GitHub owner/name"),
+            "parent": (prs({"repo": "../xflare-analytics", "number": 1}), "is not a GitHub owner/name"),
+            "hyphen": (prs({"repo": "-x/y", "number": 1}), "is not a GitHub owner/name"),
+            "space": (prs({"repo": "a b/c", "number": 1}), "is not a GitHub owner/name"),
+            "deep": (prs({"repo": "a/b/c", "number": 1}), "is not a GitHub owner/name"),
+            "zero": (prs({"repo": "a/b", "number": 0}), "is not a PR number"),
+            "bool": (prs({"repo": "a/b", "number": True}), "is not a PR number"),
+            "float": (prs({"repo": "a/b", "number": 1.0}), "is not a PR number"),
+            "big": (prs({"repo": "a/b", "number": 2 ** 31}), "is not a PR number"),
+            "main": ({"kind": "main", "repo": "a/b"}, "$.basis.latest_pr: missing"),
+        }
+        for name, (basis, error) in cases.items():
+            with self.subTest(name):
+                out = self.post(build_envelope(build_manifest(run_id=rid()), basis=basis), "?dry_run=1", status=400)
+                self.assertTrue(any(error in e for e in out["errors"]), out["errors"])
+
+    def test_an_identical_retry_never_changes_the_stored_basis(self):
+        """Submit {P,Q}, add R through the edit, replay the original envelope: still {P,Q,R}, same receipt."""
+        m = build_manifest(run_id=rid())
+        env = build_envelope(m, basis=prs(P, Q))
+        first = self.post(env)
+        state = self.edit(m["run_id"], "basis", {"actor": "web@x", "expected_revision": 1, "basis": prs(P, Q, R)})
+        self.assertEqual(state["revision"], 2)
+        again = self.post(env, status=200)
+        self.assertEqual(again, first)
+        self.assertEqual(len(self.basis_of(m["run_id"])["prs"]), 3)
+        self.assertEqual(self.history(m["run_id"])["revision"], 2)
+        # A run stored without a basis keeps none when retried with one: the claim is made through the edit.
+        n = build_manifest(run_id=rid())
+        self.post(build_envelope(n))
+        self.post(build_envelope(n, basis=prs(P)), status=200)
+        self.assertIsNone(self.basis_of(n["run_id"]))
+
+    def test_revisions_conflicts_unlink_and_restore(self):
+        run = self.submit(basis=prs(P))
+        hist = self.history(run)
+        self.assertEqual((hist["revision"], hist["updated_by"], len(hist["history"])), (1, "bench@example.com", 1))
+        claim = hist["history"][0]
+        self.assertEqual((claim["before"], claim["after"]["prset"]), (None, "xcena-dev/xflare-analytics#1561"))
+        a = self.edit(run, "basis", {"actor": "a@x", "expected_revision": 1, "basis": prs(P, Q)})
+        stale = self.edit(run, "basis", {"actor": "b@x", "expected_revision": 1, "basis": prs(R)}, status=409)
+        self.assertEqual((stale["current"]["revision"], stale["current"]["basis"]["prset"]), (2, a["basis"]["prset"]))
+        same = self.edit(run, "basis", {"actor": "c@x", "expected_revision": 2, "basis": prs(Q, P)})
+        self.assertEqual(same["revision"], 2)                                       # an exact no-op adds no event
+        gone = self.edit(run, "basis", {"actor": "d@x", "expected_revision": 2, "basis": None})
+        self.assertIsNone(gone["basis"])
+        page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)               # restorable from the run
+        events = self.history(run)["history"]
+        self.assertEqual([e["revision"] for e in events], [3, 2, 1])
+        self.assertEqual(page.count('class="lb-btn lb-restore"'), 2)                # every value but the current one
+        back = self.edit(run, "basis", {"actor": "e@x", "expected_revision": 3, "restore": events[1]["event_id"]})
+        self.assertEqual((back["basis"]["prset"], back["revision"], back["updated_by"]), (PQ, 4, "e@x"))
+        newest = self.history(run)["history"][0]
+        self.assertEqual((newest["restored_from"], newest["before"], newest["actor"]), (events[1]["event_id"], None, "e@x"))
+        link = self.edit(run, "report_url", {"actor": "f@x", "expected_revision": 4, "report_url": "https://claude.ai/artifact/abc"})
+        self.assertEqual((link["report_url"], link["revision"]), ("https://claude.ai/artifact/abc", 5))
+        self.assertEqual(self.c.get(f"/api/leaderboard/runs/{run}").get_json()["report_url"], "https://claude.ai/artifact/abc")
+        # Content, receipt, timings and ranking are untouched by any of it.
+        self.assertEqual(self.board()["rows"][0]["run_id"], run)
+
+    def test_history_pages_by_event_id(self):
+        run = self.submit()
+        for revision in range(55):
+            self.edit(run, "report_url", {"actor": "a", "expected_revision": revision, "report_url": f"https://x.example/{revision}"})
+        first = self.history(run)
+        self.assertEqual((len(first["history"]), first["more"], first["history"][0]["revision"]), (50, True, 55))
+        older = self.history(run, f"?before={first['history'][-1]['event_id']}")
+        self.assertEqual(([e["revision"] for e in older["history"]], older["more"]), ([5, 4, 3, 2, 1], False))
+        self.assertEqual(self.c.get(f"/api/leaderboard/runs/{run}/history?before=x").status_code, 400)
+        page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)
+        self.assertIn(f"before={first['history'][-1]['event_id']}", page)
+
+    def test_edit_refusals(self):
+        run, other = self.submit(), self.submit(basis=prs(P))
+        ok = {"actor": "a", "expected_revision": 0}
+        r = self.c.post(f"/api/leaderboard/runs/{run}/report_url", data=json.dumps({**ok, "report_url": None}),
+                        content_type="text/plain")
+        self.assertEqual(r.status_code, 415)
+        self.edit(run, "report_url", {**ok, "report_url": None}, status=403, Origin="http://evil.example")
+        self.edit("not-a-run", "basis", {**ok, "basis": None}, status=404)
+        self.edit(rid(), "basis", {**ok, "basis": None}, status=404)
+        foreign = self.history(other)["history"][0]["event_id"]
+        for body, error in (({**ok}, "exactly one"), ({**ok, "report_url": None, "restore": 1}, "exactly one"),
+                            ({**ok, "restore": True}, "restore: an event id"),
+                            ({**ok, "restore": 2 ** 63}, "restore: an event id"),
+                            ({"actor": "x" * 257, "expected_revision": 0, "report_url": None}, "actor:"),
+                            ({"actor": " ", "expected_revision": 0, "report_url": None}, "actor:"),
+                            ({"actor": "a", "expected_revision": -1, "report_url": None}, "expected_revision"),
+                            ({"actor": "a", "expected_revision": True, "report_url": None}, "expected_revision")):
+            with self.subTest(body=str(body)[:60]):
+                self.assertIn(error, " ".join(self.edit(run, "report_url", body, status=400)["errors"]))
+        self.assertIn("not a change of this report_url",
+                      self.edit(run, "report_url", {**ok, "restore": foreign}, status=400)["errors"][0])
+        self.assertIn("not a change of this report_url",
+                      self.edit(other, "report_url", {"actor": "a", "expected_revision": 1, "restore": foreign},
+                                status=400)["errors"][0])                           # a basis event is not a report
+        for link in ("javascript:alert(1)", "ftp://x.example/a", "https://user:pw@x.example/", "https://x.example/a b",
+                     "https://x.example/<script>", "HTTPS://x.example/", "https://", "//x.example/a",
+                     "https://x.example/" + "a" * 2048, "https://x.example\\@evil.example/", "https://ex ample.com"):
+            with self.subTest(link=link[:40]):
+                self.assertIn("report_url: an http(s) URL", self.edit(run, "report_url", {**ok, "report_url": link}, status=400)["errors"][0])
+        self.assertEqual(self.edit(run, "basis", {**ok, "basis": {"kind": "pr", "prs": []}}, status=400)["errors"],
+                         ["basis.prs: 1 to 16 PRs, got 0"])
+        for link in ("http://confluence.example:8090/pages/viewpage.action?pageId=12&x=%ED%95%9C#s",
+                     "https://claude.ai/code/artifact/0b5f", "https://docs.example.com/d/1?a=(b)"):
+            with self.subTest(ok=link):
+                revision = self.history(run)["revision"]
+                self.edit(run, "report_url", {"actor": "a", "expected_revision": revision, "report_url": link})
+
+    def test_withdrawn_runs_stay_editable(self):
+        run = self.submit()
+        self.c.post(f"/api/leaderboard/runs/{run}/withdraw", json={"actor": "a", "reason": "b"})
+        self.edit(run, "basis", {"actor": "a", "expected_revision": 0, "basis": MAIN})
+        page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)
+        self.assertIn('id="lb-basis-edit"', page)
+        self.assertNotIn('id="lb-withdraw"', page)
+
+    def test_hostile_values_stay_inert(self):
+        run = self.submit(basis=prs(P))
+        html_actor = HOSTILE[0]
+        self.edit(run, "report_url", {"actor": html_actor, "expected_revision": 1,
+                                "report_url": "https://x.example/a?q='onmouseover=alert(1)"})
+        self.edit(run, "basis", {"actor": HOSTILE[1], "expected_revision": 2, "basis": None})
+        page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)
+        for text in HOSTILE[:2]:
+            self.assertNotIn(text, page)
+            self.assertIn(html.escape(text, quote=False).replace("'", "&#39;")[:20], page)
+        self.assertIn('href="https://x.example/a?q=&#39;onmouseover=alert(1)"', page)
+        self.assertIn('rel="noopener noreferrer"', page)
+
+
+class TestPrUrls(A9Case):
+    """A9: every PR URL is https://github.com/<repo>/pull/<n>, built by the server from the validated, lower-case key;
+    a hostile repository never gets stored, so it never reaches an href."""
+
+    GITHUB = re.compile(r"https://github\.com/[a-z0-9-]+/[a-z0-9._-]+/pull/[1-9][0-9]*")
+
+    def test_urls_come_from_validated_parts_only(self):
+        mixed = prs({"repo": "Apache/Gluten", "number": 88}, {"repo": "a-b/c.d_e", "number": 2147483647})
+        run = self.submit(basis=mixed)
+        main = self.submit(basis={"kind": "main", "repo": "Facebookincubator/Velox", "latest_pr": 12})
+        urls = [p["url"] for p in self.basis_of(run)["prs"]] + [self.basis_of(main)["url"]]
+        self.assertEqual(urls, ["https://github.com/a-b/c.d_e/pull/2147483647", "https://github.com/apache/gluten/pull/88",
+                                "https://github.com/facebookincubator/velox/pull/12"])
+        pages = [self.c.get(f"{LB}/run/{run}").get_data(as_text=True), self.c.get(f"{LB}/run/{main}").get_data(as_text=True),
+                 self.c.get(f"{LB}/prset?prset={quote(self.basis_of(run)['prset'])}").get_data(as_text=True)]
+        hrefs = [h for page in pages for h in re.findall(r'href="(https://github[^"]*)"', page)]
+        self.assertTrue(hrefs)
+        for h in hrefs:
+            self.assertRegex(h, f"^{self.GITHUB.pattern}$")
+        self.assertIn('href="https://github.com/facebookincubator/velox/pull/12"', pages[1])   # main's latest #N
+        for repo in ('a"onmouseover=x/b', "javascript:alert(1)/x", "a/b?x=1", "a/b#frag", "evil.example/../a",
+                     "a/b/../../c", "%2e%2e/x", "a/<b>", "ａ/b"):
+            with self.subTest(repo=repo):
+                env = build_envelope(build_manifest(run_id=rid()), basis=prs({"repo": repo, "number": 1}))
+                self.post(env, status=400)
+                self.edit(run, "basis", {"actor": "a", "expected_revision": 1, "basis": prs({"repo": repo, "number": 1})},
+                          status=400)
+        for key in ('a"x/b#1', "javascript:x/b#1", "a/b#1+c/d#x"):
+            with self.subTest(key=key):
+                self.assertEqual(self.c.get(f"{LB}/prset?prset={quote(key)}").status_code, 404)
+
+
+class TestBasisFilters(A9Case):
+    """A9: `pr` (membership) literals and `basis` literals and tokens (a PR set as `basis=prset:<key>`), on /board and
+    /runs."""
+
+    def setUp(self):
+        super().setUp()
+        self.ids = {"P": self.submit(basis=prs(P), elapsed=flat_elapsed(500)),
+                    "PQ": self.submit(basis=prs(Q, P), elapsed=flat_elapsed(400)),
+                    "QR": self.submit(basis=prs(Q, R), elapsed=flat_elapsed(450)),
+                    "main": self.submit(basis=MAIN, elapsed=flat_elapsed(480)),
+                    "none": self.submit(elapsed=flat_elapsed(470))}
+
+    def names(self, query):
+        found = {r["run_id"] for r in self.board(query)["rows"]}
+        runs = {r["run_id"] for r in self.c.get("/api/leaderboard/runs" + query).get_json()}
+        self.assertEqual(found, runs, query)
+        return {k for k, v in self.ids.items() if v in found}
+
+    def test_literals_and_tokens_agree(self):
+        key_p = "xcena-dev/xflare-analytics#1561"
+        pq, qr = "prset:" + PQ, "prset:apache/gluten#88+facebookincubator/velox#12"
+        cases = {f"pr={quote(key_p)}": {"P", "PQ"}, f"basis={quote(pq)}": {"PQ"}, "basis=main": {"main"},
+                 "basis=-": {"none"}, "basis=pr": {"P", "PQ", "QR"}, "pr=-": {"main", "none"},
+                 f"pr={quote('apache/gluten#88')}": {"PQ", "QR"},
+                 f"pr={quote(key_p)}&basis={quote(qr)}": set(),                      # both apply
+                 f"pr={quote('apache/gluten#88')}&basis={quote(qr)}": {"QR"},
+                 f"basis={quote('prset:XCENA-dev/xflare-analytics#1561+Apache/gluten#88')}": {"PQ"},  # any case/order
+                 "pr=XCENA-dev/xflare-analytics%231561": {"P", "PQ"},
+                 f"basis={quote('prset:' + PQ + '+')}": set()}                       # not a key: compared as sent
+        for query, want in cases.items():
+            with self.subTest(query):
+                self.assertEqual(self.names("?" + query), want)
+                literal = dict(urllib.parse.parse_qsl(query))
+                # The select sends basis_t, a token of the canonical value.
+                if "basis" in literal and "XCENA" not in query and not literal["basis"].endswith("+"):
+                    tokens = "&".join(f"{k}_t={quote(facet_token(v))}" if k == "basis" else f"{k}={quote(v)}"
+                                      for k, v in literal.items())
+                    self.assertEqual(self.names("?" + tokens), want)
+        board = self.board(f"?basis={quote('prset:' + PQ)}")
+        self.assertEqual(board["filter_tokens"]["basis"], facet_token("prset:" + PQ))
+        self.assertNotIn("pr", board["facets"])                                      # one PR is a chip, not a select
+        self.assertEqual([o["label"] for o in board["facets"]["basis"]],
+                         ["main", "PR-based (all)", "PR set gluten#88 + velox#12", "PR set gluten#88 + #1561",
+                          "PR set #1561", "unknown (no basis)"])                    # sets in key order
+        self.assertEqual(board["rows"][0]["basis"]["prset"], PQ)
+        self.assertEqual(self.board(f"?pr={quote(key_p)}")["filter"]["pr"], key_p)
+
+    def test_a_basis_edit_moves_the_run_between_filters(self):
+        self.edit(self.ids["none"], "basis", {"actor": "a", "expected_revision": 0, "basis": prs(P, Q)})
+        self.assertEqual(self.names(f"?basis={quote('prset:' + PQ)}"), {"PQ", "none"})
+
+
+def quote(text: str) -> str:
+    return urllib.parse.quote(text, safe="")
+
+
+import urllib.parse                                                   # noqa: E402
+
+
+class TestPrSets(A9Case):
+    """A9: the PR-set list (representative = best total-eligible run under the tab and filter), its page and compare."""
+
+    def setUp(self):
+        super().setUp()
+        self.pq_slow = self.submit(basis=prs(P, Q), elapsed=flat_elapsed(500), started_at=at(0))
+        self.pq_fast = self.submit(basis=prs(Q, P), elapsed=flat_elapsed(400), started_at=at(100))
+        self.pq_other = self.submit(basis=prs(P, Q), elapsed=flat_elapsed(300), executors=8, started_at=at(200))
+        self.r_only = self.submit(basis=prs(R), elapsed=flat_elapsed(450), started_at=at(300))
+        m = build_manifest(run_id=rid(), elapsed=flat_elapsed(350), started_at=at(400))
+        m["run"]["exit_status"] = "failed"                                           # stored, never total-eligible
+        self.post(build_envelope(m, basis=prs({"repo": "a/b", "number": 9})))
+        self.partial = m["run_id"]
+        self.main = self.submit(basis=MAIN, elapsed=flat_elapsed(420), started_at=at(500))
+
+    def prsets(self, query="", status=200):
+        r = self.c.get("/api/leaderboard/prsets" + query)
+        self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:300])
+        return r.get_json()
+
+    def test_list_representatives_and_sorts(self):
+        out = self.prsets()
+        self.assertEqual([x["prset"] for x in out["prsets"]],
+                         [PQ, "facebookincubator/velox#12", "a/b#9"])                # best first, none last
+        pq = out["prsets"][0]
+        self.assertEqual((pq["best"]["run_id"], pq["run_count"], pq["eligible_count"], pq["is_hero"]),
+                         (self.pq_fast, 2, 2, True))                                  # 8×6 is off the default filter
+        self.assertIsNone(out["prsets"][2]["best"])
+        r_vs = out["prsets"][1]["vs_hero_pct"]
+        self.assertAlmostEqual(r_vs, 22 * 50 * 100 / (22 * 400 + 253))               # totals: 22 × base + Σq
+        anyshape = self.prsets("?executors=&executor_cores=")["prsets"][0]
+        self.assertEqual(anyshape["best"]["run_id"], self.pq_other)                 # the same rank() as the board
+        self.assertEqual([x["prset"] for x in self.prsets("?sort=number")["prsets"]],
+                         [PQ, "facebookincubator/velox#12", "a/b#9"])                # highest PR number first
+        self.assertEqual([x["prset"] for x in self.prsets("?sort=recent")["prsets"]],
+                         ["a/b#9", "facebookincubator/velox#12", PQ])
+        self.prsets("?sort=size", status=400)
+        self.c.post(f"/api/leaderboard/runs/{self.pq_fast}/withdraw", json={"actor": "a", "reason": "b"})
+        self.assertEqual(self.prsets()["prsets"][1]["best"]["run_id"], self.pq_slow)
+
+    def test_compare_by_prset(self):
+        r = self.c.get(f"{LB}/compare?prsets={quote(PQ)},{quote('facebookincubator/velox#12')}")
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True)[:300])
+        page = r.get_data(as_text=True)
+        self.assertLess(page.index(self.pq_fast[:8]), page.index(self.r_only[:8]))
+        self.assertIn("gluten#88 + #1561", page)
+        self.assertIn("velox#12", page)
+        wide = self.c.get(f"{LB}/compare?prsets={quote(PQ)},{quote('facebookincubator/velox#12')}"
+                          "&executors=&executor_cores=").get_data(as_text=True)
+        self.assertIn(self.pq_other[:8], wide)
+        self.assertEqual(self.c.get(f"{LB}/compare?prsets={quote(PQ)},a%2Fb%239").status_code, 404)
+        self.assertEqual(self.c.get(f"{LB}/compare?prsets={quote(PQ)},{quote(PQ)}").status_code, 400)
+        self.assertEqual(self.c.get(f"{LB}/compare?prsets={quote(PQ)},nope").status_code, 400)
+        self.assertEqual(self.c.get(f"{LB}/compare?prsets={quote(PQ)},a%2Fb%239&runs={self.main}").status_code, 400)
+        for bad in ("sf=999", "sf=abc", "target=nope"):                              # page errors are HTML
+            r = self.c.get(f"{LB}/compare?prsets={quote(PQ)},{quote('facebookincubator/velox#12')}&{bad}")
+            self.assertEqual((r.status_code, r.mimetype), (400, "text/html"), bad)
+
+    def test_prset_page_and_api(self):
+        reordered = quote("XCENA-dev/xflare-analytics#1561+apache/gluten#88")
+        api = self.c.get(f"/api/leaderboard/prset?prset={reordered}").get_json()
+        self.assertEqual((api["prset"], api["revision"], api["report_url"]), (PQ, 0, None))
+        # Every configuration of the set, in board order: the 8×6 run leads here (the list's filter is not applied).
+        self.assertEqual([r["run_id"] for r in api["runs"]], [self.pq_other, self.pq_fast, self.pq_slow])
+        self.assertEqual([r["place"] for r in api["runs"]], [1, 2, 3])
+        self.assertEqual([p["check"] for p in api["prs"]], [None, None])
+        page = self.c.get(f"{LB}/prset?prset={reordered}")
+        self.assertEqual(page.status_code, 200)
+        text = page.get_data(as_text=True)
+        self.assertIn("https://github.com/apache/gluten/pull/88", text)
+        self.assertIn('id="lb-report-edit"', text)
+        self.assertEqual(self.c.get(f"{LB}/prset?prset=a%2F..%231").status_code, 404)
+        self.assertEqual(self.c.get("/api/leaderboard/prset?prset=").status_code, 400)
+        empty = self.c.get(f"/api/leaderboard/prset?prset={quote('z/z#1')}").get_json()
+        self.assertEqual(empty["runs"], [])
+        # The set's report URL: versioned, restorable, kept when no run claims the set any more.
+        post = lambda body, status=200: self.c.post(f"/api/leaderboard/prset?prset={reordered}", json=body)
+        r = post({"actor": "a", "expected_revision": 0, "report_url": "https://claude.ai/artifact/x1"})
+        self.assertEqual((r.status_code, r.get_json()["revision"]), (200, 1))
+        self.assertEqual(post({"actor": "b", "expected_revision": 0, "report_url": None}).status_code, 409)
+        post({"actor": "b", "expected_revision": 1, "report_url": None})
+        event = self.c.get(f"/api/leaderboard/prset?prset={reordered}").get_json()["history"][1]["event_id"]
+        r = post({"actor": "c", "expected_revision": 2, "restore": event})
+        self.assertEqual(r.get_json()["report_url"], "https://claude.ai/artifact/x1")
+        self.assertEqual(self.prsets()["prsets"][0]["report_url"], "https://claude.ai/artifact/x1")
+        self.assertEqual(self.c.post(f"/api/leaderboard/prset?prset={reordered}", data="{}",
+                                     content_type="text/plain").status_code, 415)
+
+    def test_pr_checks_and_completion(self):
+        check = lambda repo, n, ids, status=200, **kw: self.c.post(
+            f"/api/leaderboard/prs/{repo}/{n}/check", json={"actor": "skill@x", "run_ids": ids, **kw})
+        completion = lambda run: self.c.get(f"/api/leaderboard/prset?prset={quote(PQ)}").get_json()["runs"][
+            [r["run_id"] for r in self.c.get(f"/api/leaderboard/prset?prset={quote(PQ)}").get_json()["runs"]].index(run)
+        ]["completion"]
+        self.assertEqual(completion(self.pq_fast)["complete"], False)
+        r = check("xcena-dev/xflare-analytics", 1561, [self.pq_fast, self.pq_slow], body_sha256="a" * 64, source="file")
+        self.assertEqual((r.status_code, r.get_json()["listed_count"]), (200, 2))
+        self.assertEqual([m["status"] for m in completion(self.pq_fast)["members"]], ["not checked", "listed"])
+        check("Apache/Gluten", 88, [self.pq_fast])                                  # names any case of the repo
+        self.assertTrue(completion(self.pq_fast)["complete"])
+        self.assertEqual([m["status"] for m in completion(self.pq_slow)["members"]], ["not listed", "listed"])
+        run_page = self.c.get(f"{LB}/run/{self.pq_fast}").get_data(as_text=True)
+        self.assertIn(">complete<", run_page)
+        # Adding a member re-opens it: R's body was never checked.
+        self.edit(self.pq_fast, "basis", {"actor": "a", "expected_revision": 1, "basis": prs(P, Q, R)})
+        detail = self.c.get(f"/api/leaderboard/runs/{self.pq_fast}").get_json()
+        self.assertFalse(self.c.get(f"/api/leaderboard/prset?prset={quote(PQ + '+facebookincubator/velox#12')}")
+                         .get_json()["runs"][0]["completion"]["complete"])
+        self.assertEqual(detail["basis"]["prs"][2]["key"], "xcena-dev/xflare-analytics#1561")
+        for path, body, status in (("a/b/1", {"actor": "x", "run_ids": ["nope"]}, 400),
+                                   ("a/b/1", {"actor": "x", "run_ids": [], "body_sha256": "A" * 64}, 400),
+                                   ("a/b/1", {"actor": "", "run_ids": []}, 400),
+                                   ("a/b/1", {"actor": "x", "run_ids": [rid()] * 1001}, 400),
+                                   ("a/../1", {"actor": "x", "run_ids": []}, 404),
+                                   ("a/b/0", {"actor": "x", "run_ids": []}, 404)):
+            with self.subTest(path=path, body=str(body)[:40]):
+                self.assertEqual(self.c.post(f"/api/leaderboard/prs/{path}/check", json=body).status_code, status)
+        self.assertEqual(self.c.post("/api/leaderboard/prs/a/b/1/check", json={"actor": "x", "run_ids": []},
+                                     headers={"Origin": "http://evil.example"}).status_code, 403)
+
+
+class TestHeroHistory(A9Case):
+    """A9: best so far among today's eligible runs, per metric, labelled with each hero's basis."""
+
+    def hist(self, query="", status=200):
+        r = self.c.get("/api/leaderboard/history" + query)
+        self.assertEqual(r.status_code, status, r.get_data(as_text=True)[:300])
+        return r.get_json()
+
+    def test_total_record_breakers_ties_and_window(self):
+        a = self.submit(basis=prs(P), elapsed=flat_elapsed(500), started_at=at(0))
+        b = self.submit(elapsed=flat_elapsed(600), started_at=at(1440))                   # slower: a point only
+        c = self.submit(basis=MAIN, elapsed=flat_elapsed(400), started_at=at(2880))
+        tie = self.submit(elapsed=flat_elapsed(400), started_at=at(4320))                 # same value, same repeats
+        more = self.submit(elapsed=flat_elapsed(400), repeats=5, started_at=at(5760))     # same value, more repeats
+        gone = self.submit(elapsed=flat_elapsed(100), started_at=at(7200))
+        self.c.post(f"/api/leaderboard/runs/{gone}/withdraw", json={"actor": "a", "reason": "b"})
+        self.submit(elapsed=flat_elapsed(100), executors=8, started_at=at(8640))          # off the default filter
+        out = self.hist()
+        self.assertEqual([p["run_id"] for p in out["points"]], [a, b, c, tie, more])
+        self.assertEqual([h["run_id"] for h in out["heroes"]], [a, c, more])
+        self.assertEqual(self.board()["hero"]["run_id"], more)                          # the last hero is the board's
+        self.assertEqual([h["basis"] and h["basis"]["label"] for h in out["heroes"]], ["#1561", "main · latest #1564", None])
+        self.assertAlmostEqual(out["heroes"][1]["delta_pct"], (400 - 500) * 22 * 100 / (500 * 22 + 253))
+        self.assertEqual([p["hero"] for p in out["points"]], [True, False, True, False, True])
+        self.assertLess(out["points"][0]["t"], out["points"][1]["t"])
+        window = self.hist(f"?from={self.day(tie)}")
+        self.assertEqual([h["run_id"] for h in window["heroes"]], [c, more])
+        self.assertEqual([h["entering"] for h in window["heroes"]], [True, False])
+
+    def day(self, run_id):
+        return self.c.get(f"/api/leaderboard/runs/{run_id}").get_json()["finished_at"][:10]
+
+    def test_per_query_series(self):
+        """q3's history: a run with q3 ineligible is no point there (but is on q5); ties as the board."""
+        def elapsed(base, q3=None):
+            return lambda q, r, e: (q3 if q == 3 and q3 is not None and e == "xflare" else base + q)
+        a = self.submit(elapsed=elapsed(500), started_at=at(0))
+        broken = self.submit(elapsed=elapsed(100, q3=0), started_at=at(100))              # q3 not eligible
+        tie = self.submit(elapsed=elapsed(500), started_at=at(200))
+        fast3 = self.submit(elapsed=elapsed(600, q3=50), started_at=at(300))
+        q3 = self.hist("?metric=q3")
+        self.assertEqual(q3["metric"], "q3")
+        self.assertEqual([p["run_id"] for p in q3["points"]], [a, tie, fast3])
+        self.assertEqual([h["run_id"] for h in q3["heroes"]], [a, fast3])
+        self.assertEqual([h["xflare_ms"] for h in q3["heroes"]], [503, 50])
+        q5 = self.hist("?metric=q5")
+        self.assertEqual([h["run_id"] for h in q5["heroes"]], [a, broken])
+        total = self.hist()
+        self.assertNotIn(broken, [p["run_id"] for p in total["points"]])
+        self.assertEqual(self.board("?metric=q3")["rows"][0]["run_id"], q3["heroes"][-1]["run_id"])
+        for bad in ("q23", "Total", "q0"):
+            self.hist(f"?metric={bad}", status=400)
+
+    def test_vs_target_per_metric_and_goal_on_the_total_only(self):
+        target = self.submit(executors=8, elapsed=flat_elapsed(500, velox=2000), started_at=at(0))
+        hero = self.submit(elapsed=flat_elapsed(400, velox=3000), started_at=at(100))
+        self.pin_target(target, goal=4.0)
+        total = self.hist()
+        self.assertEqual(total["target"]["goal"], 4.0)
+        self.assertAlmostEqual(total["heroes"][0]["vs_target"], sum(2000 + q for q in range(1, 23))
+                               / sum(400 + q for q in range(1, 23)))
+        q7 = self.hist("?metric=q7")
+        self.assertIsNone(q7["target"]["goal"])
+        self.assertEqual(q7["target"]["velox_ms"], 2007)
+        self.assertAlmostEqual(q7["heroes"][0]["vs_target"], 2007 / 407)
+        self.assertEqual(q7["heroes"][0]["run_id"], hero)
+        self.assertIsNone(self.hist("?target=none")["target"])
+
+    def test_answers_name_the_script(self):
+        script = json.loads(self.page_data()["lb-page-data"])["script"]
+        for url in ("/api/leaderboard/history", "/api/leaderboard/prsets", "/api/leaderboard/history?metric=bad"):
+            self.assertEqual(self.c.get(url).headers.get("X-Leaderboard-Script"), script, url)
+
+
+class TestA9Storage(A9Case):
+    def test_v2_database_gains_the_a9_tables(self):
+        run = self.submit()
+        db = os.path.join(self.data, "leaderboard.sqlite3")
+        self.pin_target(run)
+        import sqlite3
+        c = sqlite3.connect(db)
+        c.executescript("DROP TABLE run_attribution; DROP TABLE prset_attribution; DROP TABLE attribution_events;"
+                        " DROP TABLE pr_checks; PRAGMA user_version = 2;")
+        c.close()
+        app = lb_app.create_app(config(self.data))
+        lb_store._stores.clear()
+        client = app.test_client()
+        self.assertIsNone(client.get(f"/api/leaderboard/runs/{run}").get_json()["basis"])
+        r = client.post(f"/api/leaderboard/runs/{run}/basis", json={"actor": "a", "expected_revision": 0, "basis": MAIN})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(client.get("/api/leaderboard/targets/100/snappy").get_json()["run_id"], run)
+        c = sqlite3.connect(db)
+        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
+        # An older binary (going back a version) lowers the number; the tables and their data stay, and this one
+        # raises it again without touching them.
+        c.execute("PRAGMA user_version = 2")
+        c.close()
+        lb_store._stores.clear()
+        again = lb_app.create_app(config(self.data)).test_client()
+        self.assertEqual(again.get(f"/api/leaderboard/runs/{run}").get_json()["basis"]["label"], "main · latest #1564")
+        c = sqlite3.connect(db)
+        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
+        c.close()
+
+
+class TestA9BoardScript(WebCase):
+    """A9 on the board page: the Basis column, the hero-history panel (its metric follows the board's tab and has
+    its own selector; only the newest answer draws) and the PR-set panel (compare by set)."""
+
+    drive = TestBoardScript.drive
+
+    def setUp(self):
+        super().setUp()
+        self.a = self.submit(basis=prs(P, Q), elapsed=flat_elapsed(500), started_at=at(0))
+        self.b = self.submit(basis=MAIN, elapsed=flat_elapsed(400), started_at=at(1440))
+        m = build_manifest(run_id=rid(), elapsed=flat_elapsed(450), started_at=at(2880))
+        self.post(build_envelope(m, basis=prs(*({"repo": "a/b", "number": n} for n in range(1, 6)))))
+        self.c.post(f"/api/leaderboard/runs/{m['run_id']}/report_url",
+                    json={"actor": "a", "expected_revision": 1, "report_url": "https://claude.ai/artifact/x"})
+        get = lambda u: self.c.get(u).get_data(as_text=True)
+        self.responses = {"board": get("/api/leaderboard/board"), "q3": get("/api/leaderboard/board?metric=q3"),
+                          "hist": get("/api/leaderboard/history"), "hist3": get("/api/leaderboard/history?metric=q3"),
+                          "hist5": get("/api/leaderboard/history?metric=q5"), "sets": get("/api/leaderboard/prsets")}
+
+    def test_basis_and_report_columns(self):
+        out = self.drive([{"answer": 0, "with": "board"}], self.responses)
+        texts = [r["text"][2] for r in out["boardRows"]]
+        self.assertIn("main · latest #1564", texts)
+        five = next(r for r in out["boardRows"] if "+3" in r["text"][2])
+        self.assertEqual(five["text"][2:4], ["b#1 ↗ b#2 ↗ +3", "↗ Report"])   # two chips on one line, the rest counted
+        self.assertIn("https://claude.ai/artifact/x", five["hrefs"])
+        self.assertEqual([h for h in five["hrefs"] if "github" in h],
+                         [f"https://github.com/a/b/pull/{n}" for n in (1, 2)])    # each chip's ↗
+        self.assertIn("a/b#3\na/b#4\na/b#5", five["titles"])                       # "+3" names the rest
+        self.assertEqual([r["text"][3] for r in out["boardRows"]].count("—"), 2)      # no Report of its own or its set's
+
+    def test_board_row_cells(self):
+        """The board's 11 cells: the compare box in the rank cell, the devices under the run, the mode and engines
+        under the config, the repeats as the first badge, the whole submitter in its cell's tooltip."""
+        out = self.drive([{"answer": 0, "with": "board"}], self.responses)
+        for row in out["boardRows"]:
+            self.assertEqual(len(row["text"]), 11)
+            self.assertEqual(row["inputs"], [{"checked": False, "disabled": False}])
+            self.assertRegex(row["text"][1], r"^\d{4}-\d\d-\d\d \d\d:\d\d device \S")
+            self.assertTrue(row["text"][7].endswith("per-engine · velox, xflare"), row["text"][7])
+            self.assertRegex(row["text"][9], r"^x\d+ ")
+            self.assertIn(row["text"][8], row["titles"])
+
+    def test_only_github_pr_urls_become_hrefs(self):
+        """A9: the page makes an href of a PR only from a https://github.com/<repo>/pull/<n> URL; a tampered answer's
+        other URL (another origin, a script URL, a path that escapes) is shown as text, never linked."""
+        board = json.loads(self.responses["board"])
+        row = next(r for r in board["rows"] if r["basis"] and r["basis"]["kind"] == "pr" and len(r["basis"]["prs"]) == 2)
+        bad = ["javascript:alert(1)", "https://evil.example/apache/gluten/pull/88",
+               "https://github.com/apache/gluten/pull/88/../../../evil", "https://github.com.evil.example/a/b/pull/1"]
+        row["basis"]["prs"][0]["url"], row["basis"]["prs"][1]["url"] = bad[0], bad[1]
+        main = next(r for r in board["rows"] if r["basis"] and r["basis"]["kind"] == "main")
+        main["basis"]["url"] = bad[2]
+        board["hero"]["basis"] = {**row["basis"], "prs": [{**row["basis"]["prs"][0], "url": bad[3]}]}
+        out = self.drive([{"answer": 0, "with": "tampered"}], {**self.responses, "tampered": json.dumps(board)})
+        links = [h for r in out["boardRows"] for h in r["hrefs"]]
+        for url in bad:
+            self.assertNotIn(url, links)
+        self.assertIn("gluten#88", [r["text"][2] for r in out["boardRows"] if "gluten" in r["text"][2]][0])
+
+    def test_a_pr_chip_filters_and_its_chip_removes_it(self):
+        """A9: clicking a PR chip asks the board for that PR (pr=<key>) and shows it as a removable chip."""
+        picked = self.c.get(f"/api/leaderboard/board?pr={quote('apache/gluten#88')}").get_data(as_text=True)
+        out = self.drive([{"answer": 0, "with": "board"}, {"click": "gluten#88"}, {"answer": 1, "with": "picked"},
+                          {"click": "gluten#88 ×"}], {**self.responses, "picked": picked})
+        self.assertIn("pr=apache%2Fgluten%2388", out["requests"][1])
+        self.assertEqual(len(out["boardRows"]), 1)
+        self.assertNotIn("pr=", out["requests"][2])                                  # the chip's × lifts it again
+
+    def test_a_long_pr_literal_is_cut_on_its_chip(self):
+        board = json.loads(self.responses["board"])
+        board["filter"]["pr"] = "x" * 3000
+        out = self.drive([{"answer": 0, "with": "long"}], {**self.responses, "long": json.dumps(board)})
+        chip = [b for b in out["buttons"] if b["text"].endswith(" ×")]
+        self.assertEqual(len(chip), 1)
+        self.assertLessEqual(len(chip[0]["text"]), 512 + 3)
+        self.assertLessEqual(len(chip[0]["title"]), 512 + 10)
+
+    def test_a_panel_answer_for_another_script_after_a_new_board_empties_the_panel(self):
+        """The board moved on (a PR chip), the history's answer comes from another script: nothing of the
+        old context stays in the panel."""
+        picked = self.c.get(f"/api/leaderboard/board?pr={quote('apache/gluten#88')}").get_data(as_text=True)
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"},
+                          {"click": "gluten#88"}, {"answer": 2, "with": "picked"}, {"answer": 3, "with": "other"}],
+                         {**self.responses, "picked": picked, "other": self.responses["hist"]},
+                         meta={"other": {"headers": {"x-leaderboard-script": "0" * 12}}})
+        self.assertEqual(out["historyRows"], [])
+        self.assertEqual(out["status"], "서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요.")
+
+    def test_history_follows_the_board_metric_and_its_own_selector(self):
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"},
+                          {"tab": ["lb-metric-tabs", "Q3"]}, {"answer": 2, "with": "q3"}, {"answer": 3, "with": "hist3"}],
+                         self.responses)
+        self.assertIn("metric=total", out["requests"][1])
+        self.assertIn("/api/leaderboard/history?", out["requests"][3])
+        self.assertIn("metric=q3", out["requests"][3])                               # follows the board's Q3 tab
+        self.assertEqual(out["historyMetric"], "Q3")
+        self.assertTrue(out["historyNote"].startswith("Q3:"), out["historyNote"])
+        # Its own selector: Q5 there; a late Q3 answer (asked first) never draws over it.
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"click": "Q3"},
+                          {"click": "Q5"}, {"answer": 3, "with": "hist5"}, {"answer": 2, "with": "hist3"}],
+                         self.responses)
+        self.assertEqual([u for u in out["requests"] if "history" in u][-2:][0].count("metric=q3"), 1)
+        self.assertTrue(out["historyNote"].startswith("Q5:"), out["historyNote"])
+        self.assertIn("metric=total", out["requests"][1])
+
+    def test_history_table_and_chart(self):
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"}],
+                         self.responses)
+        self.assertEqual(len(out["historyRows"]), 2)                                 # newest hero first
+        self.assertIn("main · latest #1564", out["historyRows"][0]["text"][4])
+        self.assertIn("gluten#88 ↗ #1561 ↗", out["historyRows"][1]["text"][4])
+        hist = out["charts_all"][-1]
+        self.assertEqual([d["label"] for d in hist], ["eligible runs", "best so far (hero)"])
+        self.assertEqual(len(hist[0]["data"]), 3)
+        self.assertEqual([p["y"] for p in hist[1]["data"]], [500 * 22 + 253, 400 * 22 + 253, 400 * 22 + 253])
+
+    def test_history_draws_the_target_and_its_goal(self):
+        self.pin_target(self.a, goal=3.0)
+        responses = {**self.responses, "board": self.c.get("/api/leaderboard/board").get_data(as_text=True),
+                     "hist": self.c.get("/api/leaderboard/history").get_data(as_text=True),
+                     "hist3": self.c.get("/api/leaderboard/history?metric=q3").get_data(as_text=True)}
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"}],
+                         responses)
+        self.assertEqual([d["label"] for d in out["charts_all"][-1]],
+                         ["eligible runs", "best so far (hero)", "speedup vs target", "goal 3.00×"])
+        q3 = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"click": "Q3"},
+                         {"answer": 2, "with": "hist3"}], responses)
+        self.assertEqual([d["label"] for d in q3["charts_all"][-1]],
+                         ["eligible runs", "best so far (hero)", "speedup vs target"])  # no goal for a query
+
+    def test_prset_panel_compares_two_sets(self):
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-prsets"}, {"answer": 1, "with": "sets"},
+                          {"check": PQ}, {"check": "a/b#1+a/b#2+a/b#3+a/b#4+a/b#5"}, {"fire": "lb-prsets-compare"}],
+                         self.responses)
+        self.assertEqual(len(out["prsetRows"]), 2)
+        self.assertEqual([r["text"][4] for r in out["prsetRows"]], ["+12.2%", "+24.3%"])      # vs the main hero
+        url = urllib.parse.urlsplit(out["location"])
+        self.assertEqual(url.path, f"{LB}/compare")
+        self.assertEqual(urllib.parse.parse_qs(url.query)["prsets"], [f"{PQ},a/b#1+a/b#2+a/b#3+a/b#4+a/b#5"])
+        self.assertEqual(self.c.get(out["location"]).status_code, 200)
+
+    def test_a_panel_answer_for_another_script_asks_for_a_reload(self):
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"}],
+                         self.responses, meta={"hist": {"headers": {"x-leaderboard-script": "0" * 12}}})
+        self.assertEqual(out["status"], "서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요.")
+        self.assertEqual(out["historyRows"], [])
+
+    FIVE = "a/b#1+a/b#2+a/b#3+a/b#4+a/b#5"
+    HISTORY_OPEN = [{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"}]
+    SETS_PICKED = [{"answer": 0, "with": "board"}, {"open": "lb-prsets"}, {"answer": 1, "with": "sets"},
+                   {"check": PQ}, {"check": FIVE}]
+
+    @staticmethod
+    def history_chart(out):
+        return [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+
+    def test_a_panel_answer_of_an_older_board_never_draws(self):
+        """A9: a panel answer asked under the board's previous tab or filter never draws, also when it arrives before
+        the new board answer, and a closed panel's answer never draws; the new board asks the open panel again."""
+        # History open and pending, the board's Q3 tab clicked, the Total history answers first.
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"tab": ["lb-metric-tabs", "Q3"]},
+                          {"answer": 1, "with": "hist"}, {"answer": 2, "with": "q3"}], self.responses)
+        self.assertEqual((out["historyRows"], self.history_chart(out)), ([], []), out.get("historyNote"))
+        self.assertIn("metric=q3", out["requests"][3])
+        # PR sets open and pending, a PR chip filters the board, the unfiltered answer comes first.
+        picked = self.c.get(f"/api/leaderboard/board?pr={quote('apache/gluten#88')}").get_data(as_text=True)
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-prsets"}, {"click": "gluten#88"},
+                          {"answer": 1, "with": "sets"}, {"answer": 2, "with": "picked"}],
+                         {**self.responses, "picked": picked})
+        self.assertEqual(out["prsetRows"], [])
+        self.assertIn("pr=apache%2Fgluten%2388", out["requests"][3])
+        # Closed while pending: after a tab change (its answer after the new board), and without one.
+        for steps in ([{"tab": ["lb-metric-tabs", "Q3"]}, {"answer": 2, "with": "q3"}, {"answer": 1, "with": "hist"}],
+                      [{"answer": 1, "with": "hist"}]):
+            with self.subTest(steps=steps):
+                out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"close": "lb-history"}]
+                                 + steps, self.responses)
+                self.assertEqual((out["historyRows"], self.history_chart(out)), ([], []))
+        # Drawn, then closed: the next board empties it, so opening it never shows the old context first.
+        out = self.drive(self.HISTORY_OPEN + [{"close": "lb-history"}, {"tab": ["lb-metric-tabs", "Q3"]},
+                                              {"answer": 2, "with": "q3"}], self.responses)
+        self.assertEqual(out["historyRows"], [])
+        self.assertEqual([c["destroyed"] for c in self.history_chart(out)], [True])
+
+    def test_a_failed_board_load_empties_the_panels(self):
+        """A9: a board load that draws no new board (an error answer, a lost connection, another script's answer)
+        leaves no table, chart or compare selection of the previous context in the panels."""
+        responses = {**self.responses, "400": '{"errors": ["metric: total or q1..q22"]}', "down": ""}
+        for key, meta in (("400", {"status": 400}), ("down", {"reject": True}),
+                          ("q3", {"headers": {"x-leaderboard-script": "0" * 12}})):
+            with self.subTest(answer=key):
+                out = self.drive(self.HISTORY_OPEN + [{"open": "lb-prsets"}, {"answer": 2, "with": "sets"},
+                                                      {"check": PQ}, {"check": self.FIVE},
+                                                      {"tab": ["lb-metric-tabs", "Q3"]}, {"answer": 3, "with": key}],
+                                 responses, meta={key: meta})
+                self.assertEqual((out["historyRows"], out["prsetRows"]), ([], []))
+                self.assertEqual(out["historyNote"], "board 를 불러오지 못했습니다.")
+                self.assertTrue(all(c["destroyed"] for c in self.history_chart(out)), out["chartInfo"])
+                self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
+
+    def test_a_panel_error_leaves_nothing_of_the_last_answer(self):
+        """A9: an error answer for the history's other metric, or for the PR sets in another order, shows the error
+        alone: the previous metric's table and chart, or the previous table and its selection, are gone."""
+        responses = {**self.responses, "bad": '{"errors": ["leaderboard storage unavailable"]}'}
+        meta = {"bad": {"status": 503}}
+        out = self.drive(self.HISTORY_OPEN + [{"click": "Q3"}, {"answer": 2, "with": "bad"}], responses, meta)
+        self.assertEqual(out["historyRows"], [])
+        self.assertEqual(out["historyNote"], "leaderboard storage unavailable")
+        self.assertEqual([c["destroyed"] for c in self.history_chart(out)], [True])
+        out = self.drive(self.SETS_PICKED + [{"select": ["lb-prsets-sort", "number"]}, {"answer": 2, "with": "bad"}],
+                         responses, meta)
+        self.assertEqual(out["prsetRows"], [])
+        self.assertEqual(out["prsetsNote"], "leaderboard storage unavailable")
+        self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
+
+    def test_an_entering_hero_is_drawn_where_the_window_starts(self):
+        """With `from`, the x axis starts at the window, not at the entering hero's old finish; without a
+        window it starts at the first point as before."""
+        old = self.submit(basis=prs(P), elapsed=flat_elapsed(100), started_at=at(-1440 * 300))
+        newer = self.submit(elapsed=flat_elapsed(900), started_at=at(1440 * 30))
+        day = self.c.get(f"/api/leaderboard/runs/{newer}").get_json()["finished_at"][:10]
+        hist = self.c.get(f"/api/leaderboard/history?from={day}").get_data(as_text=True)
+        self.assertEqual([h["run_id"] for h in json.loads(hist)["heroes"]], [old])
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "win"}],
+                         {**self.responses, "win": hist})
+        [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+        start = int(datetime.datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()) * 1000
+        self.assertGreaterEqual(chart["xMin"], start)
+        steps = [d for d in out["charts_all"][-1] if d["label"] == "best so far (hero)"][0]["data"]
+        self.assertEqual(steps[0]["x"], start)
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"}],
+                         self.responses)
+        [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+        self.assertEqual(chart["xMin"], min(p["t"] for p in json.loads(self.responses["hist"])["points"]))
+
+    def test_a_failed_history_draw_never_blocks_the_next(self):
+        """A draw that throws inside Chart.js leaves its chart on the canvas; the next draw destroys it first
+        (Chart.getChart) instead of failing with "Canvas is already in use"."""
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"},
+                          {"click": "Q3"}, {"answer": 2, "with": "hist3"}], self.responses, chart_throws=1)
+        history = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+        self.assertEqual([c["destroyed"] for c in history], [True, False])
+        self.assertEqual(out["rejections"], ["draw failed"])                         # the first draw only
+
+    def test_the_chart_start_survives_a_bad_from_and_a_cut(self):
+        """An impossible `from` (2026-10-00) never reaches the chart as NaN, and after a budget cut the chart
+        starts at the first shown point even with `from` set."""
+        hist = json.loads(self.responses["hist"])
+        first = min(p["t"] for p in hist["points"])
+        for case, extra in (("bad from", {"filter": {**hist["filter"], "from": "2026-10-00"}}),
+                            ("cut", {"filter": {**hist["filter"], "from": "2000-01-01"}, "truncated": True})):
+            with self.subTest(case):
+                # The entering hero finished before the shown series, as the server sends it after a cut.
+                entering = {**hist["heroes"][0], "entering": True, "t": first - 10 * 86400000}
+                answer = {**hist, **extra, "heroes": [entering] + hist["heroes"][1:]}
+                out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "x"}],
+                                 {**self.responses, "x": json.dumps(answer)})
+                [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+                self.assertEqual(chart["xMin"], first)
+                # The note counts the shown runs that were best, not the entering hero from before them.
+                self.assertIn(f"best 였던 run {len(answer['heroes']) - 1}개", out["historyNote"])
+                self.assertIn("(표시 구간 이전부터)", out["historyRows"][-1]["text"][0])   # newest first
+
+    def test_a_board_reload_drops_a_set_selection_at_once(self):
+        out = self.drive(self.SETS_PICKED + [{"tab": ["lb-metric-tabs", "Q3"]}], self.responses)
+        self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
+        # nothing of the old list can be ticked while the new board is pending, selected or not.
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-prsets"}, {"answer": 1, "with": "sets"},
+                          {"tab": ["lb-metric-tabs", "Q3"]}], self.responses)
+        self.assertEqual(out["prsetRows"], [])
+
+    def test_a_panel_reopened_during_a_failed_load_draws_nothing(self):
+        responses = {**self.responses, "503": '{"errors": ["leaderboard storage unavailable"]}'}
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"},
+                          {"tab": ["lb-metric-tabs", "Q3"]}, {"close": "lb-history"}, {"open": "lb-history"},
+                          {"answer": 2, "with": "503"}, {"answer": 3, "with": "hist"}],
+                         responses, meta={"503": {"status": 503}})
+        self.assertEqual(out["historyRows"], [])
+
+    def test_a_compare_selection_keeps_only_sets_with_a_best_run(self):
+        """A9: when the list comes back (here re-sorted), a selected set without a best run is unchecked (never
+        checked and disabled) and the Compare button counts what is left."""
+        sets = json.loads(self.responses["sets"])
+        for x in sets["prsets"]:
+            if x["prset"] == self.FIVE:
+                x["best"] = None
+        out = self.drive(self.SETS_PICKED + [{"select": ["lb-prsets-sort", "number"]}, {"answer": 2, "with": "none"}],
+                         {**self.responses, "none": json.dumps(sets)})
+        boxes = {r["text"][1]: r["inputs"] for r in out["prsetRows"]}
+        self.assertEqual(boxes["b#1 + b#2 + b#3 +2"], [{"checked": False, "disabled": True}])
+        self.assertEqual([v for k, v in boxes.items() if "gluten" in k], [[{"checked": True, "disabled": False}]])
+        self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (1/2–4)"})
+
+    def test_history_chart_axis_and_steps(self):
+        """A9: x is a linear axis of epoch ms (each point at its run's t); the best line and the speedup line hold each
+        hero's value until the next hero (Chart.js stepped 'before': 'after' would draw the next value over the
+        interval)."""
+        self.pin_target(self.a, goal=3.0)
+        hist = self.c.get("/api/leaderboard/history").get_data(as_text=True)
+        out = self.drive(self.HISTORY_OPEN, {**self.responses, "hist": hist})
+        info = self.history_chart(out)[-1]
+        self.assertEqual(info["x"], "linear")
+        self.assertEqual(info["stepped"], [None, "before", "before", None])
+        data = json.loads(hist)
+        series = out["charts_all"][-1]
+        self.assertEqual([p["x"] for p in series[0]["data"]], [p["t"] for p in data["points"]])
+        self.assertEqual([p["x"] for p in series[1]["data"]][:-1], [h["t"] for h in data["heroes"]])
+        for d in series:
+            for p in d["data"]:
+                self.assertIsInstance(p["x"], int)
+                self.assertGreater(p["x"], 10 ** 12)                                 # ms, not seconds
+
+    def test_history_labels_one_per_hero_inside_the_chart(self):
+        """A9: the canvas names each hero's basis (BASIS_CHIPS PRs, as the table) when there is room; on a narrow chart
+        a label that would leave the chart area or overlap one already drawn is left out."""
+        hist = json.loads(self.responses["hist"])
+        board = json.loads(self.responses["board"])
+        hist["heroes"][0]["basis"] = next(r["basis"] for r in board["rows"]
+                                          if r["basis"] and r["basis"].get("prset") == self.FIVE)
+        out = self.drive(self.HISTORY_OPEN, {**self.responses, "hist": json.dumps(hist)},
+                         label_draws=[{"width": 2000, "height": 300}, {"width": 200, "height": 40}])
+        self.assertEqual(json.loads(self.page_data()["lb-page-data"])["basis_chips"], 3)
+        self.assertEqual(json.loads(self.page_data()["lb-page-data"])["board_basis_chips"], 2)
+        wide, narrow = out["labelDraws"]
+        self.assertEqual([d["text"] for d in wide], ["b#1 + b#2 + b#3 +2", "main · latest #1564"])
+        self.assertEqual(len(narrow), 1)
+        for draws, width, height in ((wide, 2000, 300), (narrow, 200, 40)):
+            boxes = [(d["x"] - d["w"] / 2, d["x"] + d["w"] / 2, d["y"] - 11, d["y"] + 2) for d in draws]
+            for i, (l, r, t, b) in enumerate(boxes):
+                self.assertTrue(0 <= l and r <= width and 0 <= t and b <= height, (draws, width, height))
+                for l2, r2, t2, b2 in boxes[:i]:
+                    self.assertFalse(l < r2 and l2 < r and t < b2 and t2 < b, draws)
+
+    def test_report_falls_back_to_the_pr_set_report(self):
+        """A9: the Report cell (board, hero, history) links the run's own Report, else its PR set's (said so in the
+        tooltip), else "—"; only an http(s) URL becomes a link."""
+        board = json.loads(self.responses["board"])
+        for r in board["rows"]:
+            kind = (r["basis"] or {}).get("prset")
+            r["prset_report_url"] = {self.FIVE: "https://example.com/five", PQ: "https://example.com/pq"}.get(kind)
+            if not kind:
+                r["prset_report_url"] = "javascript:alert(1)"
+        board["hero"]["prset_report_url"] = "https://example.com/hero-set"
+        hist = json.loads(self.responses["hist"])
+        hist["heroes"][0]["prset_report_url"] = "https://example.com/pq"
+        out = self.drive(self.HISTORY_OPEN, {**self.responses, "board": json.dumps(board), "hist": json.dumps(hist)})
+        rows = {r["text"][2]: r for r in out["boardRows"]}
+        five = next(r for k, r in rows.items() if "+3" in k)
+        pq = next(r for k, r in rows.items() if "gluten" in k)
+        main = rows["main · latest #1564"]
+        self.assertEqual((five["text"][3], pq["text"][3], main["text"][3]), ("↗ Report", "↗ Report", "—"))
+        self.assertIn("https://claude.ai/artifact/x", five["hrefs"])                  # its own wins
+        self.assertNotIn("https://example.com/five", five["hrefs"])
+        self.assertIn("https://example.com/pq", pq["hrefs"])
+        self.assertIn("PR set Report: https://example.com/pq", pq["titles"])
+        self.assertNotIn("javascript:alert(1)", main["hrefs"])
+        self.assertIn("https://example.com/hero-set", out["heroMeta"]["hrefs"])
+        self.assertIn("PR set Report: https://example.com/hero-set", out["heroMeta"]["titles"])
+        self.assertEqual(out["historyRows"][1]["text"][5], "↗ Report")                 # newest hero first
+        self.assertIn("PR set Report: https://example.com/pq", out["historyRows"][1]["titles"])
+        self.assertEqual(out["historyRows"][0]["text"][5], "—")
+
+    def test_long_labels_wrap_in_their_cells(self):
+        """A9: the history's Basis cell and the PR-set cell wrap (a long repository name stays in its column)."""
+        out = self.drive(self.HISTORY_OPEN + [{"open": "lb-prsets"}, {"answer": 2, "with": "sets"}], self.responses)
+        self.assertEqual({r["cls"][4] for r in out["historyRows"]}, {"lb-wrap-cell"})
+        self.assertEqual({r["cls"][1] for r in out["prsetRows"]}, {"lb-wrap-cell"})
+
+
+def css_rules(name):
+    """static/<name> as {selector: {property: value}}: comments dropped, each selector of a list on its own, a later
+    rule adding to an earlier one (the file has no at-rules)."""
+    with open(os.path.join(ROOT, "static", name), encoding="utf-8") as f:
+        text = re.sub(r"/\*.*?\*/", "", f.read(), flags=re.S)
+    rules = {}
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", text):
+        decls = {k.strip(): v.strip() for k, v in (d.split(":", 1) for d in body.split(";") if ":" in d)}
+        for sel in selectors.split(","):
+            rules.setdefault(" ".join(sel.split()), {}).update(decls)
+    return rules
+
+
+class TestA9Styles(unittest.TestCase):
+    """A9 layout rules of leaderboard.css that a 390 px page needs."""
+
+    def setUp(self):
+        self.rules = css_rules("leaderboard.css")
+
+    def test_long_chips_wrap(self):
+        """A chip label (a valid repository name runs to 100 characters) wraps in the hero, a table cell and the PR
+        filter instead of running past the page."""
+        chip = self.rules[".lb-chip"]
+        # break-word, not anywhere: a table cell keeps whole short labels on one line (the demo's PR-set members).
+        self.assertEqual((chip["white-space"], chip["overflow-wrap"], chip["max-width"]), ("normal", "break-word", "100%"))
+        self.assertEqual(self.rules[".lb-chip-pair"]["display"], "inline-flex")      # a chip and its ↗ wrap as one
+        # A board row's chips wrap too: with real PR numbers (gluten#10234 velox#14567) a no-wrap line pushed "+N" out
+        # of the cell, hiding a member.
+        self.assertEqual([s for s, d in self.rules.items() if "lb-chips" in s and d.get("flex-wrap", "wrap") != "wrap"],
+                         [])
+        # ...to two lines at most: a chip past 170 px is cut there, never "+N".
+        cap = self.rules[".lb-board td.lb-basis-cell .lb-chip:not(.lb-chip-more)"]
+        self.assertEqual((cap["max-width"], cap["white-space"], cap["text-overflow"]), ("170px", "nowrap", "ellipsis"))
+        # in an inline-flex chip the label is a flex item that break-word never breaks (a 100-character name
+        # ran past a 390 px page); the chip must be a block box for break-word to apply.
+        self.assertEqual(chip["display"], "inline-block")
+        # an edit history line (a grid item) may hold one long actor or chip: it may shrink and break.
+        events = self.rules[".lb-target-events > li"]
+        self.assertEqual((events["min-width"], events["overflow-wrap"]), ("0", "anywhere"))
+        self.assertEqual(self.rules[".lb-chips"]["max-width"], "100%")
+        pr = self.rules[".lb-pr-filter"]
+        self.assertEqual((pr["flex-wrap"], pr["max-width"]), ("wrap", "100%"))
+        self.assertEqual(self.rules['body[data-page="prset"] h1']["overflow-wrap"], "anywhere")   # "PR set <label>"
+
+    def test_board_report_column_fits_its_label(self):
+        """"↗ Report" needs about 81 px with the cell's padding: its fixed column is wider, and Submitter keeps the
+        100 px the table's min-width leaves it."""
+        widths = {}
+        for sel, decls in self.rules.items():
+            m = re.fullmatch(r"\.lb-board th:nth-child\((\d+)\)", sel)
+            if m and "width" in decls:
+                widths[int(m.group(1))] = int(decls["width"].removesuffix("px"))
+        self.assertGreaterEqual(widths[4], 96)
+        self.assertNotIn(12, widths)                                   # 11 columns: devices sit under the run
+        self.assertEqual(int(self.rules[".lb-board"]["min-width"].removesuffix("px")) - sum(widths.values()), 100)
+
+    def test_wrap_cells_keep_a_width_in_auto_tables(self):
+        """A wrapping cell of an auto-layout table keeps a usable width (the PR-set page's Config was squeezed to
+        ~78 px at 390 px); the board's fixed columns are left alone."""
+        self.assertGreaterEqual(int(self.rules[".lb-table td.lb-wrap-cell"]["min-width"].removesuffix("px")), 160)
+        self.assertNotIn("min-width", self.rules[".lb-board td.lb-wrap-cell"])
+
+
+class TestA9EditScript(A9Case):
+    """A9 edit buttons on the run and PR-set pages: actor + value prompts, the page's revision, restore by event."""
+
+    def page(self, url):
+        html = self.c.get(url).get_data(as_text=True)
+        restores = [{"id": f"restore-{e}", "dataset": {"event": e, "field": f}}
+                    for e, f in re.findall(r'data-event="(\d+)" data-field="(\w+)"', html)]
+        return {"ids": re.findall(r'id="([^"]+)"', html) + [r["id"] for r in restores], "data": json_blocks(html),
+                "selectors": {".lb-restore": restores}}
+
+    def test_basis_prompt_reads_every_form(self):
+        run = self.submit(basis=prs(P, Q))
+        page = self.page(f"{LB}/run/{run}")
+        out = run_page_js("run", click="lb-basis-edit", fetch="{}", prompts=["me@x"], **page)
+        self.assertEqual(out["fetches"], [])                                         # cancelled at the value prompt
+        for text, basis in (
+                ("1561 apache/gluten#88", prs(P, Q)),
+                ("#1561, https://github.com/apache/gluten/pull/88", prs(P, Q)),
+                ("main 1564", MAIN),
+                ("main facebookincubator/velox#12", {"kind": "main", "repo": "facebookincubator/velox", "latest_pr": 12}),
+                ("", None)):
+            with self.subTest(text):
+                out = run_page_js("run", click="lb-basis-edit", fetch="{}", prompts=["me@x", text], **page)
+                self.assertEqual(out["fetches"], [{"url": f"/api/leaderboard/runs/{run}/basis", "method": "POST",
+                                                   "body": {"actor": "me@x", "expected_revision": 1, "basis": basis}}])
+                self.assertEqual(out["reloads"], 1)
+        for text in ("main", "main 1 2", "x/y/z#1", "#0", "abc", "apache/gluten88", "main a/b12"):
+            with self.subTest(bad=text):
+                out = run_page_js("run", click="lb-basis-edit", fetch="{}", prompts=["me@x", text], **page)
+                self.assertEqual((out["fetches"], len(out["alerts"])), ([], 1))
+
+    def test_prompt_starts_from_the_full_stored_value(self):
+        run = self.submit(basis=prs(*({"repo": "a/b", "number": n} for n in range(1, 17))))
+        page = self.page(f"{LB}/run/{run}")
+        data = json.loads(page["data"]["lb-edit-data"])
+        self.assertEqual(len(data["basis"]["prs"]), 16)
+        out = run_page_js("run", click="lb-basis-edit", fetch="{}",
+                          prompts=["me@x", " ".join(f"a/b#{n}" for n in range(1, 17))], **page)
+        self.assertEqual(len(out["fetches"][0]["body"]["basis"]["prs"]), 16)
+
+    def test_link_restore_and_conflict(self):
+        run = self.submit()
+        for revision, link in enumerate(("https://x.example/1", "https://x.example/2")):
+            self.edit(run, "report_url", {"actor": "a", "expected_revision": revision, "report_url": link})
+        page = self.page(f"{LB}/run/{run}")
+        self.assertEqual(len(page["selectors"][".lb-restore"]), 1)                   # only the earlier value
+        restore = page["selectors"][".lb-restore"][0]
+        out = run_page_js("run", click=restore["id"], fetch="{}", prompts=["me@x"], **page)
+        self.assertEqual(out["fetches"][0]["body"], {"actor": "me@x", "expected_revision": 2,
+                                                     "restore": int(restore["dataset"]["event"])})
+        out = run_page_js("run", click="lb-report-edit", fetch='{"errors": ["changed meanwhile: reload and try again"]}',
+                          prompts=["me@x", ""], status=409, **page)
+        self.assertEqual(out["fetches"][0]["body"], {"actor": "me@x", "expected_revision": 2, "report_url": None})
+        self.assertIn("HTTP 409", out["alerts"][0])
+        self.assertEqual((out["reloads"], out["disabled"]["lb-report-edit"]), (0, False))
+
+    def test_prset_page_link_edit(self):
+        self.submit(basis=prs(P, Q))
+        page = self.page(f"{LB}/prset?prset={quote(PQ)}")
+        out = run_page_js("prset", click="lb-report-edit", fetch="{}", prompts=["me@x", " https://x.example/e "], **page)
+        self.assertEqual(out["fetches"], [{"url": f"/api/leaderboard/prset?prset={quote(PQ)}", "method": "POST",
+                                           "body": {"actor": "me@x", "expected_revision": 0,
+                                                    "report_url": "https://x.example/e"}}])
+
+
+class TestA9ReviewFixes(A9Case):
+
+    def test_only_ascii_digits_name_an_event_or_a_pr(self):
+        """'²' passes str.isdigit() but not int(); '٣' passes both as 3. Neither is an event id or a PR number."""
+        run = self.submit(basis=prs(P))
+        for value in ("%C2%B2", "%D9%A3", "1%C2%B2"):
+            with self.subTest(before=value):
+                self.assertEqual(self.c.get(f"/api/leaderboard/runs/{run}/history?before={value}").status_code, 400)
+                self.assertEqual(self.c.get(f"/api/leaderboard/prset?prset={quote(PQ)}&before={value}").status_code, 400)
+                self.assertEqual(self.c.get(f"{LB}/run/{run}?before={value}").status_code, 400)
+            with self.subTest(number=value):
+                r = self.c.post(f"/api/leaderboard/prs/a/b/{value}/check", json={"actor": "x", "run_ids": []})
+                self.assertEqual(r.status_code, 404)
+
+    def test_run_page_shows_and_edits_one_snapshot(self):
+        """An edit that lands while the page is built never pairs the new revision with the old value."""
+        run = self.submit(basis=prs(P))
+        real_get = lb_store.Store.get
+
+        def get_then_edit(store, run_id):
+            row = real_get(store, run_id)
+            store.edit("run", run_id, "basis", prs(P, R), "other@x", 1)               # lands between the reads
+            lb_store.Store.get = real_get
+            return row
+
+        with mock.patch.object(lb_store.Store, "get", get_then_edit):
+            page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)
+        data = json.loads(json_blocks(page)["lb-edit-data"])
+        self.assertEqual(data["revision"], 2)
+        self.assertEqual(len(data["basis"]["prs"]), 2)                                # the value at revision 2
+        basis_section = page[page.index('id="basis"'):page.index("Per-query medians")]
+        self.assertIn("velox#12", basis_section)
+
+    def test_meta_never_holds_a_basis(self):
+        """The run's basis is kept apart; a retry carrying another basis shows it nowhere."""
+        m = build_manifest(run_id=rid())
+        self.post(build_envelope(m, basis=prs(P)))
+        self.post(build_envelope(m, basis=prs(R)), status=200)
+        detail = self.c.get(f"/api/leaderboard/runs/{m['run_id']}").get_json()
+        self.assertNotIn("basis", detail["meta"])
+        self.assertEqual(detail["basis"]["prset"], "xcena-dev/xflare-analytics#1561")
+        warned = self.post(build_envelope(build_manifest(run_id=rid()), basis={**prs(P), "x": 1}), "?dry_run=1",
+                           status=200)["warnings"]
+        self.assertIn("$.basis.'x': unknown property (ignored, not stored)", warned)
+
+    def test_basis_option_labels_are_bounded(self):
+        """A PR set option names at most BASIS_CHIPS PRs plus +N and is cut like any label."""
+        long = [{"repo": f"o{n}/" + "r" * 98, "number": n} for n in range(1, 17)]
+        self.submit(basis=prs(*long))
+        label = next(o["label"] for o in self.board()["facets"]["basis"] if o["label"].startswith("PR set"))
+        self.assertTrue(label.endswith(" +13"), label)
+        self.assertLessEqual(len(label), 512)
+
+    def test_filter_literals_echo_the_canonical_key(self):
+        """The board echoes a pr / basis=prset: literal as its canonical key, so its option and chip select."""
+        self.submit(basis=prs(P, Q))
+        board = self.board(f"?pr={quote('XCENA-dev/xflare-analytics#1561')}&basis={quote('prset:XCENA-dev/xflare-analytics#1561+apache/gluten#88')}")
+        self.assertEqual(board["filter"], {**board["filter"], "pr": "xcena-dev/xflare-analytics#1561", "basis": "prset:" + PQ})
+        self.assertEqual(board["filter_tokens"]["basis"], facet_token("prset:" + PQ))
+        self.assertEqual(len(board["rows"]), 1)
+
+    def test_a_check_counts_each_run_once_and_replaces_the_last(self):
+        """Also over HTTP: duplicates count once; a later check of the PR replaces the earlier one."""
+        run = self.submit(basis=prs(P))
+        post = lambda ids: self.c.post("/api/leaderboard/prs/xcena-dev/xflare-analytics/1561/check",
+                                       json={"actor": "s", "run_ids": ids}).get_json()
+        self.assertEqual(post([run, run])["listed_count"], 1)
+        post([])
+        page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)
+        self.assertIn("not listed", page)
+        self.assertEqual(self.c.post("/api/leaderboard/prs/a/b/1/check",
+                                     json={"actor": "s", "run_ids": [], "source": ""}).status_code, 400)
+
+    def test_a_sets_report_reaches_its_runs(self):
+        """A run without a Report of its own shows its PR set's on the board, the hero, the history and its page."""
+        run = self.submit(basis=prs(P, Q), elapsed=flat_elapsed(100), started_at=at(0))
+        other = self.submit(basis=prs(R), elapsed=flat_elapsed(900), started_at=at(1440))
+        r = self.c.post(f"/api/leaderboard/prset?prset={quote(PQ)}",
+                        json={"actor": "a", "expected_revision": 0, "report_url": "https://x.example/set"})
+        self.assertEqual(r.status_code, 200)
+        board = self.board()
+        rows = {x["run_id"]: x for x in board["rows"]}
+        self.assertEqual((rows[run]["report_url"], rows[run]["prset_report_url"]), (None, "https://x.example/set"))
+        self.assertIsNone(rows[other]["prset_report_url"])
+        self.assertEqual(board["hero"]["prset_report_url"], "https://x.example/set")
+        self.assertEqual(self.c.get("/api/leaderboard/history").get_json()["heroes"][0]["prset_report_url"],
+                         "https://x.example/set")
+        page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)
+        self.assertIn("PR set Report", page)
+        self.assertIn('href="https://x.example/set"', page)
+        both = self.c.get(f"/api/leaderboard/prset?prset={quote('facebookincubator/velox#12')}").get_json()
+        self.assertEqual(both["runs"][0]["run_id"], other)
+        for url in (f"{LB}/compare?runs={run},{other}",
+                    f"{LB}/compare?prsets={quote(PQ)},{quote('facebookincubator/velox#12')}&executors=&executor_cores="):
+            with self.subTest(url):
+                compare = self.c.get(url).get_data(as_text=True)
+                self.assertIn('href="https://x.example/set"', compare)            # the set's, for a run without one
+        runs_table = self.c.get(f"{LB}/prset?prset={quote(PQ)}").get_data(as_text=True).split('id="prset-runs"')[1]
+        self.assertIn('href="https://x.example/set"', runs_table)                # the runs table falls back too
+
+    def test_run_page_shows_the_report_of_the_set_it_shows(self):
+        """A basis change while the page is built shows the new set's Report, never the old set's."""
+        run = self.submit(basis=prs(P))
+        for key, url in (("xcena-dev/xflare-analytics#1561", "https://x.example/OLD"),
+                         ("facebookincubator/velox#12", "https://x.example/NEW")):
+            self.c.post(f"/api/leaderboard/prset?prset={quote(key)}",
+                        json={"actor": "a", "expected_revision": 0, "report_url": url})
+        real_get = lb_store.Store.get
+
+        def get_then_edit(store, run_id):
+            row = real_get(store, run_id)
+            store.edit("run", run_id, "basis", prs(R), "other@x", 1)
+            lb_store.Store.get = real_get
+            return row
+
+        with mock.patch.object(lb_store.Store, "get", get_then_edit):
+            page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)
+        self.assertIn('href="https://x.example/NEW"', page)
+        self.assertNotIn("https://x.example/OLD", page)
+
+    def test_the_prset_list_stops_at_its_budget(self):
+        """The PR-set list keeps its first FACET_VALUES sets in its order and says it was cut."""
+        from leaderboard import web as lb_web
+        for n in (1, 2, 3):
+            self.submit(basis=prs({"repo": "a/b", "number": n}), elapsed=flat_elapsed(100 * n))
+        with mock.patch.object(lb_web, "FACET_VALUES", 2):
+            out = self.c.get("/api/leaderboard/prsets").get_json()
+        self.assertEqual(([x["prset"] for x in out["prsets"]], out["truncated"]), (["a/b#1", "a/b#2"], True))
+        self.assertFalse(self.c.get("/api/leaderboard/prsets").get_json()["truncated"])
+
+    def test_a_cut_history_starts_once_with_its_entering_hero(self):
+        """Past the hero budget the series starts at the oldest kept hero, which enters it; no point is older."""
+        from leaderboard import web as lb_web
+        ids = [self.submit(elapsed=flat_elapsed(900 - 100 * n), started_at=at(1440 * n)) for n in range(5)]
+        with mock.patch.object(lb_web, "HISTORY_HEROES", 3):
+            out = self.c.get("/api/leaderboard/history").get_json()
+        self.assertEqual([h["run_id"] for h in out["heroes"]], ids[2:])
+        self.assertEqual([h["entering"] for h in out["heroes"]], [True, False, False])
+        self.assertEqual([p["run_id"] for p in out["points"]], ids[3:])                # the entering hero's own is older
+        self.assertTrue(out["truncated"])
+        with mock.patch.object(lb_web, "HISTORY_POINTS", 2):
+            out = self.c.get("/api/leaderboard/history").get_json()
+        self.assertEqual([p["run_id"] for p in out["points"]], ids[3:])
+        self.assertEqual([h["run_id"] for h in out["heroes"]], ids[2:])            # the hero in force at the start
+        self.assertEqual(out["heroes"][0]["entering"], True)
+
+    def test_report_url_ports_are_real_ports(self):
+        """A port outside 1..65535 is no URL."""
+        run = self.submit()
+        for revision, (url, status) in enumerate((("https://x.example:65535/r", 200), ("https://x.example:65536/r", 400),
+                                                  ("https://x.example:0/r", 400), ("https://x.example:99999/r", 400))):
+            with self.subTest(url):
+                self.edit(run, "report_url", {"actor": "a", "expected_revision": min(revision, 1), "report_url": url},
+                          status=status)
+
+
+class TestA9Round2(A9Case):
+
+    drive = TestBoardScript.drive
+
+    def test_panels_and_compare_follow_the_board_filter_tokens(self):
+        """The history, the PR-set list and compare by set take the board's <key>_t tokens as /board does."""
+        four = self.submit(basis=prs(P), elapsed=flat_elapsed(500), started_at=at(0))
+        eight = self.submit(basis=prs(Q), elapsed=flat_elapsed(400), executors=8, started_at=at(1440))
+        token = f"executors=&executor_cores=&executors_t={quote(facet_token('8'))}"
+        hist = self.c.get(f"/api/leaderboard/history?{token}").get_json()
+        self.assertEqual([p["run_id"] for p in hist["points"]], [eight])
+        sets = self.c.get(f"/api/leaderboard/prsets?{token}").get_json()
+        self.assertEqual([x["prset"] for x in sets["prsets"]], ["apache/gluten#88"])
+        only = self.c.get(f"/api/leaderboard/prsets?executors=&executor_cores=&basis_t="
+                          f"{quote(facet_token('prset:xcena-dev/xflare-analytics#1561'))}").get_json()
+        self.assertEqual([x["best"]["run_id"] for x in only["prsets"]], [four])
+        page = self.c.get(f"{LB}/compare?prsets={quote('apache/gluten#88')},{quote('xcena-dev/xflare-analytics#1561')}"
+                          f"&{token}")
+        self.assertEqual(page.status_code, 404)                                     # #1561 has no 8×6 run
+
+    def test_a_withdrawn_eligible_run_has_no_place(self):
+        """Places count the ranked runs only (total-eligible, not withdrawn)."""
+        fast = self.submit(basis=prs(P), elapsed=flat_elapsed(100))
+        slow = self.submit(basis=prs(P), elapsed=flat_elapsed(200))
+        self.c.post(f"/api/leaderboard/runs/{fast}/withdraw", json={"actor": "a", "reason": "b"})
+        runs = self.c.get(f"/api/leaderboard/prset?prset={quote('xcena-dev/xflare-analytics#1561')}").get_json()["runs"]
+        self.assertEqual([(r["run_id"], r["place"]) for r in runs], [(slow, 1), (fast, None)])
+
+    def test_check_and_key_limits(self):
+        """The PR check's actor, number and hash limits, and the 16-member key limit."""
+        ok = {"actor": "s", "run_ids": []}
+        post = lambda path, body: self.c.post(f"/api/leaderboard/prs/{path}/check", json=body).status_code
+        self.assertEqual(post("a/b/2147483647", ok), 200)
+        self.assertEqual(post("a/b/2147483648", ok), 404)
+        self.assertEqual(post("a/b/1", {**ok, "actor": "x" * 257}), 400)
+        self.assertEqual(post("a/b/1", {**ok, "actor": "x" * 256}), 200)
+        self.assertEqual(post("a/b/1", {**ok, "body_sha256": "a" * 63}), 400)
+        self.assertEqual(post("a/b/1", {**ok, "body_sha256": "a" * 64}), 200)
+        sixteen = "+".join(f"a/b#{n}" for n in range(1, 17))
+        self.assertEqual(self.c.get(f"/api/leaderboard/prset?prset={quote(sixteen)}").status_code, 200)
+        self.assertEqual(self.c.get(f"/api/leaderboard/prset?prset={quote(sixteen + '+a/b#17')}").status_code, 400)
+        self.assertEqual(self.c.get(f"{LB}/prset?prset={quote(sixteen + '+a/b#17')}").status_code, 404)
+
+    def test_restore_takes_only_this_runs_events(self):
+        """An event of another run's same field is not a change of this run's."""
+        a, b = self.submit(), self.submit()
+        self.edit(b, "report_url", {"actor": "x", "expected_revision": 0, "report_url": "https://x.example/b"})
+        event = self.history(b)["history"][0]["event_id"]
+        out = self.edit(a, "report_url", {"actor": "x", "expected_revision": 0, "restore": event}, status=400)
+        self.assertEqual(out["errors"], ["restore: not a change of this report_url"])
+
+    def test_a_hero_on_the_from_day_is_shown_not_entering(self):
+        """The window starts at `from` inclusive; the entering hero finished before it."""
+        before = self.submit(elapsed=flat_elapsed(500), started_at=at(0))
+        on = self.submit(elapsed=flat_elapsed(400), started_at=at(1440))
+        day = self.c.get(f"/api/leaderboard/runs/{on}").get_json()["finished_at"][:10]
+        heroes = self.c.get(f"/api/leaderboard/history?from={day}").get_json()["heroes"]
+        self.assertEqual([(h["run_id"], h["entering"]) for h in heroes], [(before, True), (on, False)])
+
+    def test_run_page_workflow_follows_the_shown_basis(self):
+        """The PR workflow line uses the same snapshot as the shown basis."""
+        run = self.submit(basis=prs(P))
+        self.c.post("/api/leaderboard/prs/facebookincubator/velox/12/check", json={"actor": "s", "run_ids": [run]})
+        real_get = lb_store.Store.get
+
+        def get_then_edit(store, run_id):
+            row = real_get(store, run_id)
+            store.edit("run", run_id, "basis", prs(R), "other@x", 1)
+            lb_store.Store.get = real_get
+            return row
+
+        with mock.patch.object(lb_store.Store, "get", get_then_edit):
+            page = self.c.get(f"{LB}/run/{run}").get_data(as_text=True)
+        self.assertIn(">complete<", page)                                           # R's body lists it; P's never did
+
+    def test_submission_actor_is_trimmed(self):
+        """A blank submitter email names the claim "submission"."""
+        m = build_manifest(run_id=rid())
+        env = build_envelope(m, basis=prs(P))
+        env["submitter"]["email"] = "   "
+        self.post(env)
+        self.assertEqual(self.history(m["run_id"])["history"][0]["actor"], "submission")
+
+    def test_meta_from_an_older_binary_shows_no_basis(self):
+        """A basis an older binary kept in the stored metadata is not shown as metadata."""
+        import sqlite3
+        run = self.submit()
+        with sqlite3.connect(os.path.join(self.data, "leaderboard.sqlite3")) as c:
+            meta = json.loads(c.execute("SELECT meta_json FROM runs").fetchone()[0])
+            c.execute("UPDATE runs SET meta_json = ?", (json.dumps({**meta, "basis": prs(P)}),))
+        detail = self.c.get(f"/api/leaderboard/runs/{run}").get_json()
+        self.assertNotIn("basis", detail["meta"])
+        self.assertIsNone(detail["basis"])
+
+    def test_a_bad_before_on_a_page_is_an_html_400(self):
+        """Pages answer HTML."""
+        run = self.submit(basis=prs(P))
+        for url in (f"{LB}/run/{run}?before=x", f"{LB}/prset?prset={quote('xcena-dev/xflare-analytics#1561')}&before=x"):
+            with self.subTest(url):
+                r = self.c.get(url)
+                self.assertEqual((r.status_code, r.mimetype), (400, "text/html"))
+
+
+class TestA9Round3(A9Case):
+
+    def test_history_of_an_unknown_run_is_404(self):
+        self.assertEqual(self.c.get(f"/api/leaderboard/runs/{rid()}/history").status_code, 404)
+
+    def test_more_means_older_changes_remain(self):
+        run = self.submit()
+        for revision in range(50):
+            self.edit(run, "report_url", {"actor": "a", "expected_revision": revision,
+                                          "report_url": f"https://x.example/{revision}"})
+        self.assertFalse(self.history(run)["more"])                                  # exactly 50: nothing older
+        self.edit(run, "report_url", {"actor": "a", "expected_revision": 50, "report_url": None})
+        self.assertTrue(self.history(run)["more"])
+
+    def test_the_to_day_is_inside_the_window(self):
+        first = self.submit(elapsed=flat_elapsed(500), started_at=at(0))
+        last = self.submit(elapsed=flat_elapsed(400), started_at=at(1440))
+        day = self.c.get(f"/api/leaderboard/runs/{last}").get_json()["finished_at"][:10]
+        out = self.c.get(f"/api/leaderboard/history?to={day}").get_json()
+        self.assertEqual([h["run_id"] for h in out["heroes"]], [first, last])
+
+    def test_before_must_be_an_event_id(self):
+        run = self.submit()
+        for value in ("0", "9999999999999999999", "-1"):
+            with self.subTest(value):
+                self.assertEqual(self.c.get(f"/api/leaderboard/runs/{run}/history?before={value}").status_code, 400)
+
+    def test_source_and_report_url_lengths(self):
+        run = self.submit()
+        post = lambda source: self.c.post("/api/leaderboard/prs/a/b/1/check",
+                                          json={"actor": "s", "run_ids": [], "source": source}).status_code
+        self.assertEqual((post("x" * 64), post("x" * 65)), (200, 400))
+        base = "https://x.example/"
+        self.edit(run, "report_url", {"actor": "a", "expected_revision": 0, "report_url": base + "a" * (2048 - len(base))})
+        self.edit(run, "report_url", {"actor": "a", "expected_revision": 1,
+                                      "report_url": base + "a" * (2049 - len(base))}, status=400)
+
+    def test_a_key_naming_a_pr_twice_is_no_key(self):
+        self.assertEqual(self.c.get(f"/api/leaderboard/prset?prset={quote('a/b#1+a/b#1')}").status_code, 400)
+        self.assertEqual(self.c.get(f"/api/leaderboard/prset?prset={quote('a/b#1+A/B#1')}").status_code, 400)
+
+    def test_the_prset_pages_board_link_lifts_the_default_filter(self):
+        """The "only this set" view shows the set's runs in any resources."""
+        self.submit(basis=prs(Q), executors=8)
+        page = self.c.get(f"{LB}/prset?prset={quote('apache/gluten#88')}").get_data(as_text=True)
+        href = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1))
+        query = href.split("?", 1)[1]
+        self.assertEqual(len(self.board("?" + query)["rows"]), 1)
+        # on the set's own tab, wherever the first tab is.
+        self.submit(basis=prs(R), sf="1000")
+        self.submit()                                                                   # SF-100 has other runs
+        page = self.c.get(f"{LB}/prset?prset={quote('facebookincubator/velox#12')}").get_data(as_text=True)
+        query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
+        board = self.board("?" + query)
+        self.assertEqual((board["sf"], len(board["rows"])), ("1000", 1))
+        # a withdrawn run on an earlier tab does not take the link there.
+        gone = self.submit(basis=prs({"repo": "a/b", "number": 7}))
+        kept = self.submit(basis=prs({"repo": "a/b", "number": 7}), sf="1000")
+        self.c.post(f"/api/leaderboard/runs/{gone}/withdraw", json={"actor": "a", "reason": "b"})
+        page = self.c.get(f"{LB}/prset?prset={quote('a/b#7')}").get_data(as_text=True)
+        query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
+        self.assertEqual([r["run_id"] for r in self.board("?" + query)["rows"]], [kept])
+        # a ranked run wins over an earlier tab's run that is listed but not ranked (shared application).
+        self.submit(basis=prs({"repo": "a/b", "number": 8}), application_mode="shared")
+        ranked = self.submit(basis=prs({"repo": "a/b", "number": 8}), sf="1000")
+        page = self.c.get(f"{LB}/prset?prset={quote('a/b#8')}").get_data(as_text=True)
+        query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
+        self.assertEqual([r["run_id"] for r in self.board("?" + query)["rows"]], [ranked])
+
+    def test_a_default_filter_on_basis_keeps_the_prset_page(self):
+        """A configured default filter naming `basis` does not break the PR-set page's board link."""
+        self.app.extensions["leaderboard_cfg"]["default_filter"] = {"executors": 4, "executor_cores": 6, "basis": "main"}
+        self.submit(basis=prs(P))
+        r = self.c.get(f"{LB}/prset?prset={quote('xcena-dev/xflare-analytics#1561')}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("basis=prset:xcena-dev/xflare-analytics%231561", r.get_data(as_text=True))
+
+
+class TestA9Round7(A9Case):
+    def test_a_date_no_calendar_has_narrows_nothing(self):
+        """2026-02-30 or 2026-10-00 is not a date: like a half-typed one it narrows nothing and is not echoed."""
+        self.submit()
+        for bad in ("2026-02-30", "2026-10-00", "2026-13-01"):
+            with self.subTest(bad):
+                for url in (f"/api/leaderboard/board?from={bad}", f"/api/leaderboard/history?from={bad}"):
+                    out = self.c.get(url).get_json()
+                    self.assertNotIn("from", out["filter"], url)
+        self.assertEqual(self.board("?from=2026-02-28")["filter"]["from"], "2026-02-28")
+
+
+class TestA9Round4(A9Case):
+    """Compare by set from one read, and PR-set tab boundaries, orphaned Reports, 2-4 sets."""
+
+    def test_compare_by_set_shows_the_rows_it_chose(self):
+        a = self.submit(basis=prs({"repo": "a/b", "number": 1}), elapsed=flat_elapsed(100))
+        self.submit(basis=prs({"repo": "a/b", "number": 2}), elapsed=flat_elapsed(200))
+        real = lb_store.Store.list_runs
+
+        def list_then_edit(store, *args, **kw):
+            rows = real(store, *args, **kw)
+            store.edit("run", a, "basis", MAIN, "other@x", 1)                         # lands after the choice
+            lb_store.Store.list_runs = real
+            return rows
+
+        with mock.patch.object(lb_store.Store, "list_runs", list_then_edit):
+            page = self.c.get(f"{LB}/compare?prsets=a%2Fb%231,a%2Fb%232").get_data(as_text=True)
+        self.assertNotIn("main · latest #1564", page)                               # the basis it was chosen by
+        self.assertIn("b#1", page)
+
+    def test_prset_tabs_are_separate(self):
+        on100 = self.submit(basis=prs(P), elapsed=flat_elapsed(300))
+        on1000 = self.submit(basis=prs(P), elapsed=flat_elapsed(900), sf="1000")
+        other = self.submit(basis=prs(Q), elapsed=flat_elapsed(400), sf="1000")
+        key = "xcena-dev/xflare-analytics#1561"
+        lst = lambda q: {x["prset"]: x["best"]["run_id"] for x in self.c.get(f"/api/leaderboard/prsets?{q}").get_json()["prsets"]}
+        self.assertEqual(lst("sf=100"), {key: on100})
+        self.assertEqual(lst("sf=1000"), {key: on1000, "apache/gluten#88": other})
+        runs = self.c.get(f"/api/leaderboard/prset?prset={quote(key)}").get_json()["runs"]
+        self.assertEqual([(r["run_id"], r["tab"]["sf"], r["place"]) for r in runs], [(on100, "100", 1), (on1000, "1000", 1)])
+        page = self.c.get(f"{LB}/compare?prsets={quote(key)},{quote('apache/gluten#88')}&sf=1000").get_data(as_text=True)
+        self.assertIn(on1000[:8], page)
+        self.assertNotIn(on100[:8], page)
+
+    def test_an_orphaned_sets_report_stays_restorable(self):
+        run = self.submit(basis=prs(P))
+        key = quote("xcena-dev/xflare-analytics#1561")
+        post = lambda body: self.c.post(f"/api/leaderboard/prset?prset={key}", json={"actor": "a", **body})
+        self.assertEqual(post({"expected_revision": 0, "report_url": "https://x.example/set"}).status_code, 200)
+        self.edit(run, "basis", {"actor": "a", "expected_revision": 1, "basis": None})  # no run claims it now
+        self.assertEqual(post({"expected_revision": 1, "report_url": None}).status_code, 200)
+        api = self.c.get(f"/api/leaderboard/prset?prset={key}").get_json()
+        self.assertEqual((api["runs"], api["report_url"], len(api["history"])), ([], None, 2))
+        r = post({"expected_revision": 2, "restore": api["history"][1]["event_id"]})
+        self.assertEqual((r.get_json()["report_url"], r.get_json()["revision"]), ("https://x.example/set", 3))
+        self.assertIn('href="https://x.example/set"', self.c.get(f"{LB}/prset?prset={key}").get_data(as_text=True))
+
+    def test_compare_takes_two_to_four_sets(self):
+        keys = []
+        for n in range(1, 6):
+            self.submit(basis=prs({"repo": "a/b", "number": n}), elapsed=flat_elapsed(100 * n))
+            keys.append(quote(f"a/b#{n}"))
+        status = lambda k: self.c.get(f"{LB}/compare?prsets={','.join(keys[:k])}").status_code
+        self.assertEqual([status(k) for k in range(1, 6)], [400, 200, 200, 200, 400])
 
 
 if __name__ == "__main__":

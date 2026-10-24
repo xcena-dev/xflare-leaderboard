@@ -60,6 +60,12 @@ class BackupTest(unittest.TestCase):
             status, _ = self.store.put(make_fixtures.build_envelope(m), warnings=[f"$.w{i}: test warning"])
             self.assertEqual(status, "created")
         self.store.withdraw(make_fixtures.fixture_uuid(11), "tester", "bad booking")
+        # A9: a basis, a report URL, a PR set's report URL and a body check, with their revisions and events.
+        run = make_fixtures.fixture_uuid(12)
+        self.store.edit("run", run, "basis", {"kind": "main", "repo": "a/b", "latest_pr": 7}, "x", 0)
+        self.store.edit("run", run, "report_url", "https://x.example/r", "y", 1)
+        self.store.edit("prset", "a/b#1", "report_url", "https://x.example/s", "z", 0)
+        self.store.record_check("a/b", 1, [run], None, "file", "skill")
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -91,6 +97,10 @@ class BackupTest(unittest.TestCase):
             self.assertEqual(restored.get(r["run_id"]), self.store.get(r["run_id"]))
         self.assertEqual(restored.get(make_fixtures.fixture_uuid(12))["receipt"]["warnings"], ["$.w2: test warning"])
         self.assertTrue(restored.get(make_fixtures.fixture_uuid(11))["withdrawn"])
+        for kind, subject in (("run", make_fixtures.fixture_uuid(12)), ("prset", "a/b#1")):
+            self.assertEqual(restored.attribution_history(kind, subject), self.store.attribution_history(kind, subject))
+        self.assertEqual(restored.get(make_fixtures.fixture_uuid(12))["attribution"]["revision"], 2)
+        self.assertEqual(restored.checks([("a/b", 1)]), self.store.checks([("a/b", 1)]))
         ranks = {}
         for metric in ("total", "q1", "q22"):
             ranks[metric] = [r["run_id"] for r in aggregate.rank(restored.list_runs(), metric)]

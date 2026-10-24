@@ -22,12 +22,12 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 
-from . import aggregate
+from . import aggregate, schema
 
 DEFAULT_DATA_DIR = "/home/sw-devops/data/xflare_leaderboard"
 DATA_DIR_ENV = "XFLARE_LEADERBOARD_DATA"
 DB_NAME = "leaderboard.sqlite3"
-USER_VERSION = 2
+USER_VERSION = 3
 _RAW_NAME = re.compile(r"[0-9a-f]{64}\.json")
 _LOCK = threading.RLock()
 _stores: dict[str, "Store"] = {}
@@ -75,7 +75,49 @@ CREATE TABLE IF NOT EXISTS target_events (
     at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS target_events_tab ON target_events (sf, codec, event_id);
+CREATE TABLE IF NOT EXISTS run_attribution (
+    run_id TEXT PRIMARY KEY,
+    basis_json TEXT,
+    report_url_json TEXT,
+    revision INTEGER NOT NULL,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prset_attribution (
+    prset TEXT PRIMARY KEY,
+    report_url_json TEXT,
+    revision INTEGER NOT NULL,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS attribution_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_kind TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    field TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    before_json TEXT,
+    after_json TEXT,
+    restored_from INTEGER,
+    actor TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS attribution_events_subject ON attribution_events (subject_kind, subject, event_id);
+CREATE TABLE IF NOT EXISTS pr_checks (
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    run_ids_json TEXT NOT NULL,
+    body_sha256 TEXT,
+    source TEXT,
+    checked_by TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (repo, number)
+);
 """
+# A9: what can be edited after a submission, per subject kind: (table, key column, fields). Each field is a JSON
+# value in column <field>_json (NULL = none); every change is one attribution_events row.
+_SUBJECTS = {"run": ("run_attribution", "run_id", ("basis", "report_url")),
+             "prset": ("prset_attribution", "prset", ("report_url",))}
 
 
 class StorageUnavailable(Exception):
@@ -109,6 +151,14 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_SQL_INT_MAX = 2 ** 63 - 1
+
+
+def _enc(value) -> str | None:
+    """An A9 field value as stored: canonical JSON text (so equal values compare equal), NULL for none."""
+    return None if value is None else json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 class Store:
     def __init__(self, data_dir: str | os.PathLike, busy_timeout_ms: int = 5000):
         self.data_dir = pathlib.Path(data_dir)
@@ -140,8 +190,12 @@ class Store:
                 # FULL: a 201 receipt must survive power loss (the raw file is already fsynced); uploads are rare.
                 conn.execute("PRAGMA synchronous = FULL")
                 if not self._ready:
+                    # Every statement is idempotent (IF NOT EXISTS), so an upgrade interrupted anywhere redoes it on
+                    # the next start; the version follows the tables and is never lowered: a database an older
+                    # binary opened meanwhile (going back a version) keeps the tables it did not know.
                     conn.executescript(_SCHEMA)
-                    conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+                    if conn.execute("PRAGMA user_version").fetchone()[0] < USER_VERSION:
+                        conn.execute(f"PRAGMA user_version = {USER_VERSION}")
                     self._ready = True
             except BaseException:
                 conn.close()
@@ -219,9 +273,11 @@ class Store:
             _fsync_dir(self.raw_dir)
         return path
 
-    def _commit_row(self, envelope: dict, cid: str, derived: dict, receipt: dict) -> str:
+    def _commit_row(self, envelope: dict, cid: str, derived: dict, receipt: dict, basis: dict | None = None) -> str:
+        """``basis`` (A9, normalized) is the run's initial claim: stored with a new run, never by a retry."""
         manifest = envelope["manifest"]
-        meta = json.dumps({k: v for k, v in envelope.items() if k != "manifest"}, ensure_ascii=False)
+        # The A9 basis is kept apart (run_attribution), so a retry's envelope cannot show another one beside it.
+        meta = json.dumps({k: v for k, v in envelope.items() if k not in ("manifest", "basis")}, ensure_ascii=False)
         now = _now()
         mutable = (meta, envelope["submitter"]["email"], json.dumps(derived, ensure_ascii=False),
                    aggregate.DERIVE_VERSION, int(derived["total_eligible"]), now)
@@ -236,11 +292,16 @@ class Store:
                         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         mutable + (manifest["run_id"], cid, derived["sf"], derived["finished_at"], now,
                                    json.dumps(receipt, ensure_ascii=False)))
+                    if basis is not None:
+                        # The claim's actor is the submitter as the envelope names them.
+                        self._write_field(conn, "run", manifest["run_id"], "basis", None, _enc(basis),
+                                          envelope["submitter"]["email"].strip() or "submission", 0, now)
                     status = "created"
                 elif old["content_id"] != cid:
                     status = "conflict"
                 else:
-                    # Same content: refresh metadata only; identity, receipt and withdrawal stay as first written.
+                    # Same content: refresh metadata only; identity, receipt, withdrawal and the A9 basis stay as
+                    # first written (a later basis is an edit: Store.edit).
                     conn.execute(
                         "UPDATE runs SET meta_json = ?, submitter_email = ?, derived_json = ?, derive_version = ?,"
                         " total_eligible = ?, updated_at = ? WHERE run_id = ?",
@@ -262,7 +323,8 @@ class Store:
         derived = aggregate.derive(manifest, envelope, manifest_content_id=cid)
         receipt = {"ranked_total": derived["total_eligible"], "warnings": list(warnings)}
         self._write_raw(cid, raw)
-        status = self._commit_row(envelope, cid, derived, receipt)
+        basis = schema.normalize_basis(envelope["basis"]) if envelope.get("basis") is not None else None
+        status = self._commit_row(envelope, cid, derived, receipt, basis)
         return status, self.get(manifest["run_id"])
 
     def _row(self, conn: sqlite3.Connection, r: sqlite3.Row) -> dict:
@@ -282,6 +344,9 @@ class Store:
             derived, meta, receipt = (json.loads(r[k]) for k in ("derived_json", "meta_json", "receipt_json"))
         except ValueError:
             raise StorageUnavailable(f"leaderboard database row is not valid JSON in {self.db_path}") from None
+        # A9: an older binary kept an envelope's basis in the metadata; the run's basis is run_attribution's.
+        if isinstance(meta, dict):
+            meta.pop("basis", None)
         return {
             "run_id": r["run_id"], "content_id": r["content_id"], "sf": r["sf"], "finished_at": r["finished_at"],
             "submitted_at": r["submitted_at"], "updated_at": r["updated_at"], "submitter_email": r["submitter_email"],
@@ -309,6 +374,7 @@ class Store:
     def get(self, run_id: str) -> dict | None:
         with self._db("read") as conn:
             rows = self._rows(conn, "SELECT * FROM runs WHERE run_id = ?", (run_id,))
+            self._attach(conn, rows, "SELECT * FROM run_attribution WHERE run_id = ?", (run_id,))
             return rows[0] if rows else None
 
     def list_runs(self, sf: str | None = None, include_withdrawn: bool = False) -> list[dict]:
@@ -320,7 +386,33 @@ class Store:
             sql += " AND withdrawn = 0"
         with self._db("read") as conn:
             rows = self._rows(conn, sql, args)
+            self._attach(conn, rows, "SELECT * FROM run_attribution", ())
         return sorted(rows, key=lambda r: (aggregate.utc_key(r["finished_at"]), r["run_id"]))
+
+    def _attach(self, conn: sqlite3.Connection, rows: list[dict], sql: str, args) -> None:
+        """Every row gains "attribution" (A9): its basis, report URL and their revision, as ``_state`` reads them,
+        plus "prset_report_url", the report URL of the run's PR set."""
+        found = {r["run_id"]: r for r in conn.execute(sql, args).fetchall()}
+        states = {row["run_id"]: self._state("run", found.get(row["run_id"])) for row in rows}
+        keys = {schema.prset_key(s["basis"]["prs"]) for s in states.values()
+                if s["basis"] and s["basis"]["kind"] == "pr"}
+        reports = self._prset_reports(conn, keys)
+        for row in rows:
+            state = states[row["run_id"]]
+            key = schema.prset_key(state["basis"]["prs"]) if state["basis"] and state["basis"]["kind"] == "pr" else None
+            row["attribution"] = {**state, "prset_report_url": reports.get(key)}
+
+    def _prset_reports(self, conn: sqlite3.Connection, keys: set) -> dict[str, str]:
+        """The report URLs of the PR sets ``keys`` that have one: looked up one by one for a few sets (a page, a single
+        run), read in one pass for many (a whole board, which reads every run anyway)."""
+        if len(keys) > 50:
+            rows = conn.execute("SELECT prset, report_url_json FROM prset_attribution"
+                                " WHERE report_url_json IS NOT NULL").fetchall()
+        else:
+            rows = [r for key in keys for r in conn.execute(
+                "SELECT prset, report_url_json FROM prset_attribution WHERE prset = ? AND report_url_json IS NOT NULL",
+                (key,))]
+        return {r["prset"]: self._dec(r["report_url_json"]) for r in rows if r["prset"] in keys}
 
     def _read_manifest(self, cid: str) -> dict:
         data = self._read_raw_file(cid)
@@ -420,6 +512,131 @@ class Store:
                     conn.execute("ROLLBACK")
                 raise
         return "set", state
+
+    # --- A9: basis and report URLs, versioned like the target (A8) ----------------------------------------------
+
+    def _state(self, kind: str, r: sqlite3.Row | None) -> dict:
+        """A subject's editable fields (None when never set) with revision (0 for a subject never edited),
+        updated_by and updated_at."""
+        fields = _SUBJECTS[kind][2]
+        if r is None:
+            return {**{f: None for f in fields}, "revision": 0, "updated_by": None, "updated_at": None}
+        return {**{f: self._dec(r[f + "_json"]) for f in fields}, "revision": r["revision"],
+                "updated_by": r["updated_by"], "updated_at": r["updated_at"]}
+
+    def _dec(self, text: str | None):
+        if text is None:
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise StorageUnavailable(f"leaderboard database row is not valid JSON in {self.db_path}") from None
+
+    @staticmethod
+    def _write_field(conn: sqlite3.Connection, kind: str, subject: str, field: str, before: str | None,
+                     after: str | None, actor: str, revision: int, now: str, restored_from: int | None = None):
+        """Set one field at ``revision`` + 1 and append its event, inside the caller's transaction."""
+        table, key, fields = _SUBJECTS[kind]
+        if revision:
+            conn.execute(f"UPDATE {table} SET {field}_json = ?, revision = ?, updated_by = ?, updated_at = ?"
+                         f" WHERE {key} = ?", (after, revision + 1, actor, now, subject))
+        else:
+            conn.execute(f"INSERT INTO {table} ({key}, {', '.join(f + '_json' for f in fields)}, revision, updated_by,"
+                         f" updated_at) VALUES (?, {', '.join('?' for _ in fields)}, ?, ?, ?)",
+                         (subject, *(after if f == field else None for f in fields), revision + 1, actor, now))
+        conn.execute("INSERT INTO attribution_events (subject_kind, subject, field, revision, before_json, after_json,"
+                     " restored_from, actor, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (kind, subject, field, revision + 1, before, after, restored_from, actor, now))
+
+    def edit(self, kind: str, subject: str, field: str, value, actor: str, expected_revision: int,
+             restore: int | None = None) -> tuple[str, dict | None]:
+        """Set ``field`` of a run ("basis", "report_url") or a PR set ("report_url") to ``value`` (None clears) -- or,
+        with ``restore``, to the value that event set -- when the subject's revision is still ``expected_revision`` (0
+        for one never edited). "set": one event appended, revision + 1; "unchanged": already that value, no event;
+        "conflict": the revision moved; "unknown": no such run; "bad restore": the event is not one of this
+        subject's changes to this field. Returns the status and the state after (None for "unknown"). Withdrawn runs
+        stay editable."""
+        table, key, _ = _SUBJECTS[kind]
+        with self._db("edit") as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if kind == "run" and not conn.execute("SELECT 1 FROM runs WHERE run_id = ?", (subject,)).fetchone():
+                    conn.execute("ROLLBACK")
+                    return "unknown", None
+                cur = conn.execute(f"SELECT * FROM {table} WHERE {key} = ?", (subject,)).fetchone()
+                revision = cur["revision"] if cur else 0
+                before = cur[field + "_json"] if cur else None
+                after = _enc(value)
+                if restore is not None:
+                    event = conn.execute("SELECT after_json FROM attribution_events WHERE event_id = ?"
+                                         " AND subject_kind = ? AND subject = ? AND field = ?",
+                                         (restore, kind, subject, field)).fetchone()
+                    after = event["after_json"] if event else None
+                status = ("conflict" if revision != expected_revision else
+                          "bad restore" if restore is not None and event is None else
+                          "unchanged" if before == after else None)
+                if status:
+                    conn.execute("ROLLBACK")
+                    return status, self._state(kind, cur)
+                self._write_field(conn, kind, subject, field, before, after, actor, revision, _now(), restore)
+                state = self._state(kind, conn.execute(f"SELECT * FROM {table} WHERE {key} = ?",
+                                                       (subject,)).fetchone())
+                conn.execute("COMMIT")
+            except BaseException:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                raise
+        return "set", state
+
+    def attribution_history(self, kind: str, subject: str, before: int | None = None,
+                            limit: int = 50) -> tuple[dict, list[dict], bool]:
+        """A subject's state, its changes newest first (at most ``limit``, older than event ``before`` when given),
+        and whether older ones remain; read in one transaction."""
+        table, key, _ = _SUBJECTS[kind]
+        with self._db("read") as conn:
+            conn.execute("BEGIN")
+            try:
+                cur = conn.execute(f"SELECT * FROM {table} WHERE {key} = ?", (subject,)).fetchone()
+                rows = conn.execute("SELECT * FROM attribution_events WHERE subject_kind = ? AND subject = ?"
+                                    " AND event_id < ? ORDER BY event_id DESC LIMIT ?",
+                                    (kind, subject, before or _SQL_INT_MAX, limit + 1)).fetchall()
+                conn.execute("COMMIT")
+            except BaseException:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                raise
+        events = [{"event_id": r["event_id"], "field": r["field"], "revision": r["revision"],
+                   "before": self._dec(r["before_json"]), "after": self._dec(r["after_json"]),
+                   "restored_from": r["restored_from"], "actor": r["actor"], "at": r["at"]} for r in rows[:limit]]
+        return self._state(kind, cur), events, len(rows) > limit
+
+    def prset_reports(self, keys) -> dict[str, str]:
+        """{key: report URL} of the PR sets ``keys`` that have one."""
+        with self._db("read") as conn:
+            return self._prset_reports(conn, set(keys))
+
+    def record_check(self, repo: str, number: int, run_ids: list[str], body_sha256: str | None, source: str | None,
+                     actor: str) -> dict:
+        """A9: the latest check of a PR's body (which run ids it lists), replacing the one before."""
+        now = _now()
+        with self._db("check") as conn:
+            conn.execute("INSERT OR REPLACE INTO pr_checks (repo, number, run_ids_json, body_sha256, source,"
+                         " checked_by, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         (repo, number, json.dumps(run_ids), body_sha256, source, actor, now))
+        return {"repo": repo, "number": number, "run_ids": run_ids, "body_sha256": body_sha256, "source": source,
+                "checked_by": actor, "checked_at": now}
+
+    def checks(self, keys) -> dict[tuple[str, int], dict]:
+        """The latest body check of each (repo, number) in ``keys`` that has one."""
+        out = {}
+        with self._db("read") as conn:
+            for repo, number in set(keys):
+                r = conn.execute("SELECT * FROM pr_checks WHERE repo = ? AND number = ?", (repo, number)).fetchone()
+                if r is not None:
+                    out[(repo, number)] = {"repo": repo, "number": number, "run_ids": self._dec(r["run_ids_json"]),
+                                           "body_sha256": r["body_sha256"], "source": r["source"],
+                                           "checked_by": r["checked_by"], "checked_at": r["checked_at"]}
+        return out
 
     def health(self) -> dict:
         out = {"ok": False, "db_path": str(self.db_path), "row_count": None, "last_timestamp": None, "error": None}

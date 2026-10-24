@@ -425,6 +425,21 @@ def hero(rows: list[dict], flt: dict) -> dict | None:
     return ranked[0] if ranked else None
 
 
+def best_so_far(rows: list[dict], metric: str = "total") -> tuple[list[dict], list[dict]]:
+    """A9 hero history of ``metric`` ("total" | "q1".."q22"): (timeline, heroes). The timeline is the rows ranked on
+    that board (``rank``: eligible for it, non-withdrawn) in finish order (then run_id); a run is a hero when it beats
+    every run that finished before it in the board's own order (``order_key``), i.e. it led that board right after it
+    finished, among the runs eligible today. Pass one tab's rows under one filter."""
+    timeline = sorted(rank(rows, metric), key=lambda r: (utc_key(r["derived"]["finished_at"]), r["run_id"]))
+    heroes, best = [], None
+    for r in timeline:
+        key = order_key(r["derived"], metric)
+        if best is None or key < best:
+            heroes.append(r)
+            best = key
+    return timeline, heroes
+
+
 def hero_or_fallback(rows: list[dict], flt: dict) -> tuple[dict | None, bool]:
     """(hero under `flt`, False); when none matches, (fastest total-eligible row of any configuration, True); (None,
     False) when no row qualifies at all. Pass one SF tab's rows, so the fallback never crosses tabs."""

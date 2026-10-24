@@ -1,4 +1,4 @@
-// xflare TPC-H leaderboard pages (board, run detail, compare).
+// xflare TPC-H leaderboard pages (board, run detail, compare, PR set).
 //
 // Every string that came from a submission is hostile: the DOM is built with
 // createElement + textContent only, and ids in URLs go through
@@ -60,7 +60,8 @@
     return c ? Object.entries(c).map(([k, v]) => `${k}: ${v ?? '—'}`).join('\n') : '';
   }
   // The board's config cell: resources only (toml and bundle live in the tooltip and the filters, the
-  // application mode in its own column), plus the config label's `+conf` marker for custom Spark settings.
+  // application mode and engines on the cell's second line), plus the config label's `+conf` marker for custom Spark
+  // settings.
   function compactConfig(c) {
     const parts = [`${c.executors}×${c.executor_cores}`];
     if (c.offheap != null) parts.push(c.offheap);
@@ -187,6 +188,158 @@
     alert(`${what} 실패 (HTTP ${r.status}): ${((r.data && r.data.errors) || []).join('; ')}`);
   }
 
+  // ---- A9: basis, reports, edits ----------------------------------------------
+  // A stored report URL is an http(s) URL the server validated; checked again here before it becomes an href.
+  function safeHref(url) { return typeof url === 'string' && /^https?:\/\//.test(url) ? url : null; }
+  // "↗ Report", the URL in its tooltip; without one, the run's PR set's Report (`setUrl`, said so in the tooltip);
+  // a dim "—" without either.
+  function reportLink(url, setUrl) {
+    const own = safeHref(url);
+    const href = own || safeHref(setUrl);
+    if (!href) return el('span', 'lb-dim', '—');
+    const a = el('a', 'lb-report', '↗ Report');
+    a.href = href;
+    a.rel = 'noopener noreferrer';
+    a.target = '_blank';
+    a.title = own ? href : `PR set Report: ${href}`;
+    return a;
+  }
+  // A PR's GitHub page: the server builds it from the validated key on a fixed origin; anything else is no href.
+  function githubHref(url) {
+    return typeof url === 'string' && /^https:\/\/github\.com\/[a-z0-9-]+\/[a-z0-9._-]+\/pull\/[1-9][0-9]*$/.test(url)
+      ? url : null;
+  }
+  function githubLink(url, cls, text, title) {
+    const href = githubHref(url);
+    const a = el(href ? 'a' : 'span', cls, text);
+    if (href) { a.href = href; a.rel = 'noopener noreferrer'; a.target = '_blank'; }
+    a.title = title;
+    return a;
+  }
+  function prsetHref(board, key) { return `${board}/prset?${new URLSearchParams({ prset: key })}`; }
+  function prLabel(key, defaultRepo) {
+    const at = key.lastIndexOf('#');
+    const repo = key.slice(0, at);
+    return repo === defaultRepo ? key.slice(at) : `${repo.slice(repo.indexOf('/') + 1)}${key.slice(at)}`;
+  }
+  // A basis as chips: at most `max` PRs plus "+N" (the full set is in the tooltip); with `pick`, each chip is a button
+  // that filters by its PR with a small "↗" to it on GitHub beside it, else a link to it on GitHub; main is one chip
+  // to its latest PR on GitHub; none is "—".
+  function basisNode(basis, max, pick) {
+    const wrap = el('span', 'lb-chips');
+    if (!basis) { wrap.appendChild(el('span', 'lb-dim', '—')); return wrap; }
+    if (basis.kind === 'main') {
+      wrap.appendChild(githubLink(basis.url, 'lb-chip lb-chip-main', basis.label, `${basis.repo}#${basis.latest_pr}`));
+      return wrap;
+    }
+    const keys = basis.prs.map(p => p.key).join('\n');
+    for (const p of basis.prs.slice(0, max)) {
+      if (!pick) {
+        wrap.appendChild(githubLink(p.url, 'lb-chip', p.label, keys));
+        continue;
+      }
+      const chip = el('button', 'lb-chip', p.label);
+      chip.type = 'button';
+      chip.title = `${keys}\n— 이 PR 로 필터`;
+      chip.addEventListener('click', () => pick(p.key));
+      const pair = el('span', 'lb-chip-pair');
+      pair.appendChild(chip);
+      pair.appendChild(githubLink(p.url, 'lb-chip-gh', '↗', `${p.key} (GitHub)`));
+      wrap.appendChild(pair);
+    }
+    if (basis.prs.length > max) {
+      const more = el('span', 'lb-chip lb-chip-more', `+${basis.prs.length - max}`);
+      more.title = basis.prs.slice(max).map(p => p.key).join('\n');
+      wrap.appendChild(more);
+    }
+    return wrap;
+  }
+  function shortBasis(basis, max) {
+    if (!basis) return '—';
+    if (basis.kind === 'main') return basis.label;
+    const labels = basis.prs.map(p => p.label);
+    return labels.slice(0, max).join(' + ') + (labels.length > max ? ` +${labels.length - max}` : '');
+  }
+  function fmtPct(v) {
+    if (v === null || v === undefined) return '—';
+    const n = Number(v);
+    return isFinite(n) ? `${n > 0 ? '+' : ''}${n.toFixed(1)}%` : 'out of range';
+  }
+
+  // The basis as typed into the edit prompt: PRs as `N` (the default repository), `#N`, `owner/name#N` or a GitHub PR
+  // URL, separated by spaces or commas; `main <PR>` for a run measured on main (the PR is its latest merged one);
+  // empty for none. Returns {value} or {error}.
+  const PR_TOKEN = /^(?:https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/([1-9][0-9]{0,9})\/?|(?:([^#\s/]+\/[^#\s/]+)#|#)?([1-9][0-9]{0,9}))$/;
+  function parseBasis(text, defaultRepo) {
+    const tokens = String(text).trim().split(/[\s,]+/).filter(Boolean);
+    if (!tokens.length) return { value: null };
+    const pr = t => {
+      const m = PR_TOKEN.exec(t);
+      return m ? { repo: m[1] || m[3] || defaultRepo, number: Number(m[2] || m[4]) } : null;
+    };
+    if (tokens[0].toLowerCase() === 'main') {
+      const latest = tokens.length === 2 ? pr(tokens[1]) : null;
+      return latest ? { value: { kind: 'main', repo: latest.repo, latest_pr: latest.number } }
+        : { error: 'main 다음에는 PR 하나 (예: main 1564)' };
+    }
+    const prs = tokens.map(pr);
+    return prs.includes(null) ? { error: `PR 형식이 아닙니다: ${tokens[prs.indexOf(null)]}` }
+      : { value: { kind: 'pr', prs } };
+  }
+  function formatBasis(basis, defaultRepo) {
+    if (!basis) return '';
+    const one = (repo, n) => (repo === defaultRepo ? String(n) : `${repo}#${n}`);
+    return basis.kind === 'main' ? `main ${one(basis.repo, basis.latest_pr)}`
+      : basis.prs.map(p => one(p.repo, p.number)).join(' ');
+  }
+
+  // The run and PR-set pages' edit buttons (A9): each change names its actor and applies at the revision the page
+  // was rendered at (a change made meanwhile is a 409, never overwritten); a restore names the earlier change.
+  // Withdrawn runs keep them.
+  function initEdits() {
+    const node = document.getElementById('lb-edit-data');
+    if (!node) return;
+    const data = JSON.parse(node.textContent);
+    const base = data.run_id ? `/api/leaderboard/runs/${encodeURIComponent(data.run_id)}/`
+      : `/api/leaderboard/prset?${new URLSearchParams({ prset: data.prset })}`;
+    const url = field => (data.run_id ? base + field : base);
+    const names = { basis: 'basis', report_url: 'Report' };
+    async function send(button, field, body) {
+      button.disabled = true;
+      const r = await postJSON(url(field), { actor: body.actor, expected_revision: data.revision, ...body });
+      if (r.ok) { location.reload(); return; }
+      button.disabled = false;
+      failed(`${names[field]} 변경`, r);
+    }
+    const basisBtn = document.getElementById('lb-basis-edit');
+    if (basisBtn && data.run_id) basisBtn.addEventListener('click', async () => {
+      const actor = prompt('basis 를 바꾸는 사람 (email):');
+      if (!actor) return;
+      const text = prompt('PR set: PR 번호들 (예: 1561 apache/gluten#88), main 에서 잰 run: main <latest PR> (예: main 1564), '
+                          + `비우면 basis 없음. 번호만 쓰면 ${data.default_repo}:`, formatBasis(data.basis, data.default_repo));
+      if (text === null) return;
+      const parsed = parseBasis(text, data.default_repo);
+      if (parsed.error) { alert(parsed.error); return; }
+      await send(basisBtn, 'basis', { actor, basis: parsed.value });
+    });
+    const reportBtn = document.getElementById('lb-report-edit');
+    if (reportBtn) reportBtn.addEventListener('click', async () => {
+      const actor = prompt('Report 를 바꾸는 사람 (email):');
+      if (!actor) return;
+      const text = prompt('Report URL (http/https — artifact, Claude Doc, Confluence …). 비우면 Report 없음:',
+                          data.report_url || '');
+      if (text === null) return;
+      await send(reportBtn, 'report_url', { actor, report_url: text.trim() || null });
+    });
+    for (const b of document.querySelectorAll('.lb-restore')) {
+      b.addEventListener('click', async () => {
+        const actor = prompt('되돌리는 사람 (email):');
+        if (!actor) return;
+        await send(b, b.dataset.field, { actor, restore: Number(b.dataset.event) });
+      });
+    }
+  }
+
   // ---- board page ------------------------------------------------------------
   function initBoard() {
     const cfg = JSON.parse(document.getElementById('lb-page-data').textContent);
@@ -194,7 +347,8 @@
     // Facet filters travel as a literal `<key>` (a shared URL) or a token
     // `<key>_t` (what the options send); from/to are literal dates.
     const FACET_KEYS = [...document.querySelectorAll('.lb-filter-slot')].map(s => s.dataset.key);
-    const FILTER_KEYS = FACET_KEYS.flatMap(k => [k, `${k}_t`]).concat(['from', 'to']);
+    // A9: `pr` (one PR, set by its chips) is a literal with no select of its own.
+    const FILTER_KEYS = FACET_KEYS.flatMap(k => [k, `${k}_t`]).concat(['from', 'to', 'pr']);
     const state = {
       // Empty until the first answer: the server picks the first tab and
       // sends the tab list ({sf, codec, label}: the pinned config.yaml tabs, then the stored runs' own).
@@ -283,6 +437,18 @@
         slot.replaceChildren(label);
       }
       document.getElementById('lb-facets-note').hidden = !data.facets_truncated;
+      // A9: the PR a chip picked, removable.
+      const prBox = document.getElementById('lb-pr-filter');
+      prBox.replaceChildren();
+      prBox.hidden = !data.filter.pr;
+      if (data.filter.pr) {
+        prBox.appendChild(el('span', null, 'PR:'));
+        const chip = el('button', 'lb-chip', `${cutLabel(prLabel(data.filter.pr, cfg.default_repo), cfg.scalar_chars)} ×`);
+        chip.type = 'button';
+        chip.title = `${cutLabel(data.filter.pr, cfg.scalar_chars)} — 필터 해제`;
+        chip.addEventListener('click', () => { delete state.filter.pr; load(); });
+        prBox.appendChild(chip);
+      }
       document.getElementById('lb-from').value = data.filter.from || '';
       document.getElementById('lb-to').value = data.filter.to || '';
       document.getElementById('lb-top').value = String(data.top);
@@ -363,6 +529,8 @@
         : 'per-query median (ms), 같은 run 의 xflare vs velox';
       const meta = document.getElementById('hero-meta');
       meta.replaceChildren();
+      kv(meta, 'Basis', basisNode(hero.basis, cfg.basis_chips, pickPr));
+      kv(meta, 'Report', reportLink(hero.report_url, hero.prset_report_url));
       kv(meta, 'Config', hero.config_label).title = configText(hero.config);
       kv(meta, 'Bundle', `${hero.config.bundle ?? '—'} (${hero.build.bundle_kind ?? '—'})`);
       kv(meta, 'Revision', hero.build.revision);
@@ -421,7 +589,7 @@
       if (!data.rows.length) {
         const tr = tbody.insertRow();
         const td = tr.insertCell();
-        td.colSpan = 14;
+        td.colSpan = 11;
         td.className = 'lb-empty';
         td.textContent = '이 필터에 순위에 오를 run 이 없습니다.' +
           (data.shared_count ? ' shared application run 은 순위에 오르지 않습니다 — 아래 목록을 보세요.' : '');
@@ -429,31 +597,9 @@
       }
       for (const r of data.rows) {
         const tr = tbody.insertRow();
+        // The rank cell holds the compare box: the board fits a 1440 px screen without a column of its own.
         const rank = tr.insertCell();
-        rank.className = 'num';
-        rank.textContent = r.rank;
-        // A run is told apart by when it finished; the id stays in the link and tooltip.
-        const a = el('a', 'lb-run', fmtTs(r.finished_at));
-        a.href = runHref(cfg.board, r.run_id);
-        a.title = `${r.run_id}\nfinished ${r.finished_at}`;
-        tr.insertCell().appendChild(a);
-        for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
-                                          t ? [fmtX(r.value.vs_target),
-                                               t.goal && r.value.vs_target >= t.goal ? 'num lb-goal-met' : 'num',
-                                               `같은 run 의 velox 기준 ${fmtX(r.value.speedup)}`]
-                                            : [fmtX(r.value.speedup), 'num'], [`x${r.repeats}`, 'num'],
-                                          [compactConfig(r.config), null, configText(r.config)],
-                                          [r.config.application_mode ?? '—', null],
-                                          [(r.config.engines ?? '—').replace(',', ', '), null],
-                                          [fmtDevices(r), null],
-                                          [r.submitter ?? '—', null]]) {
-          const td = tr.insertCell();
-          td.textContent = text;
-          if (cls) td.className = cls;
-          if (title) td.title = title;
-        }
-        tr.insertCell().appendChild(badgeList(r.badges, cfg.badge_class));
-        reproCell(tr.insertCell(), r);
+        rank.className = 'num lb-rank';
         const box = el('input');
         box.type = 'checkbox';
         box.checked = selected.has(r.run_id);
@@ -462,7 +608,44 @@
           if (box.checked) selected.add(r.run_id); else selected.delete(r.run_id);
           updateCompare();
         });
-        tr.insertCell().appendChild(box);
+        rank.appendChild(box);
+        rank.appendChild(el('span', null, String(r.rank)));
+        // A run is told apart by when it finished; the id stays in the link and tooltip. Its devices go under it.
+        const a = el('a', 'lb-run', fmtTs(r.finished_at));
+        a.href = runHref(cfg.board, r.run_id);
+        a.title = `${r.run_id}\nfinished ${r.finished_at}`;
+        const runTd = tr.insertCell();
+        runTd.appendChild(a);
+        const dev = el('span', 'lb-sub', `device ${fmtDevices(r)}`);
+        dev.title = dev.textContent;
+        runTd.appendChild(dev);
+        // A9: the basis chips (a click filters by that PR) and the run's Report, else its PR set's.
+        const basisTd = tr.insertCell();
+        basisTd.className = 'lb-basis-cell';
+        basisTd.appendChild(basisNode(r.basis, cfg.board_basis_chips, pickPr));
+        tr.insertCell().appendChild(reportLink(r.report_url, r.prset_report_url));
+        for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
+                                          t ? [fmtX(r.value.vs_target),
+                                               t.goal && r.value.vs_target >= t.goal ? 'num lb-goal-met' : 'num',
+                                               `같은 run 의 velox 기준 ${fmtX(r.value.speedup)}`]
+                                            : [fmtX(r.value.speedup), 'num']]) {
+          const td = tr.insertCell();
+          td.textContent = text;
+          if (cls) td.className = cls;
+          if (title) td.title = title;
+        }
+        // The config, and under it the application mode and engines (repeats are the xN badge).
+        const conf = tr.insertCell();
+        conf.className = 'lb-config-cell';
+        conf.title = configText(r.config);
+        conf.appendChild(el('span', null, compactConfig(r.config)));
+        conf.appendChild(el('span', 'lb-sub',
+                            `${r.config.application_mode ?? '—'} · ${(r.config.engines ?? '—').split(',').join(', ')}`));
+        const who = tr.insertCell();
+        who.textContent = r.submitter ?? '—';
+        who.title = who.textContent;
+        tr.insertCell().appendChild(badgeList(r.badges, cfg.badge_class));
+        reproCell(tr.insertCell(), r);
       }
     }
 
@@ -501,6 +684,11 @@
     let generation = 0;
     async function load() {
       const mine = ++generation;
+      // A9: the panels' answers in flight belong to the context this load leaves; none of them may draw, and the
+      // PR-set list (and anything ticked on it) cannot be compared here: it comes back with the board.
+      heroHistoryGen++;
+      prsetsGen++;
+      clearPrsets(prsetsBox.open ? '불러오는 중…' : '');
       // Another tab: the shown history (and its buttons) belongs to the old one.
       if (targetPin && (state.sf !== targetPin.sf || state.codec !== targetPin.codec)) forgetHistory();
       renderTabs();
@@ -510,7 +698,7 @@
       try {
         resp = await fetch(`/api/leaderboard/board?${q}`);
       } catch (e) {
-        if (mine === generation) showStatus('board 를 불러오지 못했습니다.');
+        if (mine === generation) { showStatus('board 를 불러오지 못했습니다.'); clearPanels(); }
         return;
       }
       if (mine !== generation) return;
@@ -521,12 +709,13 @@
       const served = resp.headers.get('X-Leaderboard-Script');
       if (served ? served !== cfg.script : resp.ok) {
         showStatus('서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요.');
+        clearPanels();
         return;
       }
       try {
         data = await resp.json();
       } catch (e) {
-        if (mine === generation) showStatus('board 를 불러오지 못했습니다.');
+        if (mine === generation) { showStatus('board 를 불러오지 못했습니다.'); clearPanels(); }
         return;
       }
       if (mine !== generation) return;
@@ -545,6 +734,7 @@
         renderTarget();
         renderHero(null);
         renderBoard({ metric: state.metric, eligible_count: 0, top: state.top, rows: [] });
+        clearPanels();
         return;
       }
       showStatus('');
@@ -561,7 +751,306 @@
       if (targetHistory.open && historyRevision !== targetPin.revision) loadTargetHistory();
       renderBoard(data);
       document.getElementById('lb-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+      // A9: the history follows the board's metric tab (until its own selector picks another); open panels reload.
+      if (data.metric !== boardMetric) { boardMetric = data.metric; historyMetric = data.metric; }
+      // A closed panel keeps nothing of the old context: opening it loads this one.
+      if (historyBox.open) loadHistory(); else clearHistory('');
+      if (prsetsBox.open) loadPrsets(); else clearPrsets('');
     }
+
+    // ---- A9 panels: hero history and PR sets ----------------------------------
+    // Each fetch bumps its own generation, as does each board load and closing the panel, so only the newest answer
+    // for the board's current context draws; an answer for another script asks for a reload like the board's.
+    const historyBox = document.getElementById('lb-history');
+    const prsetsBox = document.getElementById('lb-prsets');
+    const historyLog = document.getElementById('history-log');
+    let boardMetric = null, historyMetric = state.metric, heroHistoryGen = 0, prsetsGen = 0, historyChart = null;
+    const selectedSets = new Set();
+    function pickPr(key) { state.filter.pr = key; load(); }
+
+    // A panel that has no answer for the board's context shows none: no table, chart or selection of another one.
+    function clearHistory(note) {
+      document.getElementById('lb-history-note').textContent = note;
+      document.getElementById('lb-history-col').textContent = 'Xflare';
+      document.querySelector('#lb-history-table tbody').replaceChildren();
+      if (historyChart) { historyChart.destroy(); historyChart = null; }
+    }
+    function clearPrsets(note) {
+      document.getElementById('lb-prsets-note').textContent = note;
+      document.querySelector('#lb-prsets-table tbody').replaceChildren();
+      selectedSets.clear();
+      updateSetCompare();
+    }
+    // A board load that draws no new board: the tabs and filter moved on, so the panels' old answers are not theirs.
+    function clearPanels() {
+      // A panel request started while the failed load was pending (reopened, re-sorted) belonged to it too.
+      heroHistoryGen++;
+      prsetsGen++;
+      clearHistory('board 를 불러오지 못했습니다.');
+      clearPrsets('board 를 불러오지 못했습니다.');
+    }
+
+    // The board's tab and filter, as the panels send them.
+    function panelQuery(extra) {
+      const q = query();
+      for (const k of ['metric', 'top']) q.delete(k);
+      for (const [k, v] of Object.entries(extra)) q.set(k, v);
+      return q;
+    }
+    async function panelFetch(url, isCurrent) {
+      let resp, data;
+      try {
+        resp = await fetch(url);
+      } catch (e) {
+        return isCurrent() ? { error: '불러오지 못했습니다.' } : null;
+      }
+      if (!isCurrent()) return null;
+      const served = resp.headers.get('X-Leaderboard-Script');
+      if (served ? served !== cfg.script : resp.ok) {
+        // As for the board: draw nothing from it, and leave nothing of this panel's last context either.
+        showStatus('서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요.');
+        return { error: '서버가 다른 버전으로 바뀌었습니다.' };
+      }
+      try { data = await resp.json(); } catch (e) { return isCurrent() ? { error: '불러오지 못했습니다.' } : null; }
+      if (!isCurrent()) return null;
+      return resp.ok ? { data } : { error: (data.errors || []).join('; ') || `HTTP ${resp.status}` };
+    }
+
+    function renderHistoryTabs() {
+      const host = document.getElementById('lb-history-metrics');
+      host.replaceChildren();
+      for (const m of ['total', ...QUERIES.map(q => `q${q}`)]) {
+        tabButton(host, m === 'total' ? 'Total' : m.toUpperCase(), m === historyMetric,
+                  () => { historyMetric = m; loadHistory(); });
+      }
+    }
+
+    async function loadHistory() {
+      const mine = ++heroHistoryGen;
+      renderHistoryTabs();
+      const r = await panelFetch(`/api/leaderboard/history?${panelQuery({ metric: historyMetric })}`,
+                                 () => mine === heroHistoryGen);
+      if (!r) return;
+      if (r.error) { clearHistory(r.error); return; }
+      renderHistory(r.data);
+    }
+
+    function renderHistory(data) {
+      const name = data.metric === 'total' ? 'Total' : data.metric.toUpperCase();
+      const t = data.target && !data.target.problem && data.target.velox_ms != null ? data.target : null;
+      document.getElementById('lb-history-col').textContent = `Xflare ${name}`;
+      document.getElementById('lb-history-note').textContent =
+        `${name}: 지금 순위에 오르는 run ${data.points.length}개 중 끝난 시점에 best 였던 run ${data.heroes.filter(h => !h.entering).length}개 ` +
+        '(지금의 eligible run 으로 다시 계산; withdraw 나 basis 변경이 반영됩니다)' +
+        (data.truncated ? ` · 최근 것만 보입니다` : '') +
+        (t ? ` · speedup vs target (오른쪽 축)${t.goal ? `, 목표 ${fmtX(t.goal)}` : ''}` : '');
+      const tbody = document.querySelector('#lb-history-table tbody');
+      tbody.replaceChildren();
+      if (!data.heroes.length) {
+        const td = tbody.insertRow().insertCell();
+        td.colSpan = 7;
+        td.className = 'lb-empty';
+        td.textContent = '이 필터에 순위에 오른 run 이 없습니다.';
+      }
+      for (const h of data.heroes.slice().reverse()) {
+        const tr = tbody.insertRow();
+        const a = el('a', 'lb-run', fmtTs(h.finished_at));
+        a.href = runHref(cfg.board, h.run_id);
+        a.title = h.run_id;
+        const first = tr.insertCell();
+        first.appendChild(a);
+        if (h.entering) first.appendChild(el('span', 'lb-dim', ' (표시 구간 이전부터)'));
+        for (const [text, cls] of [[fmtMs(h.xflare_ms), 'num'], [fmtPct(h.delta_pct), 'num'],
+                                   [fmtX(h.vs_target), t && t.goal && h.vs_target >= t.goal ? 'num lb-goal-met' : 'num']]) {
+          const td = tr.insertCell();
+          td.textContent = text;
+          td.className = cls;
+        }
+        const basisTd = tr.insertCell();
+        basisTd.className = 'lb-wrap-cell';
+        basisTd.appendChild(basisNode(h.basis, cfg.basis_chips, pickPr));
+        tr.insertCell().appendChild(reportLink(h.report_url, h.prset_report_url));
+        tr.insertCell().textContent = h.config_label;
+      }
+      drawHistory(data, t);
+    }
+
+    function drawHistory(data, t) {
+      if (historyChart) { historyChart.destroy(); historyChart = null; }
+      if (typeof Chart === 'undefined' || !data.points.length) return;
+      const colors = chartColors();
+      const font = { family: colors.font, size: 12 };
+      // The hero a window (or a budget cut) entered with is drawn where the shown series starts, not at its own,
+      // possibly much older, finish (the table keeps that): `from` at 00:00 UTC when nothing was cut, else (a cut
+      // starts the series later) the first shown point.
+      const fromMs = data.filter && data.filter.from ? Date.parse(`${data.filter.from}T00:00:00Z`) : NaN;
+      const start = !data.truncated && Number.isFinite(fromMs) ? fromMs : data.points[0].t;
+      const heroX = h => (h.entering ? Math.max(h.t, start) : h.t);
+      const xs = data.points.map(p => p.t).concat(data.heroes.map(heroX));
+      const xMin = Math.min(...xs), xMax = Math.max(...xs);
+      // The best so far holds until the next hero, then until the newest point: Chart.js's stepped 'before' draws
+      // each interval at the value it starts with ('after' would draw the next hero's value over it).
+      const steps = data.heroes.map(h => ({ x: heroX(h), y: h.y }));
+      if (steps.length) steps.push({ x: xMax, y: steps[steps.length - 1].y });
+      const datasets = [
+        { type: 'scatter', label: 'eligible runs', data: data.points.map(p => ({ x: p.t, y: p.y })),
+          backgroundColor: colors.velox, pointRadius: 3, yAxisID: 'y' },
+        { type: 'line', label: 'best so far (hero)', data: steps, stepped: 'before', borderColor: colors.xflare,
+          backgroundColor: colors.xflare, pointRadius: steps.map((_, i) => (i < data.heroes.length ? 4 : 0)),
+          borderWidth: 2, yAxisID: 'y' },
+      ];
+      const scales = {
+        x: { type: 'linear', min: xMin, max: xMax,
+             ticks: { color: colors.tick, font, maxTicksLimit: 8,
+                      callback: v => (Number.isFinite(v) ? new Date(v).toISOString().slice(0, 10) : '') },
+             grid: { display: false }, border: { color: colors.grid } },
+        y: { type: historyLog.checked ? 'logarithmic' : 'linear', position: 'left',
+             title: { display: true, text: 'xflare ms', color: colors.tick, font },
+             ticks: { color: colors.tick, font }, grid: { color: colors.grid }, border: { display: false } },
+      };
+      if (t) {
+        const vs = data.heroes.map(h => ({ x: heroX(h), y: h.vs_target }));
+        if (vs.length) vs.push({ x: xMax, y: vs[vs.length - 1].y });
+        datasets.push({ type: 'line', label: 'speedup vs target', data: vs, stepped: 'before', borderDash: [4, 3],
+                        borderColor: colors.series[3], backgroundColor: colors.series[3], pointRadius: 0,
+                        borderWidth: 1.5, yAxisID: 'y2' });
+        if (t.goal) {
+          datasets.push({ type: 'line', label: `goal ${fmtX(t.goal)}`, data: [{ x: xMin, y: t.goal }, { x: xMax, y: t.goal }],
+                          borderColor: colors.series[2], borderDash: [2, 2], pointRadius: 0, borderWidth: 1,
+                          yAxisID: 'y2' });
+        }
+        scales.y2 = { type: 'linear', position: 'right', min: 0,
+                      title: { display: true, text: 'speedup vs target (×)', color: colors.tick, font },
+                      ticks: { color: colors.tick, font }, grid: { display: false }, border: { display: false } };
+      }
+      // Each hero point names its basis on the canvas (drawn text, never HTML): above the point, else below it,
+      // moved sideways to stay in the chart area; a label that fits neither way without overlapping one already drawn
+      // is left out (the table and the point's tooltip still name it).
+      const labels = data.heroes.map(h => shortBasis(h.basis, cfg.basis_chips));
+      const heroLabels = {
+        id: 'heroLabels',
+        afterDatasetsDraw(chart) {
+          const pts = chart.getDatasetMeta(1).data;
+          const ctx = chart.ctx;
+          const area = chart.chartArea;
+          const drawn = [];
+          ctx.save();
+          ctx.font = `600 11px ${colors.font}`;
+          ctx.fillStyle = colors.legend;
+          ctx.textAlign = 'center';
+          labels.forEach((label, i) => {
+            if (!pts[i]) return;
+            const half = ctx.measureText(label).width / 2 + 2;
+            if (2 * half > area.right - area.left) return;
+            const x = Math.min(Math.max(pts[i].x, area.left + half), area.right - half);
+            // The text's baseline: 9 px above the point, or 20 px below it; the box spans 11 px above it and 2 below.
+            for (const y of [pts[i].y - 9, pts[i].y + 20]) {
+              const box = { l: x - half, r: x + half, t: y - 11, b: y + 2 };
+              if (box.t < area.top || box.b > area.bottom) continue;
+              if (drawn.some(d => box.l < d.r && d.l < box.r && box.t < d.b && d.t < box.b)) continue;
+              drawn.push(box);
+              ctx.fillText(label, x, y);
+              return;
+            }
+          });
+          ctx.restore();
+        },
+      };
+      // A chart a failed draw left on the canvas would refuse every later one.
+      const canvas = document.getElementById('history-chart');
+      const stale = typeof Chart.getChart === 'function' ? Chart.getChart(canvas) : null;
+      if (stale) stale.destroy();
+      historyChart = new Chart(canvas, {
+        data: { datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false, scales,
+          plugins: {
+            legend: { align: 'end', labels: { color: colors.legend, font, boxWidth: 10, boxHeight: 10 } },
+            tooltip: { callbacks: { label: c => (c.datasetIndex === 1 && data.heroes[c.dataIndex]
+              ? `${shortBasis(data.heroes[c.dataIndex].basis, cfg.basis_chips)} · ${fmtMs(data.heroes[c.dataIndex].xflare_ms)}`
+              : `${new Date(c.parsed.x).toISOString().slice(0, 16)} · ${c.parsed.y}`) } },
+          },
+        },
+        plugins: [heroLabels],
+      });
+    }
+
+    async function loadPrsets() {
+      const mine = ++prsetsGen;
+      const sort = document.getElementById('lb-prsets-sort').value || 'best';
+      const r = await panelFetch(`/api/leaderboard/prsets?${panelQuery({ sort })}`, () => mine === prsetsGen);
+      if (!r) return;
+      if (r.error) { clearPrsets(r.error); return; }
+      renderPrsets(r.data);
+    }
+
+    function renderPrsets(data) {
+      const tbody = document.querySelector('#lb-prsets-table tbody');
+      tbody.replaceChildren();
+      // Only a listed set with a best run can be compared: a selection of another tab or filter is dropped.
+      const keys = new Set(data.prsets.filter(x => x.best).map(x => x.prset));
+      for (const k of [...selectedSets]) if (!keys.has(k)) selectedSets.delete(k);
+      document.getElementById('lb-prsets-note').textContent =
+        `${data.prsets.length}개 PR set · 대표 = 이 탭과 필터에서 best total-eligible run` +
+        (data.truncated ? ` · 처음 ${data.prsets.length}개만` : '');
+      if (!data.prsets.length) {
+        const td = tbody.insertRow().insertCell();
+        td.colSpan = 9;
+        td.className = 'lb-empty';
+        td.textContent = '이 필터에 PR set 을 basis 로 가진 run 이 없습니다.';
+      }
+      for (const x of data.prsets) {
+        const tr = tbody.insertRow();
+        const box = el('input');
+        box.type = 'checkbox';
+        box.checked = selectedSets.has(x.prset);
+        box.disabled = !x.best;
+        box.setAttribute('aria-label', `compare ${x.prset}`);
+        box.addEventListener('change', () => {
+          if (box.checked) selectedSets.add(x.prset); else selectedSets.delete(x.prset);
+          updateSetCompare();
+        });
+        tr.insertCell().appendChild(box);
+        // The set's own page.
+        const setTd = tr.insertCell();
+        setTd.className = 'lb-wrap-cell';
+        const page = el('a', 'lb-set-label', shortBasis(x.basis, cfg.basis_chips));
+        page.href = prsetHref(cfg.board, x.prset);
+        page.title = x.basis.prs.map(p => p.key).join('\n');
+        setTd.appendChild(page);
+        tr.insertCell().appendChild(reportLink(x.report_url));
+        const b = x.best;
+        for (const [text, cls] of [[b ? fmtMs(b.xflare_ms) : '—', 'num'],
+                                   [x.is_hero ? 'hero' : fmtPct(x.vs_hero_pct), x.is_hero ? 'num lb-hero-mark' : 'num'],
+                                   [b ? fmtX(b.vs_target) : '—', 'num'],
+                                   [`${x.eligible_count} / ${x.run_count}`, 'num'], [fmtTs(x.last_finished_at), null]]) {
+          const td = tr.insertCell();
+          td.textContent = text;
+          if (cls) td.className = cls;
+        }
+        const bestTd = tr.insertCell();
+        if (b) {
+          const a = el('a', 'lb-run', fmtTs(b.finished_at));
+          a.href = runHref(cfg.board, b.run_id);
+          a.title = `${b.run_id}\n${b.config_label}`;
+          bestTd.appendChild(a);
+        } else bestTd.appendChild(el('span', 'lb-dim', 'eligible run 없음'));
+      }
+      updateSetCompare();
+    }
+
+    function updateSetCompare() {
+      const btn = document.getElementById('lb-prsets-compare');
+      btn.disabled = selectedSets.size < 2 || selectedSets.size > 4;
+      btn.textContent = `선택한 PR set 비교 (${selectedSets.size}/2–4)`;
+    }
+    document.getElementById('lb-prsets-compare').addEventListener('click', () => {
+      location.href = `${cfg.board}/compare?${panelQuery({ prsets: [...selectedSets].join(',') })}`;
+    });
+    document.getElementById('lb-prsets-sort').addEventListener('change', loadPrsets);
+    historyBox.addEventListener('toggle', () => { if (historyBox.open) loadHistory(); else heroHistoryGen++; });
+    prsetsBox.addEventListener('toggle', () => { if (prsetsBox.open) loadPrsets(); else prsetsGen++; });
+    bindLogToggle(historyLog, () => historyChart);
 
     document.getElementById('lb-from').addEventListener('change', e => { state.filter.from = e.target.value; load(); });
     document.getElementById('lb-to').addEventListener('change', e => { state.filter.to = e.target.value; load(); });
@@ -694,6 +1183,7 @@
 
   const page = document.body.dataset.page;
   if (page === 'board') initBoard();
-  else if (page === 'run') initRun();
+  else if (page === 'run') { initRun(); initEdits(); }
+  else if (page === 'prset') initEdits();
   else if (page === 'compare') initCompare();
 })();
