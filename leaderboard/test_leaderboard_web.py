@@ -3714,6 +3714,22 @@ class TestA9BoardScript(WebCase):
         [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
         self.assertEqual(chart["xMin"], min(p["t"] for p in json.loads(self.responses["hist"])["points"]))
 
+    def test_the_chart_start_survives_a_bad_from_and_a_cut(self):
+        """Round 7: an impossible `from` (2026-10-00) never reaches the chart as NaN, and after a budget cut the chart
+        starts at the first shown point even with `from` set."""
+        hist = json.loads(self.responses["hist"])
+        first = min(p["t"] for p in hist["points"])
+        for case, extra in (("bad from", {"filter": {**hist["filter"], "from": "2026-10-00"}}),
+                            ("cut", {"filter": {**hist["filter"], "from": "2000-01-01"}, "truncated": True})):
+            with self.subTest(case):
+                # The entering hero finished before the shown series, as the server sends it after a cut.
+                entering = {**hist["heroes"][0], "entering": True, "t": first - 10 * 86400000}
+                answer = {**hist, **extra, "heroes": [entering] + hist["heroes"][1:]}
+                out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "x"}],
+                                 {**self.responses, "x": json.dumps(answer)})
+                [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+                self.assertEqual(chart["xMin"], first)
+
     def test_a_board_reload_drops_a_set_selection_at_once(self):
         out = self.drive(self.SETS_PICKED + [{"tab": ["lb-metric-tabs", "Q3"]}], self.responses)
         self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
@@ -4278,6 +4294,18 @@ class TestA9Round3(A9Case):
         r = self.c.get(f"{LB}/prset?prset={quote('xcena-dev/xflare-analytics#1561')}")
         self.assertEqual(r.status_code, 200)
         self.assertIn("basis=prset:xcena-dev/xflare-analytics%231561", r.get_data(as_text=True))
+
+
+class TestA9Round7(A9Case):
+    def test_a_date_no_calendar_has_narrows_nothing(self):
+        """Round 7: 2026-02-30 or 2026-10-00 is not a date: like a half-typed one it narrows nothing and is not echoed."""
+        self.submit()
+        for bad in ("2026-02-30", "2026-10-00", "2026-13-01"):
+            with self.subTest(bad):
+                for url in (f"/api/leaderboard/board?from={bad}", f"/api/leaderboard/history?from={bad}"):
+                    out = self.c.get(url).get_json()
+                    self.assertNotIn("from", out["filter"], url)
+        self.assertEqual(self.board("?from=2026-02-28")["filter"]["from"], "2026-02-28")
 
 
 class TestA9Round4(A9Case):

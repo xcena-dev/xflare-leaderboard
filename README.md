@@ -238,7 +238,8 @@ Computed on the server, never taken from the client.
      rewrites it. `vs_target` uses the target's velox for the same metric; the goal applies to the Total only. A
      `from`/`to` window keeps the hero it started with. Past a budget (8 below) the series starts later, points and
      heroes alike, and the hero in force at the new start enters with it. The chart draws an entering hero from where
-     the shown series starts (`from`, else its first point); its table row keeps its own finish time.
+     the shown series starts (`from` when nothing was cut, else its first point); its table row keeps its own finish
+     time.
   7. PR-set list: the PR sets of the tab's runs under the board's filter, each represented by its best total-eligible
      run in Total board order, sorted `best` (by that run, sets without one last), `number` (highest member PR first)
      or `recent` (latest finished run first). The PR-set page lists every run of the set on every tab; compare by PR
@@ -371,7 +372,7 @@ unknown token matches nothing. The page's options send `<key>_t`. The board echo
 (as sent; A9's canonicalized) and, in `filter_tokens`, the token of every applied facet filter, so a shared URL with a full value selects
 the offered option. On `/board` an absent filter takes the configured default (`executors`, `executor_cores`); sent
 empty (`executors=`) it means "any", which is how the page lifts the default. Config filters compare as text with a
-`null` value spelled `-`; `from`/`to` that are not YYYY-MM-DD narrow nothing.
+`null` value spelled `-`; `from`/`to` that are not YYYY-MM-DD calendar dates narrow nothing.
 
 Pages show previews of uploaded data; the raw JSON always has everything. Every uploaded string is cut to 512
 characters plus "…", except the run-level long texts (note, toml input and rendered text, gluten build command), which

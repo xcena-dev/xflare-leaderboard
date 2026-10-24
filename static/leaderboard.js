@@ -864,8 +864,10 @@
       const colors = chartColors();
       const font = { family: colors.font, size: 12 };
       // The hero a window (or a budget cut) entered with is drawn where the shown series starts, not at its own,
-      // possibly much older, finish (the table keeps that): `from` at 00:00 UTC, else the first shown point.
-      const start = data.filter && data.filter.from ? Date.parse(`${data.filter.from}T00:00:00Z`) : data.points[0].t;
+      // possibly much older, finish (the table keeps that): `from` at 00:00 UTC when nothing was cut, else (a cut
+      // starts the series later) the first shown point.
+      const fromMs = data.filter && data.filter.from ? Date.parse(`${data.filter.from}T00:00:00Z`) : NaN;
+      const start = !data.truncated && Number.isFinite(fromMs) ? fromMs : data.points[0].t;
       const heroX = h => (h.entering ? Math.max(h.t, start) : h.t);
       const xs = data.points.map(p => p.t).concat(data.heroes.map(heroX));
       const xMin = Math.min(...xs), xMax = Math.max(...xs);
@@ -883,7 +885,7 @@
       const scales = {
         x: { type: 'linear', min: xMin, max: xMax,
              ticks: { color: colors.tick, font, maxTicksLimit: 8,
-                      callback: v => new Date(v).toISOString().slice(0, 10) },
+                      callback: v => (Number.isFinite(v) ? new Date(v).toISOString().slice(0, 10) : '') },
              grid: { display: false }, border: { color: colors.grid } },
         y: { type: historyLog.checked ? 'logarithmic' : 'linear', position: 'left',
              title: { display: true, text: 'xflare ms', color: colors.tick, font },
@@ -937,7 +939,11 @@
           ctx.restore();
         },
       };
-      historyChart = new Chart(document.getElementById('history-chart'), {
+      // A chart a failed draw left on the canvas would refuse every later one.
+      const canvas = document.getElementById('history-chart');
+      const stale = typeof Chart.getChart === 'function' ? Chart.getChart(canvas) : null;
+      if (stale) stale.destroy();
+      historyChart = new Chart(canvas, {
         data: { datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false, scales,

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import date
 from decimal import Decimal
 
 from . import aggregate
@@ -53,11 +54,18 @@ _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 def norm_date(v: str | None) -> str | None:
     """An inclusive YYYY-MM-DD bound, or None: a half-typed date from a form
-    field must narrow nothing rather than cut the window somewhere unintended."""
+    field, or one no calendar has (2026-02-30), must narrow nothing rather than
+    cut the window somewhere unintended."""
     if v is None:
         return None
     v = str(v).strip()
-    return v if _DATE_RE.match(v) else None
+    if not _DATE_RE.match(v):
+        return None
+    try:
+        date.fromisoformat(v)
+    except ValueError:
+        return None
+    return v
 
 
 def _pinned_tabs(cfg: dict) -> list[tuple[str, str]]:
