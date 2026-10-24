@@ -94,7 +94,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 
 .lb-chart { position: relative; height: 320px; }
 
-/* Wider than the platform's 1320px content column: these pages have no sidebar and the board is 16 columns. */
+/* Wider than the platform's 1320px content column: these pages have no sidebar and the board's 11 columns need 1334 px. */
 .lb-wrap { max-width: 1400px; }
 
 /* ---- board -------------------------------------------------------------- */
@@ -111,7 +111,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
    wider edge padding. */
 .lb-board th:nth-child(1) { width: 70px; }
 .lb-board th:nth-child(2) { width: 148px; }
-.lb-board th:nth-child(3) { width: 248px; }  /* two chips with their ↗ and "+N" on one line */
+.lb-board th:nth-child(3) { width: 248px; }  /* two short chips with their ↗ and "+N" on one line; long ones wrap */
 .lb-board th:nth-child(4) { width: 96px; }   /* "↗ Report" whole, not cut to "↗ Rep…" */
 .lb-board th:nth-child(5), .lb-board th:nth-child(6) { width: 75px; }
 .lb-board th:nth-child(7) { width: 94px; }
@@ -119,9 +119,7 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 .lb-board th:nth-child(10) { width: 170px; } /* "x3 reproducible", then "offload:offloaded": two lines */
 .lb-board th:nth-child(11) { width: 88px; }
 .lb-board td:nth-child(10) { white-space: normal; }
-.lb-board td.lb-rank { white-space: nowrap; }
 .lb-board td.lb-rank input { margin: 0 8px 0 0; vertical-align: -2px; }
-.lb-board td.lb-basis-cell .lb-chips { flex-wrap: nowrap; }
 .lb-board td.lb-config-cell { white-space: normal; }
 .lb-board .lb-sub { overflow: hidden; text-overflow: ellipsis; }   /* the run cell does not wrap */
 .lb-sub { display: block; font-size: var(--text-xs); color: var(--text-3); }
@@ -199,6 +197,10 @@ button.lb-chip { cursor: pointer; }
 .lb-chip-pair { display: inline-flex; align-items: center; max-width: 100%; }
 .lb-chip-gh { margin: 0 4px 0 -2px; text-decoration: none; font-size: var(--text-xs); color: var(--text-3); }
 .lb-chip-gh:hover { color: var(--accent-text); }
+/* A board row keeps its chips to two lines: a label past 170 px (a long repository name) is cut, its tooltip whole. */
+.lb-board td.lb-basis-cell .lb-chip:not(.lb-chip-more) {
+  max-width: 170px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .lb-pr-filter { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-sm); flex-wrap: wrap; max-width: 100%; }
 .lb-pr-filter[hidden] { display: none; }
 .lb-btn-sm { height: 24px; margin-left: var(--space-2); padding: 0 8px; font-size: var(--text-xs); }

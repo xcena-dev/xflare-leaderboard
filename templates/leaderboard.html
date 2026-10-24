@@ -162,7 +162,7 @@
   </section>
 </main>
 
-<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars, "badge_class": lb_badge_classes, "script": lb_script_version(), "basis_chips": lb_budget.basis_chips, "default_repo": lb_default_repo} | tojson }}</script>
+<script type="application/json" id="lb-page-data">{{ {"board": url_for('leaderboard.board_page'), "scalar_chars": lb_budget.scalar_chars, "badge_class": lb_badge_classes, "script": lb_script_version(), "basis_chips": lb_budget.basis_chips, "board_basis_chips": lb_budget.board_basis_chips, "default_repo": lb_default_repo} | tojson }}</script>
 <script src="{{ lb_static('leaderboard.js') }}"></script>
 </body>
 </html>

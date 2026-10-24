@@ -29,8 +29,10 @@ MATRIX_REPEATS = 10
 # A7: a recorded settings map (hundreds of keys) is read key by key, so its list budget is wider than PREVIEW_ITEMS.
 EFFECTIVE_ITEMS = 500
 DEFAULT_CODEC = "snappy"
-# A9: a basis on the board, a chart label or a Basis option shows this many PRs plus "+N"; pages with room show all.
+# A9: a basis on the hero card, a chart label or a Basis option shows this many PRs plus "+N", a board row
+# BOARD_BASIS_CHIPS (the board fits a 1440 px screen); "+N" names the rest in its tooltip, and pages with room show all.
 BASIS_CHIPS = 3
+BOARD_BASIS_CHIPS = 2
 # A9: edit histories are read 50 changes at a time (older ones stay stored); the hero history keeps the newest points
 # and heroes of its window; the PR-set list stops at FACET_VALUES sets.
 HISTORY_EVENTS = 50
@@ -38,6 +40,7 @@ HISTORY_POINTS = 1000
 HISTORY_HEROES = 200
 BUDGET = {"scalar_chars": SCALAR_CHARS, "preview_chars": PREVIEW_CHARS, "preview_items": PREVIEW_ITEMS,
           "facet_values": FACET_VALUES, "effective_items": EFFECTIVE_ITEMS, "basis_chips": BASIS_CHIPS,
+          "board_basis_chips": BOARD_BASIS_CHIPS,
           "history_events": HISTORY_EVENTS, "history_points": HISTORY_POINTS, "history_heroes": HISTORY_HEROES}
 # Badge text is uploaded-derived; its colour class comes from this fixed map, for the server-rendered pages
 # (``badge_class``) and, through the board page's data block, the board script. ``offload:*`` badges are dim.

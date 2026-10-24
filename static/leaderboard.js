@@ -60,7 +60,8 @@
     return c ? Object.entries(c).map(([k, v]) => `${k}: ${v ?? '—'}`).join('\n') : '';
   }
   // The board's config cell: resources only (toml and bundle live in the tooltip and the filters, the
-  // application mode in its own column), plus the config label's `+conf` marker for custom Spark settings.
+  // application mode and engines on the cell's second line), plus the config label's `+conf` marker for custom Spark
+  // settings.
   function compactConfig(c) {
     const parts = [`${c.executors}×${c.executor_cores}`];
     if (c.offheap != null) parts.push(c.offheap);
@@ -224,7 +225,6 @@
   // A basis as chips: at most `max` PRs plus "+N" (the full set is in the tooltip); with `pick`, each chip is a button
   // that filters by its PR with a small "↗" to it on GitHub beside it, else a link to it on GitHub; main is one chip
   // to its latest PR on GitHub; none is "—".
-  const BOARD_CHIPS = 2;   // board rows show at most this many PRs on one line, then "+N"
   function basisNode(basis, max, pick) {
     const wrap = el('span', 'lb-chips');
     if (!basis) { wrap.appendChild(el('span', 'lb-dim', '—')); return wrap; }
@@ -622,7 +622,7 @@
         // A9: the basis chips (a click filters by that PR) and the run's Report, else its PR set's.
         const basisTd = tr.insertCell();
         basisTd.className = 'lb-basis-cell';
-        basisTd.appendChild(basisNode(r.basis, BOARD_CHIPS, pickPr));
+        basisTd.appendChild(basisNode(r.basis, cfg.board_basis_chips, pickPr));
         tr.insertCell().appendChild(reportLink(r.report_url, r.prset_report_url));
         for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
                                           t ? [fmtX(r.value.vs_target),

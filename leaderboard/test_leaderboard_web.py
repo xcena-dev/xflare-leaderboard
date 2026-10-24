@@ -2237,7 +2237,7 @@ class TestLegacyApplicationMode(WebCase):
 
 
 class TestApplicationMode(WebCase):
-    """A4: the application mode is a board column, a filter with its facet and a compare parameter, never a board
+    """A4: the application mode is shown on the board under each run's config, a filter with its facet and a compare parameter, never a board
     split; a per-engine run's page lists every repeat's applications, a shared run's page has no such list. A6: only
     per-engine runs rank (TestSharedUnranked has the rest)."""
 
@@ -2245,7 +2245,7 @@ class TestApplicationMode(WebCase):
         kw.setdefault("run_id", rid())
         return build_manifest(application_mode="per-engine", **kw)
 
-    def test_mode_column_filter_and_facet(self):
+    def test_mode_under_config_filter_and_facet(self):
         shared = self.submit(elapsed=flat_elapsed(1000), application_mode=None)
         per_engine = self.per_engine(elapsed=flat_elapsed(2000))
         self.post(build_envelope(per_engine))
@@ -2889,7 +2889,7 @@ class TestTabs(WebCase):
         b = self.board("?sf=1000&codec=zstd")
         self.assertEqual((b["hero"]["run_id"], b["hero_fallback"], b["rows"]), (other_shape, True, []))
 
-    def test_engines_is_a_filter_and_a_column(self):
+    def test_engines_is_a_filter_shown_under_the_config(self):
         both = self.submit(elapsed=flat_elapsed(1000))
         alone = self.submit(elapsed=flat_elapsed(2000), engines=("xflare",))
         b = self.board()
@@ -3531,6 +3531,17 @@ class TestA9BoardScript(WebCase):
         self.assertEqual([h for h in five["hrefs"] if "github" in h],
                          [f"https://github.com/a/b/pull/{n}" for n in (1, 2)])    # each chip's ↗
         self.assertIn("a/b#3\na/b#4\na/b#5", five["titles"])                       # "+3" names the rest
+
+    def test_board_row_cells(self):
+        """The board's 11 cells: the compare box in the rank cell, the devices under the run, the mode and engines
+        under the config, the repeats as the first badge."""
+        out = self.drive([{"answer": 0, "with": "board"}], self.responses)
+        for row in out["boardRows"]:
+            self.assertEqual(len(row["text"]), 11)
+            self.assertEqual(row["inputs"], [{"checked": False, "disabled": False}])
+            self.assertRegex(row["text"][1], r"^\d{4}-\d\d-\d\d \d\d:\d\d device \S")
+            self.assertTrue(row["text"][7].endswith("per-engine · velox, xflare"), row["text"][7])
+            self.assertRegex(row["text"][9], r"^x\d+ ")
         self.assertEqual([r["text"][3] for r in out["boardRows"]].count("—"), 2)
 
     def test_only_github_pr_urls_become_hrefs(self):
@@ -3810,6 +3821,7 @@ class TestA9BoardScript(WebCase):
         out = self.drive(self.HISTORY_OPEN, {**self.responses, "hist": json.dumps(hist)},
                          label_draws=[{"width": 2000, "height": 300}, {"width": 200, "height": 40}])
         self.assertEqual(json.loads(self.page_data()["lb-page-data"])["basis_chips"], 3)
+        self.assertEqual(json.loads(self.page_data()["lb-page-data"])["board_basis_chips"], 2)
         wide, narrow = out["labelDraws"]
         self.assertEqual([d["text"] for d in wide], ["b#1 + b#2 + b#3 +2", "main · latest #1564"])
         self.assertEqual(len(narrow), 1)
@@ -3882,6 +3894,13 @@ class TestA9Styles(unittest.TestCase):
         # break-word, not anywhere: a table cell keeps whole short labels on one line (the demo's PR-set members).
         self.assertEqual((chip["white-space"], chip["overflow-wrap"], chip["max-width"]), ("normal", "break-word", "100%"))
         self.assertEqual(self.rules[".lb-chip-pair"]["display"], "inline-flex")      # a chip and its ↗ wrap as one
+        # A board row's chips wrap too: with real PR numbers (gluten#10234 velox#14567) a no-wrap line pushed "+N" out
+        # of the cell, hiding a member.
+        self.assertEqual([s for s, d in self.rules.items() if "lb-chips" in s and d.get("flex-wrap", "wrap") != "wrap"],
+                         [])
+        # ...to two lines at most: a chip past 170 px is cut there, never "+N".
+        cap = self.rules[".lb-board td.lb-basis-cell .lb-chip:not(.lb-chip-more)"]
+        self.assertEqual((cap["max-width"], cap["white-space"], cap["text-overflow"]), ("170px", "nowrap", "ellipsis"))
         # Round 4: in an inline-flex chip the label is a flex item that break-word never breaks (a 100-character name
         # ran past a 390 px page); the chip must be a block box for break-word to apply.
         self.assertEqual(chip["display"], "inline-block")
