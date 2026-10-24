@@ -121,19 +121,19 @@ A9 (additive; absent = unknown, as for every run from before A9):
   "latest_pr": N}` a run on main, `latest_pr` being the last PR merged into the client revision (the skill reads it
   from that revision's history). `N` is an integer 1..2147483647 (no float, no boolean); `repo` is a GitHub owner
   (letters, digits and inner hyphens, at most 39) `/` name (letters, digits, `.`, `_`, `-`, at most 100, not only
-  dots). `null`, another `kind` or a bad member is a 400; unknown keys inside warn and are left out of the stored
-  basis, which is normalized: repositories lower case, PRs sorted by (repo, number). It is the run's initial claim
-  only (§4 A9).
+  dots). `null`, another `kind` or a bad member is a 400; unknown keys inside warn (`unknown property (ignored, not
+  stored)`): the stored basis is the normalized one, repositories lower case, PRs sorted by (repo, number), and the
+  stored metadata (`meta`) leaves `basis` out. It is the run's initial claim only (§4 A9).
 
 ### §3 Identity and API
 
 The routes are in API below.
 - `content_id` = sha256 of `json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` as UTF-8.
   Only the manifest is hashed; every other envelope field (`submitter`, `note`, `isolation_claim`, `producer`,
-  `environment`, A9's `basis`) is mutable metadata.
+  `environment`) is mutable metadata; A9's `basis` is kept apart (§4).
 - `run_id` is unique. Same `run_id` + same `content_id` → 200 with the original receipt: the `ranked_total` and
-  `warnings` stored when the run was created, even after a withdrawal. Metadata is still updated, except A9's
-  basis (§4).
+  `warnings` stored when the run was created, even after a withdrawal. Metadata is still updated; A9's basis
+  is not (§4).
   Same `run_id` + different `content_id` → 409, nothing changes.
 - Withdraw is a soft flag anyone can set: ownership is a trust convention. A withdrawn run never ranks on any board
   or as hero, and an identical re-upload (200) does not revive it.
@@ -205,19 +205,19 @@ Computed on the server, never taken from the client.
   explains an effect, never gate: ranking, eligibility, the hero, `content_id` and receipts are unchanged.
   1. The envelope's `basis` is the run's initial claim only: a new run stores it as revision 1 (actor
      `submitter.email`, or `submission` when that is empty); an identical retry (200) never changes it, whatever basis
-     it carries (the detail API's `meta` keeps the envelope as last uploaded, its `basis` included; the run's basis is
-     the summary's `basis`). After that the basis changes only through its edit (API), versioned like A8's target: a
+     it carries (`meta` never holds a basis: the run's basis is the summary's `basis`). After that the basis changes only through its edit (API), versioned like A8's target: a
      change names its `actor`, applies only at the revision the caller saw (else 409 with the current state) and is
      kept as an event; a restore names an earlier event and sets that value again as a new change. A run's basis and
      Report share one revision. Withdrawn runs stay editable.
   2. Report: one optional `report_url` per run (e.g. a main-based tuning run) and one per PR set (the set's effect
-     page), any http/https URL (artifact, Claude Doc, Confluence…) of at most 2048 characters with a host name, no
-     credentials and only RFC 3986 characters (anything else is refused, never repaired). It is stored as given,
+     page), any http/https URL (artifact, Claude Doc, Confluence…) of at most 2048 characters with a host name, a port
+     (if any) in 1..65535, no credentials and only RFC 3986 characters (anything else is refused, never repaired). It is stored as given,
      rendered as a plain link (`rel="noopener noreferrer"`) and set, cleared or restored only through its edit, never
-     by a submission. A PR set's Report stays when no run claims the set any more.
+     by a submission. A PR set's Report stays when no run claims the set any more. A run summary carries
+     both: `report_url` (the run's) and `prset_report_url` (its PR set's); pages show the run's, else the set's.
   3. A PR set's key is its members `owner/name#N` in stored order joined by `+`
-     (`apache/gluten#88+xcena-dev/xflare-analytics#1561`); a `prset` parameter takes the members in any order or
-     case and means the canonical key. Pages name a PR `#N` in `xcena-dev/xflare-analytics` and `<name>#N` elsewhere
+     (`apache/gluten#88+xcena-dev/xflare-analytics#1561`); a `prset` parameter, a `basis=prset:` filter and a `pr`
+     filter take members in any order or case and mean the canonical key. Pages name a PR `#N` in `xcena-dev/xflare-analytics` and `<name>#N` elsewhere
      (`gluten#88 + #1561`), a main basis `main · latest #N`, and link every PR to
      `https://github.com/<repo>/pull/<n>`, built from the parsed parts.
   4. PR workflow completion: the skill reads each member PR's body and records which run ids it lists (PR check, the
@@ -227,12 +227,15 @@ Computed on the server, never taken from the client.
   5. Filters: one Basis facet filter, `basis` = `main` | `pr` (every PR-based run) | `prset:<canonical key>` (exactly
      that set) | `-` (no basis), with `basis_t` tokens; and `pr=<owner/name#N>` (a run whose PR set has that PR; `-`
      = no PR set, i.e. no basis or main), a literal with no facet that a PR chip on the board sets and shows as a
-     removable chip. The default filter narrows neither.
+     removable chip. The default filter narrows neither. They replace the separate `prset` and `pr_t` filters of the
+     design (those parameters narrow nothing), and the hero's A3 fallback ignores them like any other filter: it is
+     the tab's fastest run whatever its basis.
   6. Hero history, per tab, filter and metric (`total` or `q1..q22`): every run on that metric's board as a point at
      its `run.finished_at`, and the heroes, a run being one when it beats every run that finished before it in the
      board's order. It is recomputed from today's eligible runs (no A3 fallback), so a withdrawal or a re-derivation
      rewrites it. `vs_target` uses the target's velox for the same metric; the goal applies to the Total only. A
-     `from`/`to` window keeps the hero it started with.
+     `from`/`to` window keeps the hero it started with. Past a budget (8 below) the series starts later, points and
+     heroes alike, and the hero in force at the new start enters with it.
   7. PR-set list: the PR sets of the tab's runs under the board's filter, each represented by its best total-eligible
      run in Total board order, sorted `best` (by that run, sets without one last), `number` (highest member PR first)
      or `recent` (latest finished run first). The PR-set page lists every run of the set on every tab; compare by PR
@@ -244,7 +247,8 @@ Computed on the server, never taken from the client.
   9. Storage: `user_version` 3 adds four tables (Storage) and changes no existing row. The setup is idempotent, so an
      upgrade interrupted anywhere is redone on the next start, and the number is set only after the tables exist. An
      older binary (going back a version) lowers the number, the tables stay (it neither reads nor writes them, so a
-     run it stores meanwhile gets no basis); this one raises it again.
+     run it stores meanwhile gets no basis); this one raises it again. The number is never lowered and nothing
+     branches on it: a database a newer binary marked keeps its number, every setup step is unconditional.
 - Reasons (`derived.ineligible_reasons`): causes shared by every query (A6's shared application, recording mode,
   incomplete repeat list, no completed repeat, artifact or bundle differing across repeats, and the A4 application
   checks) are listed once under `common`; `qN` lists only
@@ -316,7 +320,7 @@ reads no storage and still loads.
 
 | method, path | params / body | responses |
 |---|---|---|
-| `POST /api/leaderboard/submissions` | body = envelope; `?dry_run=1` also accepts a bare manifest | 201 created: receipt `{run_id, content_id, url, ranked_total, warnings}`; 200 existing: the receipt as first issued; dry run: 200 `{dry_run: true, run_id, content_id, url, ranked_total, tab_note, warnings, badges, ineligible_reasons, basis}` and nothing written (`basis` (A9) is the envelope's basis as it would be stored, in the run summary's form, `null` without one; `tab_note` is `null` for a pinned tab, else `SF X · codec is not a pinned tab: the first run stored at it creates its tab`; a dry run reads no store, so the note is advisory); 400 `{errors, warnings}` (validation) or `{errors}` (unparseable body); 409 `{errors, run_id, content_id}`; 413 over 8 MiB; 503 |
+| `POST /api/leaderboard/submissions` | body = envelope; `?dry_run=1` also accepts a bare manifest | 201 created: receipt `{run_id, content_id, url, ranked_total, warnings}`; 200 existing: the receipt as first issued; dry run: 200 `{dry_run: true, run_id, content_id, url, ranked_total, tab_note, warnings, badges, ineligible_reasons, basis}` and nothing written (`basis` (A9) is the envelope's basis normalized as a new run would store it, in the run summary's form, `null` without one (advisory: a run already stored keeps its own); `tab_note` is `null` for a pinned tab, else `SF X · codec is not a pinned tab: the first run stored at it creates its tab`; a dry run reads no store, so the note is advisory); 400 `{errors, warnings}` (validation) or `{errors}` (unparseable body); 409 `{errors, run_id, content_id}`; 413 over 8 MiB; 503 |
 | `POST /api/leaderboard/runs/<run_id>/withdraw` | `{"actor": str, "reason": str}`, both non-empty (no length cap) | 200 run summary (idempotent; the first withdrawal's actor/reason/time are kept); 400; 404 `unknown run_id`; 503 |
 | `GET /api/leaderboard/runs` | `sf` (any decimal scale factor; one with no runs lists nothing), `include_withdrawn=1`, and the board's filters with NO default (absent = any) | 200 `[run summary]`, oldest `finished_at` instant first (then `run_id`); 400 an `sf` that is not a decimal |
 | `GET /api/leaderboard/runs/<run_id>` | | 200 run summary + `derived`, `meta`, `manifest`; 404 `unknown run_id` |
@@ -327,11 +331,11 @@ reads no storage and still loads.
 | `POST /api/leaderboard/runs/<run_id>/basis` | `Content-Type: application/json`, `{"actor": str, "expected_revision": int, "basis": basis \| null}` or, instead of `basis`, `"restore": <event id>` (exactly one of them; null clears; `actor` non-empty, at most 256 characters once trimmed; §4 A9) | 200 the run's state `{run_id, revision, basis, report_url, updated_by, updated_at}` (`basis` as in the run summary; unchanged when it already is that value: no new revision); 400 (`restore: not a change of this basis` for an event that is not one of this run's basis changes); 403 `cross-site edit refused`; 404 `unknown run_id`; 409 `{errors, current}` (`changed meanwhile: reload and try again`) when the revision moved; 415 another content type; 503 |
 | `POST /api/leaderboard/runs/<run_id>/report_url` | as `/basis`, with `"report_url": URL \| null` (§4 A9; else `report_url: an http(s) URL of at most 2048 characters`) | as `/basis` (`restore: not a change of this report_url`) |
 | `GET /api/leaderboard/runs/<run_id>/history` | `before` (an event id: the next older page) | 200 the run's state plus `history`, its basis and Report changes newest first, at most 50, as `{event_id, field (basis\|report_url), revision, before, after, restored_from, actor, at}` (a basis in the run summary's form), and `more` (older changes remain); 400 `before: an event id`; 404 `unknown run_id` |
-| `GET /api/leaderboard/prset` | `prset` (a PR set key, members in any order or case), `before` | 200 `{prset (the canonical key), revision, report_url, updated_by, updated_at, history, more, label, prs, runs}` for any valid key, runs or not: `history` as the run's (field `report_url`); `prs` the members `{repo, number, key, url, label, check}`, `check` the latest body check `{repo, number, listed_count, body_sha256, source, checked_by, checked_at}` or null; `runs` every run whose basis is exactly this set, withdrawn ones included, tab by tab in the tabs' order, each tab's total-eligible runs first in board order, then the rest, each a run summary plus `tab`, `place` (null for the rest) and `completion` `{complete, members: [{key, label, status (listed\|not listed\|not checked), checked_at}]}`; 400 `prset: a PR set key (owner/name#N joined by '+', at most 16)` |
+| `GET /api/leaderboard/prset` | `prset` (a PR set key, members in any order or case), `before` | 200 `{prset (the canonical key), revision, report_url, updated_by, updated_at, history, more, label, prs, runs}` for any valid key, runs or not: `history` as the run's (field `report_url`); `prs` the members `{repo, number, key, url, label, check}`, `check` the latest body check `{repo, number, listed_count, body_sha256, source, checked_by, checked_at}` or null; `runs` every run whose basis is exactly this set, withdrawn ones included, tab by tab in the tabs' order, each tab's ranked runs (total-eligible, not withdrawn) first in board order, then the rest, each a run summary plus `tab`, `place` (null for the rest) and `completion` `{complete, members: [{key, label, status (listed\|not listed\|not checked), checked_at}]}`; 400 `prset: a PR set key (owner/name#N joined by '+', at most 16)` |
 | `POST /api/leaderboard/prset` | `?prset=<key>`; body as the run's `/report_url` | 200 the set's state `{prset, revision, report_url, updated_by, updated_at}`; 400 (a bad `prset` too); 403; 409; 415; 503 |
-| `POST /api/leaderboard/prs/<owner>/<name>/<number>/check` | `Content-Type: application/json`, `{"actor": str, "run_ids": [run id, ...], "body_sha256": 64 lowercase hex \| null, "source": str \| null}` (at most 1000 lowercase uuid4 run ids, not looked up; `source` at most 64 characters; the last two optional) | 200 the PR's check (as `check` above), which replaces the one before (§4 A9); 400; 403; 404 `unknown PR` (not a GitHub owner/name, or a number outside 1..2147483647); 415; 503 |
+| `POST /api/leaderboard/prs/<owner>/<name>/<number>/check` | `Content-Type: application/json`, `{"actor": str, "run_ids": [run id, ...], "body_sha256": 64 lowercase hex \| null, "source": str \| null}` (at most 1000 lowercase uuid4 run ids, not looked up; `source` 1 to 64 characters; the last two optional; a run id sent twice counts once) | 200 the PR's check (as `check` above), which replaces the one before (§4 A9); 400; 403; 404 `unknown PR` (not a GitHub owner/name, or a number outside 1..2147483647); 415; 503 |
 | `GET /api/leaderboard/prsets` | the board's `sf`, `codec` and filters (the default applies), `sort=best\|number\|recent` (default `best`) | 200 `{sf, codec, sort, filter, hero_run_id, prsets, truncated}`: each PR set of the tab's runs under the filter as `{prset, basis, report_url (the set's), run_count, eligible_count, last_finished_at, best, is_hero, vs_hero_pct}`, `best` its best total-eligible run `{run_id, url, finished_at, config_label, repeats, xflare_ms, velox_ms, speedup, vs_target}` or null, `vs_hero_pct` that run's total against the hero's (`hero_run_id`: the filtered board's hero, no A3 fallback); at most 200 sets (`truncated`); 400 as `/board` for the tab, or `sort: best, number or recent`; header `X-Leaderboard-Script` |
-| `GET /api/leaderboard/history` | the board's `sf`, `codec`, filters (the default applies; `from`/`to` window the series) and `metric` | 200 `{sf, codec, metric, filter, target, points, heroes, truncated}` (§4 A9): `target` `{run_id, url, source, problem, velox_ms (the target's velox for this metric), goal (Total only)}` or null; `points` every run on that board in finish order as `{run_id, url, finished_at, t (epoch ms), xflare_ms, y, hero}`; `heroes` `{run_id, url, finished_at, t, xflare_ms, y, vs_target, config_label, basis, basis_short, report_url, entering, delta_pct}` (`entering`: the hero the window started with; `delta_pct` against the hero before it); the newest 1000 points and 200 heroes (`truncated`); 400 as `/board` (the tab, `metric: total or q1..q22`); header `X-Leaderboard-Script` |
+| `GET /api/leaderboard/history` | the board's `sf`, `codec`, filters (the default applies; `from`/`to` window the series) and `metric` | 200 `{sf, codec, metric, filter, target, points, heroes, truncated}` (§4 A9): `target` `{run_id, url, source, problem, velox_ms (the target's velox for this metric), goal (Total only)}` or null; `points` every run on that board in finish order as `{run_id, url, finished_at, t (epoch ms), xflare_ms, y, hero}`; `heroes` `{run_id, url, finished_at, t, xflare_ms, y, vs_target, config_label, basis, report_url, prset_report_url, entering, delta_pct}` (`entering`: the hero in force where the shown series starts; `delta_pct` against the hero before it); the newest 1000 points and 200 heroes of the window, from one start (`truncated`); 400 as `/board` (the tab, `metric: total or q1..q22`); header `X-Leaderboard-Script` |
 | `GET /` | | 302 to `/b/xflare_leaderboard` |
 | `GET /b/xflare_leaderboard` | | page: tabs, hero chart, board, and under the board the `shared_runs` (A6) linked to their pages; a tab with no total-eligible run shows the empty hero, and a board with no rows says why; with a target (A8) the hero shows the target's velox total, the speedup vs target and the goal, its chart the target's velox per query (the same-run velox faint), the board's speedup column compares with the target (the same-run speedup in its tooltip), and on every tab, with or without a hero, the hero card shows a target line (the target and its run page, why a pinned target cannot serve, or that none is set or this view uses none) and a disclosure with the tab's target history, from which an earlier target can be pinned again; A9: Basis and Report columns (a PR set as chips, at most 3 plus `+N` with every member in the tooltip, each chip filtering the board by its PR and a small `↗` beside it opening the PR on GitHub; a main basis one chip to its latest PR on GitHub; "↗ Report" with the URL in its tooltip), Basis and Report rows on the hero card, the Basis filter and the removable PR chip, and two folded panels that load when opened and reload with the board: "Hero history — best so far" (time axis in UTC, a point per run, the stepped best line with each hero's basis as its label, speedup vs target on a second axis with the goal line on the Total, its own Total / Q1..Q22 tabs that follow the board's metric tab, a table of the heroes) and "PR sets on this tab" (the sort, and 2–4 checked sets compared by set) |
 | `GET /b/xflare_leaderboard/run/<run_id>` | | page: for a `shared` run (A6) a notice at the top ("shared application: engine order affects timings — this run is listed but never ranked (amendment A6)…") and its measured totals beside the reasons it is not ranked; argv, overrides, the contract's resource fields, toml input vs rendered diff, environment, per-repeat table (plus, for a `per-engine` run, each repeat's applications: engine, cleanup, app_id, artifact, bundle, started/finished, invocation), application mode, Spark settings (the state and where it came from, then `run.spark_conf` and `run.spark_conf_readback` as key → value tables, each "not recorded" when absent, "none ({})" when empty and "not a key/value object" when stored before A5 validated it), A7's settings in effect (each engine's `spark_conf_effective` and `xflare_parameters_effective` from its first application that recorded them, as key → value tables up to 500 keys), a velox cell that is "—" with its `velox_problems` as the tooltip, raw download, how to reproduce, withdraw, and (A8) "set as target" (asks for the actor and an optional goal) when the run can be its tab's target, or "clear target" when it is; (A9) the section "Basis & report (A9)": the basis chips (each to its PR on GitHub), for a PR set its PR-set page and the PR workflow (`complete`/`pending`, each member's check status), the Report, "basis 바꾸기…" and "Report 지정…" ("Report 바꾸기…" once set), and the edit history, newest 50 (`?before=` for older ones), with "이 값으로 되돌리기…" on every value other than the current one |
@@ -340,10 +344,10 @@ reads no storage and still loads.
 
 A run summary is `{run_id, content_id, url, sf, finished_at, submitter, total_eligible, repeats, totals, config,
 config_label, build, device_ids, device_count, host, badges, ineligible_reasons, withdrawn, withdrawal, basis,
-report_url}`. It is a display view: every uploaded string in it (`withdrawal.actor`/`reason` included) is cut to 512
+report_url, prset_report_url}`. It is a display view: every uploaded string in it (`withdrawal.actor`/`reason` included) is cut to 512
 characters plus "…", and `device_ids` holds at most 100 ids (`device_count` is the full count). A9: `basis` is
 `{kind: "pr", prset, label, prs: [{repo, number, key, url, label}]}`, `{kind: "main", repo, latest_pr, url, label}`
-or `null` (unknown), `report_url` the run's Report or `null`; neither is ever cut (the validator bounds them: 16 PRs,
+or `null` (unknown), `report_url` the run's Report or `null`, `prset_report_url` its PR set's; none is ever cut (the validator bounds them: 16 PRs,
 2048 characters), as a cut URL would lead elsewhere. `ineligible_reasons` is
 `{"common": [...]}`: the run's common reasons (§4), why no query of it can rank — for a shared run (A6) it starts
 with `shared application: engine order affects timings`; empty for a run whose queries can rank. Each reason is cut
@@ -449,7 +453,7 @@ Nothing in CI does this today. A job that wants its runs on the board would:
 - Besides `runs` and A8's `targets` / `target_events`, A9 (`user_version` 3; §4 A9 for the upgrade) keeps
   `run_attribution` (a run's basis and Report, one revision per run), `prset_attribution` (a PR set's Report),
   `attribution_events` (every change of either: field, revision, before, after, the event a restore copied, actor,
-  time) and `pr_checks` (each PR's latest body check). They hold what was sent, nothing derived.
+  time) and `pr_checks` (each PR's latest body check), as validated and normalized.
 - Every SQLite connection the service opens, reads included, is opened, used and closed under one process-wide
   lock, and so is the one-time setup (WAL mode, tables, `user_version`). Run the service as a single process;
   nothing else should open the DB read-write (`backup.py` opens it read-only).

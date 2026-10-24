@@ -190,15 +190,17 @@
   // ---- A9: basis, reports, edits ----------------------------------------------
   // A stored report URL is an http(s) URL the server validated; checked again here before it becomes an href.
   function safeHref(url) { return typeof url === 'string' && /^https?:\/\//.test(url) ? url : null; }
-  // "↗ Report", the URL in its tooltip; a dim "—" without one.
-  function reportLink(url) {
-    const href = safeHref(url);
+  // "↗ Report", the URL in its tooltip; without one, the run's PR set's Report (`setUrl`, said so in the tooltip);
+  // a dim "—" without either.
+  function reportLink(url, setUrl) {
+    const own = safeHref(url);
+    const href = own || safeHref(setUrl);
     if (!href) return el('span', 'lb-dim', '—');
     const a = el('a', 'lb-report', '↗ Report');
     a.href = href;
     a.rel = 'noopener noreferrer';
     a.target = '_blank';
-    a.title = href;
+    a.title = own ? href : `PR set Report: ${href}`;
     return a;
   }
   // A PR's GitHub page: the server builds it from the validated key on a fixed origin; anything else is no href.
@@ -521,7 +523,7 @@
       const meta = document.getElementById('hero-meta');
       meta.replaceChildren();
       kv(meta, 'Basis', basisNode(hero.basis, cfg.basis_chips, pickPr));
-      kv(meta, 'Report', reportLink(hero.report_url));
+      kv(meta, 'Report', reportLink(hero.report_url, hero.prset_report_url));
       kv(meta, 'Config', hero.config_label).title = configText(hero.config);
       kv(meta, 'Bundle', `${hero.config.bundle ?? '—'} (${hero.build.bundle_kind ?? '—'})`);
       kv(meta, 'Revision', hero.build.revision);
@@ -598,7 +600,7 @@
         tr.insertCell().appendChild(a);
         // A9: the basis chips (a click filters by that PR) and the run's report.
         tr.insertCell().appendChild(basisNode(r.basis, cfg.basis_chips, pickPr));
-        tr.insertCell().appendChild(reportLink(r.report_url));
+        tr.insertCell().appendChild(reportLink(r.report_url, r.prset_report_url));
         for (const [text, cls, title] of [[fmtMs(r.value.xflare_ms), 'num'], [fmtMs(r.value.velox_ms), 'num'],
                                           t ? [fmtX(r.value.vs_target),
                                                t.goal && r.value.vs_target >= t.goal ? 'num lb-goal-met' : 'num',
@@ -663,6 +665,9 @@
     let generation = 0;
     async function load() {
       const mine = ++generation;
+      // A9: the panels' answers in flight belong to the context this load leaves; none of them may draw.
+      heroHistoryGen++;
+      prsetsGen++;
       // Another tab: the shown history (and its buttons) belongs to the old one.
       if (targetPin && (state.sf !== targetPin.sf || state.codec !== targetPin.codec)) forgetHistory();
       renderTabs();
@@ -672,7 +677,7 @@
       try {
         resp = await fetch(`/api/leaderboard/board?${q}`);
       } catch (e) {
-        if (mine === generation) showStatus('board 를 불러오지 못했습니다.');
+        if (mine === generation) { showStatus('board 를 불러오지 못했습니다.'); clearPanels(); }
         return;
       }
       if (mine !== generation) return;
@@ -683,12 +688,13 @@
       const served = resp.headers.get('X-Leaderboard-Script');
       if (served ? served !== cfg.script : resp.ok) {
         showStatus('서버가 다른 버전으로 바뀌었습니다. 페이지를 새로고침하세요.');
+        clearPanels();
         return;
       }
       try {
         data = await resp.json();
       } catch (e) {
-        if (mine === generation) showStatus('board 를 불러오지 못했습니다.');
+        if (mine === generation) { showStatus('board 를 불러오지 못했습니다.'); clearPanels(); }
         return;
       }
       if (mine !== generation) return;
@@ -707,6 +713,7 @@
         renderTarget();
         renderHero(null);
         renderBoard({ metric: state.metric, eligible_count: 0, top: state.top, rows: [] });
+        clearPanels();
         return;
       }
       showStatus('');
@@ -725,19 +732,39 @@
       document.getElementById('lb-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
       // A9: the history follows the board's metric tab (until its own selector picks another); open panels reload.
       if (data.metric !== boardMetric) { boardMetric = data.metric; historyMetric = data.metric; }
-      if (historyBox.open) loadHistory();
-      if (prsetsBox.open) loadPrsets();
+      // A closed panel keeps nothing of the old context: opening it loads this one.
+      if (historyBox.open) loadHistory(); else clearHistory('');
+      if (prsetsBox.open) loadPrsets(); else clearPrsets('');
     }
 
     // ---- A9 panels: hero history and PR sets ----------------------------------
-    // Each fetch bumps its own generation, so only the newest answer draws; an answer for another script asks for a
-    // reload like the board's.
+    // Each fetch bumps its own generation, as does each board load and closing the panel, so only the newest answer
+    // for the board's current context draws; an answer for another script asks for a reload like the board's.
     const historyBox = document.getElementById('lb-history');
     const prsetsBox = document.getElementById('lb-prsets');
     const historyLog = document.getElementById('history-log');
     let boardMetric = null, historyMetric = state.metric, heroHistoryGen = 0, prsetsGen = 0, historyChart = null;
     const selectedSets = new Set();
     function pickPr(key) { state.filter.pr = key; load(); }
+
+    // A panel that has no answer for the board's context shows none: no table, chart or selection of another one.
+    function clearHistory(note) {
+      document.getElementById('lb-history-note').textContent = note;
+      document.getElementById('lb-history-col').textContent = 'Xflare';
+      document.querySelector('#lb-history-table tbody').replaceChildren();
+      if (historyChart) { historyChart.destroy(); historyChart = null; }
+    }
+    function clearPrsets(note) {
+      document.getElementById('lb-prsets-note').textContent = note;
+      document.querySelector('#lb-prsets-table tbody').replaceChildren();
+      selectedSets.clear();
+      updateSetCompare();
+    }
+    // A board load that draws no new board: the tabs and filter moved on, so the panels' old answers are not theirs.
+    function clearPanels() {
+      clearHistory('board 를 불러오지 못했습니다.');
+      clearPrsets('board 를 불러오지 못했습니다.');
+    }
 
     // The board's tab and filter, as the panels send them.
     function panelQuery(extra) {
@@ -779,7 +806,7 @@
       const r = await panelFetch(`/api/leaderboard/history?${panelQuery({ metric: historyMetric })}`,
                                  () => mine === heroHistoryGen);
       if (!r) return;
-      if (r.error) { document.getElementById('lb-history-note').textContent = r.error; return; }
+      if (r.error) { clearHistory(r.error); return; }
       renderHistory(r.data);
     }
 
@@ -814,8 +841,10 @@
           td.textContent = text;
           td.className = cls;
         }
-        tr.insertCell().appendChild(basisNode(h.basis, cfg.basis_chips, pickPr));
-        tr.insertCell().appendChild(reportLink(h.report_url));
+        const basisTd = tr.insertCell();
+        basisTd.className = 'lb-wrap-cell';
+        basisTd.appendChild(basisNode(h.basis, cfg.basis_chips, pickPr));
+        tr.insertCell().appendChild(reportLink(h.report_url, h.prset_report_url));
         tr.insertCell().textContent = h.config_label;
       }
       drawHistory(data, t);
@@ -828,13 +857,14 @@
       const font = { family: colors.font, size: 12 };
       const xs = data.points.map(p => p.t).concat(data.heroes.map(h => h.t));
       const xMin = Math.min(...xs), xMax = Math.max(...xs);
-      // The best so far holds until the next hero, then until the newest point.
+      // The best so far holds until the next hero, then until the newest point: Chart.js's stepped 'before' draws
+      // each interval at the value it starts with ('after' would draw the next hero's value over it).
       const steps = data.heroes.map(h => ({ x: h.t, y: h.y }));
       if (steps.length) steps.push({ x: xMax, y: steps[steps.length - 1].y });
       const datasets = [
         { type: 'scatter', label: 'eligible runs', data: data.points.map(p => ({ x: p.t, y: p.y })),
           backgroundColor: colors.velox, pointRadius: 3, yAxisID: 'y' },
-        { type: 'line', label: 'best so far (hero)', data: steps, stepped: 'after', borderColor: colors.xflare,
+        { type: 'line', label: 'best so far (hero)', data: steps, stepped: 'before', borderColor: colors.xflare,
           backgroundColor: colors.xflare, pointRadius: steps.map((_, i) => (i < data.heroes.length ? 4 : 0)),
           borderWidth: 2, yAxisID: 'y' },
       ];
@@ -850,7 +880,7 @@
       if (t) {
         const vs = data.heroes.map(h => ({ x: h.t, y: h.vs_target }));
         if (vs.length) vs.push({ x: xMax, y: vs[vs.length - 1].y });
-        datasets.push({ type: 'line', label: 'speedup vs target', data: vs, stepped: 'after', borderDash: [4, 3],
+        datasets.push({ type: 'line', label: 'speedup vs target', data: vs, stepped: 'before', borderDash: [4, 3],
                         borderColor: colors.series[3], backgroundColor: colors.series[3], pointRadius: 0,
                         borderWidth: 1.5, yAxisID: 'y2' });
         if (t.goal) {
@@ -862,18 +892,36 @@
                       title: { display: true, text: 'speedup vs target (×)', color: colors.tick, font },
                       ticks: { color: colors.tick, font }, grid: { display: false }, border: { display: false } };
       }
-      // Each hero point names its basis on the canvas (drawn text, never HTML).
-      const labels = data.heroes.map(h => shortBasis(h.basis, 2));
+      // Each hero point names its basis on the canvas (drawn text, never HTML): above the point, else below it,
+      // moved sideways to stay in the chart area; a label that fits neither way without overlapping one already drawn
+      // is left out (the table and the point's tooltip still name it).
+      const labels = data.heroes.map(h => shortBasis(h.basis, cfg.basis_chips));
       const heroLabels = {
         id: 'heroLabels',
         afterDatasetsDraw(chart) {
           const pts = chart.getDatasetMeta(1).data;
           const ctx = chart.ctx;
+          const area = chart.chartArea;
+          const drawn = [];
           ctx.save();
           ctx.font = `600 11px ${colors.font}`;
           ctx.fillStyle = colors.legend;
           ctx.textAlign = 'center';
-          labels.forEach((label, i) => { if (pts[i]) ctx.fillText(label, pts[i].x, pts[i].y - 9); });
+          labels.forEach((label, i) => {
+            if (!pts[i]) return;
+            const half = ctx.measureText(label).width / 2 + 2;
+            if (2 * half > area.right - area.left) return;
+            const x = Math.min(Math.max(pts[i].x, area.left + half), area.right - half);
+            // The text's baseline: 9 px above the point, or 20 px below it; the box spans 11 px above it and 2 below.
+            for (const y of [pts[i].y - 9, pts[i].y + 20]) {
+              const box = { l: x - half, r: x + half, t: y - 11, b: y + 2 };
+              if (box.t < area.top || box.b > area.bottom) continue;
+              if (drawn.some(d => box.l < d.r && d.l < box.r && box.t < d.b && d.t < box.b)) continue;
+              drawn.push(box);
+              ctx.fillText(label, x, y);
+              return;
+            }
+          });
           ctx.restore();
         },
       };
@@ -897,14 +945,15 @@
       const sort = document.getElementById('lb-prsets-sort').value || 'best';
       const r = await panelFetch(`/api/leaderboard/prsets?${panelQuery({ sort })}`, () => mine === prsetsGen);
       if (!r) return;
-      if (r.error) { document.getElementById('lb-prsets-note').textContent = r.error; return; }
+      if (r.error) { clearPrsets(r.error); return; }
       renderPrsets(r.data);
     }
 
     function renderPrsets(data) {
       const tbody = document.querySelector('#lb-prsets-table tbody');
       tbody.replaceChildren();
-      const keys = new Set(data.prsets.map(x => x.prset));
+      // Only a listed set with a best run can be compared: a selection of another tab or filter is dropped.
+      const keys = new Set(data.prsets.filter(x => x.best).map(x => x.prset));
       for (const k of [...selectedSets]) if (!keys.has(k)) selectedSets.delete(k);
       document.getElementById('lb-prsets-note').textContent =
         `${data.prsets.length}개 PR set · 대표 = 이 탭과 필터에서 best total-eligible run` +
@@ -929,6 +978,7 @@
         tr.insertCell().appendChild(box);
         // The set's own page; its chips filter the board as elsewhere.
         const setTd = tr.insertCell();
+        setTd.className = 'lb-wrap-cell';
         const page = el('a', 'lb-set-label', shortBasis(x.basis, cfg.basis_chips));
         page.href = prsetHref(cfg.board, x.prset);
         page.title = x.basis.prs.map(p => p.key).join('\n');
@@ -963,8 +1013,8 @@
       location.href = `${cfg.board}/compare?${panelQuery({ prsets: [...selectedSets].join(',') })}`;
     });
     document.getElementById('lb-prsets-sort').addEventListener('change', loadPrsets);
-    historyBox.addEventListener('toggle', () => { if (historyBox.open) loadHistory(); });
-    prsetsBox.addEventListener('toggle', () => { if (prsetsBox.open) loadPrsets(); });
+    historyBox.addEventListener('toggle', () => { if (historyBox.open) loadHistory(); else heroHistoryGen++; });
+    prsetsBox.addEventListener('toggle', () => { if (prsetsBox.open) loadPrsets(); else prsetsGen++; });
     bindLogToggle(historyLog, () => historyChart);
 
     document.getElementById('lb-from').addEventListener('change', e => { state.filter.from = e.target.value; load(); });

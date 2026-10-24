@@ -18,6 +18,7 @@ import itertools
 import json
 import math
 import os
+import re
 from fractions import Fraction
 
 from flask import Blueprint, Response, abort, current_app, jsonify, redirect, render_template, request, url_for
@@ -26,7 +27,7 @@ from . import aggregate, repro
 from .display import (BADGE_CLASS, BENCH_ID, BUDGET, DEFAULT_CODEC, EFFECTIVE_ITEMS, FACET_VALUES, HISTORY_EVENTS,
                       HISTORY_HEROES, HISTORY_POINTS, MATRIX_REPEATS, PREVIEW_CHARS, PREVIEW_ITEMS, SCALAR_CHARS,
                       as_float, badge_class, basis_view, cut, default_filter, facet_option, facet_token,
-                      fallback_notice, norm_date, pr_label, pr_url, short_basis, tab_label, tab_note, tabs)
+                      fallback_notice, norm_date, pr_label, pr_url, tab_label, tab_note, tabs)
 from .schema import (APPLICATION_SETTINGS, CODECS, DEFAULT_REPO, MANIFEST_SCHEMA, MAX_BODY_BYTES,
                      MAX_REPORT_URL_CHARS, SCALE_FACTOR_RE, UUID4_RE, BadJSON, normalize_basis, parse_json_strict, parse_prset_key,
                      parse_repo, parse_report_url, pr_key, prset_key, validate_basis, validate_envelope,
@@ -323,6 +324,8 @@ def _run_summary(row: dict) -> dict:
         # A9: bounded by the validator (MAX_PRS members, MAX_REPORT_URL_CHARS), so never cut: a cut URL would lead elsewhere.
         "basis": basis_view(row["attribution"]["basis"]),
         "report_url": row["attribution"]["report_url"],
+        # The Report of the run's PR set (A9), shown where the run has none of its own.
+        "prset_report_url": row["attribution"]["prset_report_url"],
     }
 
 
@@ -366,9 +369,23 @@ def _filter(defaults: dict) -> dict:
             v = str(defaults[k])
         if k in ("from", "to"):
             v = norm_date(v)
+        elif k in _BASIS_PARAMS and v:
+            v = _canonical_basis_literal(k, v)
         if v:
             flt[k] = v
     return flt
+
+
+def _canonical_basis_literal(key: str, value: str) -> str:
+    """A9: a `pr` key or a `basis=prset:<key>` in any case or member order names the canonical key (GitHub matches
+    names in any case); anything else stays as sent and is compared exactly."""
+    if key == "pr":
+        members = parse_prset_key(value) if "+" not in value else None
+        return prset_key(members) if members else value
+    if value.startswith(PRSET_PREFIX):
+        members = parse_prset_key(value[len(PRSET_PREFIX):])
+        return PRSET_PREFIX + prset_key(members) if members else value
+    return value
 
 
 def _tokens() -> dict:
@@ -379,7 +396,7 @@ def _tokens() -> dict:
 def _values_of(row: dict, key: str) -> set:
     """The full values one run takes for a facet filter. A null config value
     is spelled "-", as matches_filter compares it; so is a run without a basis
-    (A9), or without a PR set for `pr` / `prset`."""
+    (A9) and, for `pr`, a run without a PR set."""
     d = row["derived"]
     if key in _BASIS_PARAMS:
         basis = row["attribution"]["basis"]
@@ -623,6 +640,8 @@ def api_set_target(sf, codec):
 ACTOR_CHARS = 256
 CHECK_RUN_IDS = 1000
 _EVENT_ID_MAX = 2 ** 63 - 1
+# ASCII digits only: str.isdigit() also takes "²" (which int() refuses) and "٣" (which it reads as 3).
+_DIGITS = re.compile(r"[0-9]{1,19}")
 
 
 def _event_id(value) -> int | None:
@@ -703,15 +722,20 @@ def _before_param() -> int | None:
     raw = request.args.get("before")
     if not raw:
         return None
-    before = _event_id(int(raw)) if raw.isdigit() and len(raw) <= 19 else None
+    before = _event_id(int(raw)) if _DIGITS.fullmatch(raw) else None
     if before is None:
         raise _BadBody("before: an event id")
     return before
 
 
-def _history(kind: str, subject: str) -> dict:
+def _history_with_state(kind: str, subject: str) -> tuple[dict, dict]:
+    """A subject's stored state and, from the same read, its API view with one page of history."""
     state, events, more = store_for(_cfg()).attribution_history(kind, subject, _before_param(), HISTORY_EVENTS)
-    return {**_state_view(kind, subject, state), "history": [_event_view(e) for e in events], "more": more}
+    return state, {**_state_view(kind, subject, state), "history": [_event_view(e) for e in events], "more": more}
+
+
+def _history(kind: str, subject: str) -> dict:
+    return _history_with_state(kind, subject)[1]
 
 
 @bp.post("/api/leaderboard/runs/<run_id>/basis")
@@ -766,7 +790,8 @@ def _prset_detail(key: str) -> dict:
     for tab in tabs(cfg, [r["derived"] for r in rows]):
         here = [r for r in rows if aggregate.tab_of(r["derived"]) == (tab["sf"], tab["codec"])]
         ranked = aggregate.rank(here, "total")
-        rest = [r for r in here if r["run_id"] not in {x["run_id"] for x in ranked}]
+        ranked_ids = {x["run_id"] for x in ranked}
+        rest = [r for r in here if r["run_id"] not in ranked_ids]
         for place, r in enumerate(ranked + rest, 1):
             runs.append({**_run_summary(r), "tab": tab, "place": place if place <= len(ranked) else None,
                          "completion": _completion(r, checks)})
@@ -872,7 +897,7 @@ def api_history():
     """A9: the tab's hero over time for one metric (the Total or one query) under the board's filter (no fallback):
     every run ranked on that board as a point, and the runs that led it when they finished, recomputed from today's
     eligible runs. A from/to window keeps the hero it entered with; the newest points and heroes of the window are
-    kept. vs_target compares with the target's velox for the same metric; the goal applies to the Total only."""
+    kept, from one start. vs_target compares with the target's velox for the same metric; the goal applies to the Total only."""
     cfg, store = _cfg(), store_for(_cfg())
     view = _board_view(cfg, store)
     metric = request.args.get("metric") or "total"
@@ -885,9 +910,22 @@ def api_history():
     day = lambda r: r["derived"]["finished_at"][:10]
     inside = lambda r: window.get("from", "") <= day(r) and ("to" not in window or day(r) <= window["to"])
     points = [r for r in timeline if inside(r)]
-    entering = [h for h in heroes if "from" in window and day(h) < window["from"]][-1:]
-    shown = entering + [h for h in heroes if inside(h)]
+    before = [h for h in heroes if "from" in window and day(h) < window["from"]]
+    shown = [h for h in heroes if inside(h)]
     hero_ids = {h["run_id"] for h in heroes}
+    # Budgets: the window's newest HISTORY_POINTS points and HISTORY_HEROES heroes. A cut moves where the shown series
+    # starts, for points and heroes alike, and the hero in force there enters with it (so a cut never leaves points
+    # without the best line they were measured against).
+    order = lambda r: (aggregate.utc_key(r["derived"]["finished_at"]), r["run_id"])
+    starts = ([order(points[-HISTORY_POINTS])] if len(points) > HISTORY_POINTS else []) + (
+        [order(shown[-(HISTORY_HEROES - 1)])] if len(shown) + bool(before) > HISTORY_HEROES else [])
+    if starts:
+        start = max(starts)
+        before += [h for h in shown if order(h) < start]
+        shown = [h for h in shown if order(h) >= start]
+        points = [r for r in points if order(r) >= start]
+    entering = before[-1:]
+    shown = entering + shown
 
     def values_of(r):
         return _with_vs_target(aggregate.metric_values(r["derived"], metric), target_velox)
@@ -900,8 +938,9 @@ def api_history():
                            "y": as_float(values["xflare_ms"]), "vs_target": values["vs_target"],
                            "config_label": cut(h["derived"]["config_label"]),
                            "basis": basis_view(h["attribution"]["basis"]),
-                           "basis_short": short_basis(basis_view(h["attribution"]["basis"])),
-                           "report_url": h["attribution"]["report_url"], "entering": bool(entering) and h is entering[0],
+                           "report_url": h["attribution"]["report_url"],
+                           "prset_report_url": h["attribution"]["prset_report_url"],
+                           "entering": bool(entering) and h is entering[0],
                            "delta_pct": previous and _delta_pct(
                                values["xflare_ms"], aggregate.metric_values(previous["derived"], metric)["xflare_ms"])})
         previous = h
@@ -915,9 +954,9 @@ def api_history():
         "points": [{"run_id": r["run_id"], "url": _url(r["run_id"]), "finished_at": r["derived"]["finished_at"],
                     "t": _epoch_ms(r["derived"]["finished_at"]), "xflare_ms": point_ms(r),
                     "y": as_float(point_ms(r)), "hero": r["run_id"] in hero_ids}
-                   for r in points[-HISTORY_POINTS:]],
-        "heroes": out_heroes[-HISTORY_HEROES:],
-        "truncated": len(points) > HISTORY_POINTS or len(out_heroes) > HISTORY_HEROES,
+                   for r in points],
+        "heroes": out_heroes,
+        "truncated": bool(starts),
     })
 
 
@@ -928,7 +967,7 @@ def api_pr_check(owner, name, number):
     if refused:
         return refused
     repo = parse_repo(f"{owner}/{name}")
-    n = int(number) if number.isdigit() and len(number) <= 10 else 0
+    n = int(number) if _DIGITS.fullmatch(number) else 0
     if repo is None or not 1 <= n <= 2 ** 31 - 1:
         return _errors(404, "unknown PR")
     doc = _json_object()
@@ -942,7 +981,7 @@ def api_pr_check(owner, name, number):
     if sha is not None and not (isinstance(sha, str) and len(sha) == 64 and all(c in "0123456789abcdef" for c in sha)):
         errors.append("body_sha256: 64 lowercase hex or null")
     if source is not None and not (isinstance(source, str) and 0 < len(source) <= 64):
-        errors.append("source: a string of at most 64 characters or null")
+        errors.append("source: a string of 1 to 64 characters or null")
     if errors:
         return _errors(400, *errors)
     check = store_for(_cfg()).record_check(repo, n, sorted(set(run_ids)), sha, source, actor.strip())
@@ -1190,15 +1229,17 @@ def run_page(run_id):
     repeats = sorted(manifest["repeats"], key=lambda r: r["index"])
     sf, codec = aggregate.tab_of(d)
     pin = _pin(store.get_target(sf, codec), sf, codec)
-    history = _history("run", run_id)
+    # One snapshot for what the page shows, the edit prompts' starting values and the revision they apply at.
+    state, history = _history_with_state("run", run_id)
+    row = {**row, "attribution": {**row["attribution"], **state}}
     return render_template(
         "leaderboard_run.html",
         benchmark=cfg, row=row, d=d, meta=row["meta"] or {},
         m=manifest, summary=_run_summary(row),
         # A9: basis, report URL, the PR workflow's status and the edit history (with restore) of this run.
         attribution=history, completion=_completion(row, _member_checks(store, [row])),
-        edit_data={"run_id": run_id, "revision": history["revision"], "basis": row["attribution"]["basis"],
-                   "report_url": history["report_url"], "default_repo": DEFAULT_REPO},
+        edit_data={"run_id": run_id, "revision": state["revision"], "basis": state["basis"],
+                   "report_url": state["report_url"], "default_repo": DEFAULT_REPO},
         # A6: the run page's notice for a shared-application run (stored and listed, never ranked).
         shared_reason=aggregate.SHARED_REASON if d["config"]["application_mode"] == "shared" else None,
         per_query=per_query,

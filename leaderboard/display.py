@@ -28,7 +28,7 @@ MATRIX_REPEATS = 10
 # A7: a recorded settings map (hundreds of keys) is read key by key, so its list budget is wider than PREVIEW_ITEMS.
 EFFECTIVE_ITEMS = 500
 DEFAULT_CODEC = "snappy"
-# A9: a basis on the board, a chart label or a list shows this many PR chips plus "+N"; pages with room show all.
+# A9: a basis on the board, a chart label or a Basis option shows this many PRs plus "+N"; pages with room show all.
 BASIS_CHIPS = 3
 # A9: edit histories are read 50 changes at a time (older ones stay stored); the hero history keeps the newest points
 # and heroes of its window; the PR-set list stops at FACET_VALUES sets.
@@ -134,7 +134,7 @@ def facet_option(value: str, key: str | None = None) -> dict:
     label = FACET_LABELS.get(key, {}).get(value)
     members = parse_prset_key(value[len("prset:"):]) if key == "basis" and value.startswith("prset:") else None
     if members:
-        label = "PR set " + " + ".join(pr_label(m["repo"], m["number"]) for m in members)
+        label = cut("PR set " + short_basis(basis_view({"kind": "pr", "prs": members})))
     return {"token": facet_token(value), "label": label or cut(value)}
 
 
@@ -162,7 +162,7 @@ def basis_view(basis: dict | None) -> dict | None:
 
 
 def short_basis(view: dict | None) -> str:
-    """A basis in at most BASIS_CHIPS PR labels plus "+N" (chart labels, lists)."""
+    """A basis in at most BASIS_CHIPS PR labels plus "+N" (the Basis filter's options)."""
     if view is None:
         return "—"
     if view["kind"] == "main":

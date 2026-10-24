@@ -45,6 +45,7 @@ _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
 _PR_KEY = re.compile(r"([^#+]+)#([1-9][0-9]{0,9})")
 # A report URL: http(s), a host name (no credentials), RFC 3986 characters only (a pasted non-ASCII path arrives
 # percent-encoded); anything else is refused rather than repaired.
+_PORT = re.compile(r"https?://[^/?#]*:([0-9]+)")
 _REPORT_URL = re.compile(r"https?://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::[0-9]{1,5})?(?:[/?#][A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*)?")
 
 
@@ -149,8 +150,9 @@ class _V:
                 getattr(self, kind).append(f"... {n} more {kind}")
         return self.errors, self.warnings
 
-    def obj(self, v, path, required, nullable=False, optional=()) -> dict | None:
-        """Object with the `required` keys and optionally the `optional` ones (any other key warns).
+    def obj(self, v, path, required, nullable=False, optional=(),
+            unknown="unknown property (kept, not interpreted)") -> dict | None:
+        """Object with the `required` keys and optionally the `optional` ones (any other key warns with `unknown`).
         Returns it only when it is a dict."""
         if v is None and nullable:
             return None
@@ -162,7 +164,7 @@ class _V:
                 self.err(f"{path}.{k}", "missing")
         for k in v:
             if k not in required and k not in optional:
-                self.warn(f"{path}.{_snip(k)}", "unknown property (kept, not interpreted)")
+                self.warn(f"{path}.{_snip(k)}", unknown)
         return v
 
     def sub(self, d, k, path, required, nullable=False, optional=()) -> dict | None:
@@ -545,6 +547,9 @@ def parse_report_url(value) -> str | None:
     """A report URL as stored (unchanged), or None when it is not an http(s) URL this service accepts."""
     if not isinstance(value, str) or len(value) > MAX_REPORT_URL_CHARS or not _REPORT_URL.fullmatch(value):
         return None
+    port = _PORT.match(value)
+    if port and not 0 < int(port.group(1)) <= 65535:
+        return None
     return value
 
 
@@ -556,7 +561,7 @@ def _basis(v: _V, b, p: str):
         return
     kind = b.get("kind")
     if kind == "pr":
-        b = v.obj(b, p, ("kind", "prs"))
+        b = v.obj(b, p, ("kind", "prs"), unknown=_BASIS_UNKNOWN)
         prs = v.list_(b, "prs", p)
         if isinstance(b.get("prs"), list) and not 1 <= len(prs) <= MAX_PRS:
             v.err(f"{p}.prs", f"1 to {MAX_PRS} PRs, got {len(prs)}")
@@ -564,7 +569,7 @@ def _basis(v: _V, b, p: str):
         seen = set()
         for i, m in enumerate(prs):
             pm = f"{p}.prs[{i}]"
-            m = v.obj(m, pm, ("repo", "number"))
+            m = v.obj(m, pm, ("repo", "number"), unknown=_BASIS_UNKNOWN)
             if m is None:
                 continue
             repo = _repo_field(v, m, pm)
@@ -576,12 +581,16 @@ def _basis(v: _V, b, p: str):
                     v.err(pm, f"duplicate PR {pr_key(repo, number)}")
                 seen.add((repo, number))
     elif kind == "main":
-        b = v.obj(b, p, ("kind", "repo", "latest_pr"))
+        b = v.obj(b, p, ("kind", "repo", "latest_pr"), unknown=_BASIS_UNKNOWN)
         _repo_field(v, b, p)
         if "latest_pr" in b and not _pr_number(b["latest_pr"]):
             v.err(f"{p}.latest_pr", f"{_snip(b['latest_pr'])} is not a PR number (1..{PR_NUMBER_MAX})")
     else:
         v.err(f"{p}.kind", f"{_snip(kind)} not one of pr|main")
+
+
+# The stored basis is the normalized one (normalize_basis): an unknown key in it is not kept anywhere.
+_BASIS_UNKNOWN = "unknown property (ignored, not stored)"
 
 
 def _repo_field(v: _V, d: dict, p: str) -> str | None:

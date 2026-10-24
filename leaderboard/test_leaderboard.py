@@ -2034,6 +2034,42 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.edit("run", mf.fixture_uuid(9), "report_url", None, "b", 0), ("unknown", None))
         self.assertEqual(len(self.store.attribution_history("run", run)[1]), 2)
 
+    def test_a_stale_identical_edit_is_a_conflict(self):
+        """A9: a lost-response retry of an edit that landed (same value, the old revision) is a conflict that shows
+        the current state, not "unchanged"; a later body check of a PR replaces the earlier one."""
+        run = self.store.put(self.env())[1]["run_id"]
+        self.assertEqual(self.store.edit("run", run, "report_url", "https://x.example/", "a", 0)[0], "set")
+        status, state = self.store.edit("run", run, "report_url", "https://x.example/", "a", 0)
+        self.assertEqual((status, state["revision"], state["report_url"]), ("conflict", 1, "https://x.example/"))
+        self.assertEqual(len(self.store.attribution_history("run", run)[1]), 1)
+        self.store.record_check("a/b", 1, [], None, None, "x")
+        self.store.record_check("a/b", 1, [run], None, "file", "y")
+        self.assertEqual((self.store.checks([("a/b", 1)])[("a/b", 1)]["run_ids"],
+                          self.store.checks([("a/b", 1)])[("a/b", 1)]["checked_by"]), ([run], "y"))
+
+    def test_user_version_is_raised_never_lowered_and_follows_the_tables(self):
+        """A9: a database another binary marked newer keeps its number; a failed setup leaves the old number and
+        the next open finishes it."""
+        import sqlite3
+        db = os.path.join(self.tmp, "leaderboard.sqlite3")
+        run = self.store.put(self.env())[1]["run_id"]
+        with sqlite3.connect(db) as c:
+            c.execute("PRAGMA user_version = 4")
+        Store(self.tmp).list_runs()
+        with sqlite3.connect(db) as c:
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 4)
+            c.executescript("DROP TABLE pr_checks; DROP TABLE attribution_events; PRAGMA user_version = 2;")
+        broken = store_mod._SCHEMA.replace("CREATE TABLE IF NOT EXISTS pr_checks", "CREATE TABLE IF NOT EXISTS pr_checks (x")
+        with mock.patch.object(store_mod, "_SCHEMA", broken), self.assertRaises(StorageUnavailable):
+            Store(self.tmp).list_runs()
+        with sqlite3.connect(db) as c:
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 2)
+        again = Store(self.tmp)
+        self.assertEqual(again.edit("run", run, "basis", {"kind": "main", "repo": "a/b", "latest_pr": 1}, "a", 0)[0], "set")
+        again.record_check("a/b", 1, [run], None, None, "a")
+        with sqlite3.connect(db) as c:
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
+
     def test_best_so_far(self):
         """A9: heroes are the record breakers in finish order under the board's order: an equal later run with the same
         repeats does not displace, one with more repeats does; withdrawn and ineligible runs are never points."""

@@ -276,7 +276,8 @@ class Store:
     def _commit_row(self, envelope: dict, cid: str, derived: dict, receipt: dict, basis: dict | None = None) -> str:
         """``basis`` (A9, normalized) is the run's initial claim: stored with a new run, never by a retry."""
         manifest = envelope["manifest"]
-        meta = json.dumps({k: v for k, v in envelope.items() if k != "manifest"}, ensure_ascii=False)
+        # The A9 basis is kept apart (run_attribution), so a retry's envelope cannot show another one beside it.
+        meta = json.dumps({k: v for k, v in envelope.items() if k not in ("manifest", "basis")}, ensure_ascii=False)
         now = _now()
         mutable = (meta, envelope["submitter"]["email"], json.dumps(derived, ensure_ascii=False),
                    aggregate.DERIVE_VERSION, int(derived["total_eligible"]), now)
@@ -386,10 +387,16 @@ class Store:
         return sorted(rows, key=lambda r: (aggregate.utc_key(r["finished_at"]), r["run_id"]))
 
     def _attach(self, conn: sqlite3.Connection, rows: list[dict], sql: str, args) -> None:
-        """Every row gains "attribution" (A9): its basis, report URL and their revision, as ``_state`` reads them."""
+        """Every row gains "attribution" (A9): its basis, report URL and their revision, as ``_state`` reads them,
+        plus "prset_report_url", the report URL of the run's PR set."""
         found = {r["run_id"]: r for r in conn.execute(sql, args).fetchall()}
+        reports = {r["prset"]: self._dec(r["report_url_json"]) for r in conn.execute(
+            "SELECT prset, report_url_json FROM prset_attribution WHERE report_url_json IS NOT NULL")}
         for row in rows:
-            row["attribution"] = self._state("run", found.get(row["run_id"]))
+            state = self._state("run", found.get(row["run_id"]))
+            basis = state["basis"]
+            key = schema.prset_key(basis["prs"]) if basis and basis["kind"] == "pr" else None
+            row["attribution"] = {**state, "prset_report_url": reports.get(key)}
 
     def _read_manifest(self, cid: str) -> dict:
         data = self._read_raw_file(cid)
