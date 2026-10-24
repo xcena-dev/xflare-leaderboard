@@ -3827,6 +3827,9 @@ class TestA9Styles(unittest.TestCase):
         # Round 4: in an inline-flex chip the label is a flex item that break-word never breaks (a 100-character name
         # ran past a 390 px page); the chip must be a block box for break-word to apply.
         self.assertEqual(chip["display"], "inline-block")
+        # Round 5: an edit history line (a grid item) may hold one long actor or chip: it may shrink and break.
+        events = self.rules[".lb-target-events > li"]
+        self.assertEqual((events["min-width"], events["overflow-wrap"]), ("0", "anywhere"))
         self.assertEqual(self.rules[".lb-chips"]["max-width"], "100%")
         pr = self.rules[".lb-pr-filter"]
         self.assertEqual((pr["flex-wrap"], pr["max-width"]), ("wrap", "100%"))
@@ -4233,6 +4236,13 @@ class TestA9Round3(A9Case):
         query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
         board = self.board("?" + query)
         self.assertEqual((board["sf"], len(board["rows"])), ("1000", 1))
+        # Round 5: a withdrawn run on an earlier tab does not take the link there.
+        gone = self.submit(basis=prs({"repo": "a/b", "number": 7}))
+        kept = self.submit(basis=prs({"repo": "a/b", "number": 7}), sf="1000")
+        self.c.post(f"/api/leaderboard/runs/{gone}/withdraw", json={"actor": "a", "reason": "b"})
+        page = self.c.get(f"{LB}/prset?prset={quote('a/b#7')}").get_data(as_text=True)
+        query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
+        self.assertEqual([r["run_id"] for r in self.board("?" + query)["rows"]], [kept])
 
     def test_a_default_filter_on_basis_keeps_the_prset_page(self):
         """Round 4: a configured default filter naming `basis` does not break the PR-set page's board link."""

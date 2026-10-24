@@ -1357,8 +1357,12 @@ def prset_page():
         abort(404)
     key = prset_key(members)
     detail, history = _prset_detail(key), _page_history("prset", key)[1]
-    # "Only this set" on the board: on the tab of its first listed run, the default filter lifted (sent empty).
-    tab = {"sf": detail["runs"][0]["tab"]["sf"], "codec": detail["runs"][0]["tab"]["codec"]} if detail["runs"] else {}
+    # "Only this set" on the board: on the tab of its first ranked run (else its first run that is not withdrawn,
+    # else its first), the default filter lifted (sent empty).
+    runs = detail["runs"]
+    first = next((r for r in runs if r["place"]),
+                 next((r for r in runs if not r["withdrawn"]), runs[0] if runs else None))
+    tab = {"sf": first["tab"]["sf"], "codec": first["tab"]["codec"]} if first else {}
     board = url_for("leaderboard.board_page",
                     **{**{k: "" for k in default_filter(_cfg())}, **tab, "basis": PRSET_PREFIX + key})
     return render_template("leaderboard_prset.html", benchmark=_cfg(), key=key, detail=detail, attribution=history,

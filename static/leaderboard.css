@@ -79,6 +79,8 @@ td.lb-empty { text-align: center; padding: var(--space-6) var(--space-5); white-
 .lb-target-history { margin: var(--space-2) 0 var(--space-3); font-size: var(--text-sm); color: var(--text-2); }
 .lb-target-history summary { cursor: pointer; color: var(--text-3); }
 .lb-target-events { margin: var(--space-2) 0 0; padding-left: var(--space-5); display: grid; gap: var(--space-1); }
+/* A grid item is at least as wide as its longest word: an actor or a chip of one long token would widen the page. */
+.lb-target-events > li { min-width: 0; overflow-wrap: anywhere; }
 .lb-target-events .lb-btn { height: 24px; margin-left: var(--space-2); padding: 0 8px; font-size: var(--text-xs); }
 
 .lb-kv {
