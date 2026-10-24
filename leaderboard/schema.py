@@ -33,6 +33,19 @@ _HEX40 = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 UUID4_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")  # use fullmatch
 SCALE_FACTOR_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
+# A9: a run's basis (a PR set, or main) and the report URLs kept beside runs and PR sets.
+MAX_PRS = 16
+PR_NUMBER_MAX = 2 ** 31 - 1
+DEFAULT_REPO = "xcena-dev/xflare-analytics"
+MAX_REPORT_URL_CHARS = 2048
+# GitHub's own rules: an owner is letters, digits and inner hyphens (39 at most); a repository name is letters, digits,
+# '.', '_' and '-', never only dots (no '.' or '..' path segment). Keys are lower case: GitHub matches names that way.
+_OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
+_REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
+_PR_KEY = re.compile(r"([^#+]+)#([1-9][0-9]{0,9})")
+# A report URL: http(s), a host name (no credentials), RFC 3986 characters only (a pasted non-ASCII path arrives
+# percent-encoded); anything else is refused rather than repaired.
+_REPORT_URL = re.compile(r"https?://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::[0-9]{1,5})?(?:[/?#][A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*)?")
 
 
 class BadJSON(ValueError):
@@ -487,10 +500,123 @@ def _span(v: _V, d, path, keys):
                 v.str_(d, k, path)
 
 
+def parse_repo(value) -> str | None:
+    """``owner/name`` as its canonical lower-case key, or None when it is not one."""
+    if not isinstance(value, str):
+        return None
+    owner, sep, name = value.partition("/")
+    if not sep or not _OWNER.fullmatch(owner) or not _REPO_NAME.fullmatch(name) or not name.strip("."):
+        return None
+    return value.lower()
+
+
+def pr_key(repo: str, number: int) -> str:
+    return f"{repo}#{number}"
+
+
+def prset_key(prs: list[dict]) -> str:
+    """The canonical key of a normalized PR set: its members' keys in order, joined by '+'."""
+    return "+".join(pr_key(m["repo"], m["number"]) for m in prs)
+
+
+def _pr_number(value) -> bool:
+    return type(value) is int and 1 <= value <= PR_NUMBER_MAX
+
+
+def parse_prset_key(text) -> list[dict] | None:
+    """A PR set key (``owner/name#N+owner/name#M``, any order or case) as its normalized members, or None when it is
+    not one: 1..MAX_PRS valid members, no PR twice."""
+    if not isinstance(text, str) or not text or text.count("+") >= MAX_PRS:
+        return None
+    members = []
+    for part in text.split("+"):
+        m = _PR_KEY.fullmatch(part)
+        repo = parse_repo(m.group(1)) if m else None
+        if repo is None or not _pr_number(int(m.group(2))):
+            return None
+        members.append({"repo": repo, "number": int(m.group(2))})
+    normal = sorted(members, key=lambda x: (x["repo"], x["number"]))
+    if len({(x["repo"], x["number"]) for x in normal}) != len(normal):
+        return None
+    return normal
+
+
+def parse_report_url(value) -> str | None:
+    """A report URL as stored (unchanged), or None when it is not an http(s) URL this service accepts."""
+    if not isinstance(value, str) or len(value) > MAX_REPORT_URL_CHARS or not _REPORT_URL.fullmatch(value):
+        return None
+    return value
+
+
+def _basis(v: _V, b, p: str):
+    """A9: ``{"kind": "pr", "prs": [{repo, number}, ...]}`` (1..MAX_PRS PRs, none twice) or
+    ``{"kind": "main", "repo", "latest_pr"}``."""
+    if not isinstance(b, dict):
+        v.err(p, f"expected object, got {_type_name(b)}")
+        return
+    kind = b.get("kind")
+    if kind == "pr":
+        b = v.obj(b, p, ("kind", "prs"))
+        prs = v.list_(b, "prs", p)
+        if isinstance(b.get("prs"), list) and not 1 <= len(prs) <= MAX_PRS:
+            v.err(f"{p}.prs", f"1 to {MAX_PRS} PRs, got {len(prs)}")
+            return
+        seen = set()
+        for i, m in enumerate(prs):
+            pm = f"{p}.prs[{i}]"
+            m = v.obj(m, pm, ("repo", "number"))
+            if m is None:
+                continue
+            repo = _repo_field(v, m, pm)
+            number = m.get("number")
+            if "number" in m and not _pr_number(number):
+                v.err(f"{pm}.number", f"{_snip(number)} is not a PR number (1..{PR_NUMBER_MAX})")
+            elif repo is not None and number is not None:
+                if (repo, number) in seen:
+                    v.err(pm, f"duplicate PR {pr_key(repo, number)}")
+                seen.add((repo, number))
+    elif kind == "main":
+        b = v.obj(b, p, ("kind", "repo", "latest_pr"))
+        _repo_field(v, b, p)
+        if "latest_pr" in b and not _pr_number(b["latest_pr"]):
+            v.err(f"{p}.latest_pr", f"{_snip(b['latest_pr'])} is not a PR number (1..{PR_NUMBER_MAX})")
+    else:
+        v.err(f"{p}.kind", f"{_snip(kind)} not one of pr|main")
+
+
+def _repo_field(v: _V, d: dict, p: str) -> str | None:
+    if "repo" not in d:
+        return None
+    repo = parse_repo(d["repo"])
+    if repo is None:
+        v.err(f"{p}.repo", f"{_snip(d['repo'])} is not a GitHub owner/name")
+    return repo
+
+
+def validate_basis(b, path: str = "basis") -> list[str]:
+    """Errors of a basis given on its own (the edit endpoint); warnings are dropped there."""
+    v = _V()
+    _basis(v, b, path)
+    return v.result()[0]
+
+
+def normalize_basis(b: dict) -> dict:
+    """A validated basis in its stored form: repository keys lower case, PRs sorted by (repo, number), unknown keys
+    dropped."""
+    if b["kind"] == "main":
+        return {"kind": "main", "repo": parse_repo(b["repo"]), "latest_pr": b["latest_pr"]}
+    prs = sorted(({"repo": parse_repo(m["repo"]), "number": m["number"]} for m in b["prs"]),
+                 key=lambda m: (m["repo"], m["number"]))
+    return {"kind": "pr", "prs": prs}
+
+
 def _envelope(v: _V, e):
-    e = v.obj(e, "$", ("schema", "manifest", "submitter", "note", "isolation_claim", "producer", "environment"))
+    e = v.obj(e, "$", ("schema", "manifest", "submitter", "note", "isolation_claim", "producer", "environment"),
+              optional=("basis",))
     if e is None:
         return
+    if "basis" in e:
+        _basis(v, e["basis"], "$.basis")
     if "schema" in e and e["schema"] != SUBMISSION_SCHEMA:
         v.err("$.schema", f"expected {SUBMISSION_SCHEMA!r}, got {_snip(e['schema'])}")
     if "manifest" in e:

@@ -23,6 +23,7 @@ import threading
 import time
 import tracemalloc
 import unittest
+from datetime import timedelta
 from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -1990,7 +1991,7 @@ class StoreTests(unittest.TestCase):
         import sqlite3
         c = sqlite3.connect(os.path.join(self.tmp, "leaderboard.sqlite3"))
         self.assertEqual(c.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
         c.close()
 
     def test_v1_database_gains_the_target_tables(self):
@@ -1999,15 +2000,55 @@ class StoreTests(unittest.TestCase):
         run_id = self.store.put(self.env())[1]["run_id"]
         import sqlite3
         c = sqlite3.connect(os.path.join(self.tmp, "leaderboard.sqlite3"))
-        c.executescript("DROP TABLE target_events; DROP TABLE targets; PRAGMA user_version = 1;")
+        c.executescript("DROP TABLE target_events; DROP TABLE targets; DROP TABLE run_attribution;"
+                        " DROP TABLE prset_attribution; DROP TABLE attribution_events; DROP TABLE pr_checks;"
+                        " PRAGMA user_version = 1;")
         c.close()
         s = Store(self.tmp)
         self.assertEqual(s.get(run_id)["run_id"], run_id)
         self.assertIsNone(s.get_target("100", "snappy"))
         self.assertEqual(s.set_target("100", "snappy", run_id, None, "a", 0)[0], "set")
         c = sqlite3.connect(os.path.join(self.tmp, "leaderboard.sqlite3"))
-        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
         c.close()
+
+    def test_basis_edit_and_its_event_are_one_transaction(self):
+        """A9: a failed event write leaves the field and revision as they were (and a failed field write adds no
+        event); the submission's initial claim is revision 1 with its event."""
+        env = self.env()
+        env["basis"] = {"kind": "pr", "prs": [{"repo": "B/c", "number": 2}, {"repo": "a/b", "number": 1}]}
+        run = self.store.put(env)[1]["run_id"]
+        state, events, more = self.store.attribution_history("run", run)
+        self.assertEqual((state["basis"]["prs"][0]["repo"], state["revision"], len(events), more), ("a/b", 1, 1, False))
+        import sqlite3
+        db = os.path.join(self.tmp, "leaderboard.sqlite3")
+        with sqlite3.connect(db) as c:
+            c.execute("ALTER TABLE attribution_events RENAME TO gone")
+        with self.assertRaises(StorageUnavailable):
+            self.store.edit("run", run, "report_url", "https://x.example/", "a", 1)
+        with sqlite3.connect(db) as c:
+            c.execute("ALTER TABLE gone RENAME TO attribution_events")
+            self.assertEqual(c.execute("SELECT revision, report_url_json FROM run_attribution").fetchall(), [(1, None)])
+        self.assertEqual(self.store.edit("run", run, "report_url", "https://x.example/", "a", 1)[0], "set")
+        self.assertEqual(self.store.edit("run", run, "report_url", "https://x.example/", "b", 2)[0], "unchanged")
+        self.assertEqual(self.store.edit("run", mf.fixture_uuid(9), "report_url", None, "b", 0), ("unknown", None))
+        self.assertEqual(len(self.store.attribution_history("run", run)[1]), 2)
+
+    def test_best_so_far(self):
+        """A9: heroes are the record breakers in finish order under the board's order: an equal later run with the same
+        repeats does not displace, one with more repeats does; withdrawn and ineligible runs are never points."""
+        def r(n, ms, minutes, repeats=3, withdrawn=False, **kw):
+            env = mf.build_envelope(mf.build_manifest(run_id=mf.fixture_uuid(n), elapsed=const_elapsed(ms),
+                                                      repeats=repeats, started_at=mf.T0 + timedelta(minutes=minutes),
+                                                      **kw))
+            return row(env, withdrawn)
+        rows = [r(1, 500, 0), r(2, 600, 100), r(3, 400, 200), r(4, 400, 300), r(5, 400, 400, repeats=5),
+                r(6, 100, 500, withdrawn=True), r(7, 50, 600, record_answers=True)]
+        timeline, heroes = agg.best_so_far(rows)
+        self.assertEqual([x["run_id"] for x in timeline], [mf.fixture_uuid(n) for n in (1, 2, 3, 4, 5)])
+        self.assertEqual([x["run_id"] for x in heroes], [mf.fixture_uuid(n) for n in (1, 3, 5)])
+        self.assertEqual([x["run_id"] for x in agg.best_so_far(rows, "q4")[1]], [mf.fixture_uuid(n) for n in (1, 3, 5)])
+        self.assertEqual(agg.best_so_far([], "q1"), ([], []))
 
     def test_target_history_keeps_the_latest_50(self):
         """The history read lists at most 50 changes, newest first; every change stays stored."""

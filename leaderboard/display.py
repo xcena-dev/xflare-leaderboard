@@ -17,7 +17,7 @@ from decimal import Decimal
 
 from . import aggregate
 from .repro import MAX_ARGS, MAX_CHARS
-from .schema import CODECS
+from .schema import CODECS, DEFAULT_REPO, parse_prset_key, pr_key, prset_key
 
 BENCH_ID = "xflare_leaderboard"
 SCALAR_CHARS = 512
@@ -28,15 +28,24 @@ MATRIX_REPEATS = 10
 # A7: a recorded settings map (hundreds of keys) is read key by key, so its list budget is wider than PREVIEW_ITEMS.
 EFFECTIVE_ITEMS = 500
 DEFAULT_CODEC = "snappy"
+# A9: a basis on the board, a chart label or a list shows this many PR chips plus "+N"; pages with room show all.
+BASIS_CHIPS = 3
+# A9: edit histories are read 50 changes at a time (older ones stay stored); the hero history keeps the newest points
+# and heroes of its window; the PR-set list stops at FACET_VALUES sets.
+HISTORY_EVENTS = 50
+HISTORY_POINTS = 1000
+HISTORY_HEROES = 200
 BUDGET = {"scalar_chars": SCALAR_CHARS, "preview_chars": PREVIEW_CHARS, "preview_items": PREVIEW_ITEMS,
-          "facet_values": FACET_VALUES, "effective_items": EFFECTIVE_ITEMS}
+          "facet_values": FACET_VALUES, "effective_items": EFFECTIVE_ITEMS, "basis_chips": BASIS_CHIPS,
+          "history_events": HISTORY_EVENTS, "history_points": HISTORY_POINTS, "history_heroes": HISTORY_HEROES}
 # Badge text is uploaded-derived; its colour class comes from this fixed map, for the server-rendered pages
 # (``badge_class``) and, through the board page's data block, the board script. ``offload:*`` badges are dim.
 BADGE_CLASS = {"reproducible": "b-good", "partial": "b-warn", "dev bundle": "b-warn", "booking overlap": "b-bad",
                "overlap unknown": "b-dim", "spark conf": "b-warn", aggregate.SHARED_BADGE: "b-warn"}
 # Facet options whose bare value would not say what choosing it does (README §4, A5).
 FACET_LABELS = {"spark_conf": {"default": "default Spark settings only", "custom": "custom (--spark-conf)",
-                               "unknown": "unknown (spark_conf unreadable)"}}
+                               "unknown": "unknown (spark_conf unreadable)"},
+                "basis": {"pr": "PR-based (all)", "main": "main", "-": "unknown (no basis)"}}
 
 
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -122,7 +131,44 @@ def facet_token(value: str) -> str:
 def facet_option(value: str, key: str | None = None) -> dict:
     """A selectable facet value of filter ``key``: the token selects it, the
     label (FACET_LABELS, else the value cut for display) names it."""
-    return {"token": facet_token(value), "label": FACET_LABELS.get(key, {}).get(value) or cut(value)}
+    label = FACET_LABELS.get(key, {}).get(value)
+    members = parse_prset_key(value[len("prset:"):]) if key == "basis" and value.startswith("prset:") else None
+    if members:
+        label = "PR set " + " + ".join(pr_label(m["repo"], m["number"]) for m in members)
+    return {"token": facet_token(value), "label": label or cut(value)}
+
+
+def pr_label(repo: str, number: int) -> str:
+    """A PR as chips name it: ``#N`` in the default repository, else ``<name>#N`` (the key is in the tooltip)."""
+    return f"#{number}" if repo == DEFAULT_REPO else f"{repo.split('/', 1)[1]}#{number}"
+
+
+def pr_url(repo: str, number: int) -> str:
+    """The PR on GitHub, built from parts the parser accepted (never from submitted URL text)."""
+    return f"https://github.com/{repo}/pull/{number}"
+
+
+def basis_view(basis: dict | None) -> dict | None:
+    """A stored basis as the API and pages show it (A9); every member is there (at most MAX_PRS)."""
+    if basis is None:
+        return None
+    if basis["kind"] == "main":
+        repo, n = basis["repo"], basis["latest_pr"]
+        return {"kind": "main", "repo": repo, "latest_pr": n, "url": pr_url(repo, n),
+                "label": f"main · latest {pr_label(repo, n)}"}
+    prs = [{"repo": m["repo"], "number": m["number"], "key": pr_key(m["repo"], m["number"]),
+            "url": pr_url(m["repo"], m["number"]), "label": pr_label(m["repo"], m["number"])} for m in basis["prs"]]
+    return {"kind": "pr", "prset": prset_key(basis["prs"]), "prs": prs, "label": " + ".join(p["label"] for p in prs)}
+
+
+def short_basis(view: dict | None) -> str:
+    """A basis in at most BASIS_CHIPS PR labels plus "+N" (chart labels, lists)."""
+    if view is None:
+        return "—"
+    if view["kind"] == "main":
+        return view["label"]
+    labels = [p["label"] for p in view["prs"]]
+    return " + ".join(labels[:BASIS_CHIPS]) + (f" +{len(labels) - BASIS_CHIPS}" if len(labels) > BASIS_CHIPS else "")
 
 
 def fallback_notice(flt: dict, default: dict) -> str:
