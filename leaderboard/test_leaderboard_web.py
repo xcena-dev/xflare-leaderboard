@@ -1202,11 +1202,19 @@ global.fetch = (url, init) => new Promise((res, rej) => pending.push({ url, init
 const alerts = [], prompts = [...(cfg.prompts || [])];
 global.prompt = () => (prompts.length ? prompts.shift() : null);
 global.alert = m => { alerts.push(String(m)); };
+let throwsLeft = cfg.chartThrows || 0;
+// A browser logs an exception that ends an async handler; node would stop the process instead.
+const rejections = [];
+process.on('unhandledRejection', e => { rejections.push(String(e && e.message)); });
 global.Chart = class {
+  // As Chart.js: a chart registers on its canvas before it draws, and a canvas takes one chart until destroyed.
   constructor(canvas, conf) {
-    this.options = conf.options; this.datasets = conf.data.datasets; this.plugins = conf.plugins || [];
+    if (Chart.getChart(canvas)) throw new Error('Canvas is already in use');
+    this.canvas = canvas; this.options = conf.options; this.datasets = conf.data.datasets; this.plugins = conf.plugins || [];
     this.destroyed = false; charts.push(this);
+    if (conf.plugins && throwsLeft > 0) { throwsLeft--; throw new Error('draw failed'); }
   }
+  static getChart(canvas) { return charts.find(c => c.canvas === canvas && !c.destroyed); }
   update() { if (this.destroyed) problems.push('update on a destroyed chart'); }
   destroy() { this.destroyed = true; }
 };
@@ -1286,7 +1294,7 @@ const tick = () => new Promise(r => setTimeout(r, 5));
     // A9: each table row's cell texts and links, the history panel's active metric, where a click navigated.
     boardRows: rows('#lb-board tbody'), historyRows: rows('#lb-history-table tbody'),
     prsetRows: rows('#lb-prsets-table tbody'), location: location.href || null,
-    historyNote: (byId['lb-history-note'] || {}).textContent,
+    historyNote: (byId['lb-history-note'] || {}).textContent, rejections,
     buttons: all.filter(e => e.tagName === 'button').map(b => ({ text: String(b.textContent), title: String(b.title || '') })), prsetsNote: (byId['lb-prsets-note'] || {}).textContent,
     heroMeta: byId['hero-meta'] ? { text: flat(byId['hero-meta']), hrefs: hrefs(byId['hero-meta']),
                                     titles: titles(byId['hero-meta']) } : null,
@@ -1304,11 +1312,12 @@ class TestBoardScript(WebCase):
     """The board page script under controlled timing: stale answers never win, an answer for another script never
     renders, one log toggle drives the chart."""
 
-    def drive(self, steps, responses, meta=None, search="", prompts=(), label_draws=()):
+    def drive(self, steps, responses, meta=None, search="", prompts=(), label_draws=(), chart_throws=0):
         """Answers name the page's own script unless meta[key] gives other headers (names in lower case)."""
         node = page_script_node()
         data = self.page_data()
         cfg = {"js": os.path.join(ROOT, "static", "leaderboard.js"), "data": data, "steps": steps,
+               "chartThrows": chart_throws,
                "responses": responses, "meta": meta or {}, "search": search, "prompts": list(prompts),
                "headers": {"x-leaderboard-script": json.loads(data["lb-page-data"])["script"]},
                "labelDraws": list(label_draws)}
@@ -3713,6 +3722,15 @@ class TestA9BoardScript(WebCase):
                          self.responses)
         [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
         self.assertEqual(chart["xMin"], min(p["t"] for p in json.loads(self.responses["hist"])["points"]))
+
+    def test_a_failed_history_draw_never_blocks_the_next(self):
+        """Round 8: a draw that throws inside Chart.js leaves its chart on the canvas; the next draw destroys it first
+        (Chart.getChart) instead of failing with "Canvas is already in use"."""
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"},
+                          {"click": "Q3"}, {"answer": 2, "with": "hist3"}], self.responses, chart_throws=1)
+        history = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+        self.assertEqual([c["destroyed"] for c in history], [True, False])
+        self.assertEqual(out["rejections"], ["draw failed"])                         # the first draw only
 
     def test_the_chart_start_survives_a_bad_from_and_a_cut(self):
         """Round 7: an impossible `from` (2026-10-00) never reaches the chart as NaN, and after a budget cut the chart
