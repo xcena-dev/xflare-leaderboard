@@ -245,7 +245,8 @@ Computed on the server, never taken from the client.
      or `recent` (latest finished run first). The PR-set page lists every run of the set on every tab; compare by PR
      set compares the representatives.
   8. Budgets (`display.py`; the edit limits in `web.py`): a basis on a board row shows at most 2 PR chips plus `+N`, on the
-     hero card, a chart label or a Basis option 3 (`+N` names the rest in its tooltip; detail pages show all), an edit history 50 changes per page, the hero history the newest
+     hero card, the hero-history table, the PR-set list, a chart label or a Basis option 3 (a chip row's `+N` names
+     the rest in its tooltip; detail pages show all), an edit history 50 changes per page, the hero history the newest
      1000 points and 200 heroes of its window, the PR-set list 200 sets; an A9 edit's `actor` is at most 256 characters, a PR
      check at most 1000 run ids.
   9. Storage: `user_version` 3 adds four tables (Storage) and changes no existing row. The setup is idempotent, so an

@@ -3531,10 +3531,11 @@ class TestA9BoardScript(WebCase):
         self.assertEqual([h for h in five["hrefs"] if "github" in h],
                          [f"https://github.com/a/b/pull/{n}" for n in (1, 2)])    # each chip's ↗
         self.assertIn("a/b#3\na/b#4\na/b#5", five["titles"])                       # "+3" names the rest
+        self.assertEqual([r["text"][3] for r in out["boardRows"]].count("—"), 2)      # no Report of its own or its set's
 
     def test_board_row_cells(self):
         """The board's 11 cells: the compare box in the rank cell, the devices under the run, the mode and engines
-        under the config, the repeats as the first badge."""
+        under the config, the repeats as the first badge, the whole submitter in its cell's tooltip."""
         out = self.drive([{"answer": 0, "with": "board"}], self.responses)
         for row in out["boardRows"]:
             self.assertEqual(len(row["text"]), 11)
@@ -3542,7 +3543,7 @@ class TestA9BoardScript(WebCase):
             self.assertRegex(row["text"][1], r"^\d{4}-\d\d-\d\d \d\d:\d\d device \S")
             self.assertTrue(row["text"][7].endswith("per-engine · velox, xflare"), row["text"][7])
             self.assertRegex(row["text"][9], r"^x\d+ ")
-        self.assertEqual([r["text"][3] for r in out["boardRows"]].count("—"), 2)
+            self.assertIn(row["text"][8], row["titles"])
 
     def test_only_github_pr_urls_become_hrefs(self):
         """A9: the page makes an href of a PR only from a https://github.com/<repo>/pull/<n> URL; a tampered answer's

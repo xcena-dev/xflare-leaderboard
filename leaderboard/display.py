@@ -29,8 +29,9 @@ MATRIX_REPEATS = 10
 # A7: a recorded settings map (hundreds of keys) is read key by key, so its list budget is wider than PREVIEW_ITEMS.
 EFFECTIVE_ITEMS = 500
 DEFAULT_CODEC = "snappy"
-# A9: a basis on the hero card, a chart label or a Basis option shows this many PRs plus "+N", a board row
-# BOARD_BASIS_CHIPS (the board fits a 1440 px screen); "+N" names the rest in its tooltip, and pages with room show all.
+# A9: a basis on the hero card, the hero-history table, the PR-set list, a chart label or a Basis option shows this
+# many PRs plus "+N", a board row BOARD_BASIS_CHIPS (the board fits a 1440 px screen); a chip row's "+N" names the rest
+# in its tooltip, and pages with room show all.
 BASIS_CHIPS = 3
 BOARD_BASIS_CHIPS = 2
 # A9: edit histories are read 50 changes at a time (older ones stay stored); the hero history keeps the newest points
