@@ -237,7 +237,8 @@ Computed on the server, never taken from the client.
      board's order. It is recomputed from today's eligible runs (no A3 fallback), so a withdrawal or a re-derivation
      rewrites it. `vs_target` uses the target's velox for the same metric; the goal applies to the Total only. A
      `from`/`to` window keeps the hero it started with. Past a budget (8 below) the series starts later, points and
-     heroes alike, and the hero in force at the new start enters with it.
+     heroes alike, and the hero in force at the new start enters with it. The chart draws an entering hero from where
+     the shown series starts (`from`, else its first point); its table row keeps its own finish time.
   7. PR-set list: the PR sets of the tab's runs under the board's filter, each represented by its best total-eligible
      run in Total board order, sorted `best` (by that run, sets without one last), `number` (highest member PR first)
      or `recent` (latest finished run first). The PR-set page lists every run of the set on every tab; compare by PR

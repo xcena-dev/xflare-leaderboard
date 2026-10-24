@@ -863,11 +863,15 @@
       if (typeof Chart === 'undefined' || !data.points.length) return;
       const colors = chartColors();
       const font = { family: colors.font, size: 12 };
-      const xs = data.points.map(p => p.t).concat(data.heroes.map(h => h.t));
+      // The hero a window (or a budget cut) entered with is drawn where the shown series starts, not at its own,
+      // possibly much older, finish (the table keeps that): `from` at 00:00 UTC, else the first shown point.
+      const start = data.filter && data.filter.from ? Date.parse(`${data.filter.from}T00:00:00Z`) : data.points[0].t;
+      const heroX = h => (h.entering ? Math.max(h.t, start) : h.t);
+      const xs = data.points.map(p => p.t).concat(data.heroes.map(heroX));
       const xMin = Math.min(...xs), xMax = Math.max(...xs);
       // The best so far holds until the next hero, then until the newest point: Chart.js's stepped 'before' draws
       // each interval at the value it starts with ('after' would draw the next hero's value over it).
-      const steps = data.heroes.map(h => ({ x: h.t, y: h.y }));
+      const steps = data.heroes.map(h => ({ x: heroX(h), y: h.y }));
       if (steps.length) steps.push({ x: xMax, y: steps[steps.length - 1].y });
       const datasets = [
         { type: 'scatter', label: 'eligible runs', data: data.points.map(p => ({ x: p.t, y: p.y })),
@@ -886,7 +890,7 @@
              ticks: { color: colors.tick, font }, grid: { color: colors.grid }, border: { display: false } },
       };
       if (t) {
-        const vs = data.heroes.map(h => ({ x: h.t, y: h.vs_target }));
+        const vs = data.heroes.map(h => ({ x: heroX(h), y: h.vs_target }));
         if (vs.length) vs.push({ x: xMax, y: vs[vs.length - 1].y });
         datasets.push({ type: 'line', label: 'speedup vs target', data: vs, stepped: 'before', borderDash: [4, 3],
                         borderColor: colors.series[3], backgroundColor: colors.series[3], pointRadius: 0,

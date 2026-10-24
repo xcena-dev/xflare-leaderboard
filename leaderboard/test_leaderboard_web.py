@@ -14,6 +14,7 @@ page-script checks instead, for the auto-updater's self-check).
 """
 from __future__ import annotations
 
+import datetime
 import errno
 import hashlib
 import html
@@ -1292,7 +1293,7 @@ const tick = () => new Promise(r => setTimeout(r, 5));
     setCompare: { disabled: !!compareBtn.disabled, text: compareBtn.textContent }, labelDraws,
     historyMetric: ((byId['lb-history-metrics'] || { children: [] }).children.find(b => b.className.includes('active')) || {}).textContent,
     charts_all: charts.map(c => c.datasets.map(d => ({ label: d.label, data: d.data }))),
-    chartInfo: charts.map(c => ({ destroyed: c.destroyed, x: c.options.scales.x.type,
+    chartInfo: charts.map(c => ({ destroyed: c.destroyed, x: c.options.scales.x.type, xMin: c.options.scales.x.min,
                                   stepped: c.datasets.map(d => d.stepped ?? null),
                                   plugins: c.plugins.map(p => p.id) })) }));
 })();
@@ -3693,6 +3694,26 @@ class TestA9BoardScript(WebCase):
         self.assertEqual(out["prsetsNote"], "leaderboard storage unavailable")
         self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
 
+    def test_an_entering_hero_is_drawn_where_the_window_starts(self):
+        """Round 6: with `from`, the x axis starts at the window, not at the entering hero's old finish; without a
+        window it starts at the first point as before."""
+        old = self.submit(basis=prs(P), elapsed=flat_elapsed(100), started_at=at(-1440 * 300))
+        newer = self.submit(elapsed=flat_elapsed(900), started_at=at(1440 * 30))
+        day = self.c.get(f"/api/leaderboard/runs/{newer}").get_json()["finished_at"][:10]
+        hist = self.c.get(f"/api/leaderboard/history?from={day}").get_data(as_text=True)
+        self.assertEqual([h["run_id"] for h in json.loads(hist)["heroes"]], [old])
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "win"}],
+                         {**self.responses, "win": hist})
+        [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+        start = int(datetime.datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()) * 1000
+        self.assertGreaterEqual(chart["xMin"], start)
+        steps = [d for d in out["charts_all"][-1] if d["label"] == "best so far (hero)"][0]["data"]
+        self.assertEqual(steps[0]["x"], start)
+        out = self.drive([{"answer": 0, "with": "board"}, {"open": "lb-history"}, {"answer": 1, "with": "hist"}],
+                         self.responses)
+        [chart] = [c for c in out["chartInfo"] if "heroLabels" in c["plugins"]]
+        self.assertEqual(chart["xMin"], min(p["t"] for p in json.loads(self.responses["hist"])["points"]))
+
     def test_a_board_reload_drops_a_set_selection_at_once(self):
         out = self.drive(self.SETS_PICKED + [{"tab": ["lb-metric-tabs", "Q3"]}], self.responses)
         self.assertEqual(out["setCompare"], {"disabled": True, "text": "선택한 PR set 비교 (0/2–4)"})
@@ -4243,6 +4264,12 @@ class TestA9Round3(A9Case):
         page = self.c.get(f"{LB}/prset?prset={quote('a/b#7')}").get_data(as_text=True)
         query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
         self.assertEqual([r["run_id"] for r in self.board("?" + query)["rows"]], [kept])
+        # Round 6: a ranked run wins over an earlier tab's run that is listed but not ranked (shared application).
+        self.submit(basis=prs({"repo": "a/b", "number": 8}), application_mode="shared")
+        ranked = self.submit(basis=prs({"repo": "a/b", "number": 8}), sf="1000")
+        page = self.c.get(f"{LB}/prset?prset={quote('a/b#8')}").get_data(as_text=True)
+        query = html.unescape(re.search(r'href="([^"]*)">board 에서 이 set 만 보기', page).group(1)).split("?", 1)[1]
+        self.assertEqual([r["run_id"] for r in self.board("?" + query)["rows"]], [ranked])
 
     def test_a_default_filter_on_basis_keeps_the_prset_page(self):
         """Round 4: a configured default filter naming `basis` does not break the PR-set page's board link."""
